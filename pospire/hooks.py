@@ -324,6 +324,7 @@ fixtures = [
 					"Sales Invoice-custom_deleted_pos_items",
 					"POS Profile-custom_assortment",
 					"POS Profile-custom_denomination",
+					"POS Profile-custom_allow_negative_stock",
 				),
 			]
 		],
