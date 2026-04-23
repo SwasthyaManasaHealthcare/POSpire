@@ -743,9 +743,6 @@
 									>
 										<template v-slot:item="{ props, item }">
 											<v-list-item v-bind="props">
-												<v-list-item-title
-													v-html="item.raw.batch_no"
-												></v-list-item-title>
 												<v-list-item-subtitle
 													v-html="
 														`Available QTY  '${item.raw.batch_qty}' - Expiry Date ${item.raw.expiry_date}`
@@ -1085,6 +1082,16 @@
 					<div class="d-flex justify-center">
 						<v-col cols="12" class="pa-0">
 							<v-btn
+								v-if="hasBatchOrSerialStockIssue()"
+								block
+								class="btn-primary-action pay-button ma-1"
+								elevation="4"
+								@click="openAddStockDialog"
+							>
+								<v-icon start size="20">mdi-plus-box</v-icon>
+								<span class="pay-text">{{ __("Add to Stock") }}</span>
+								</v-btn>
+							<v-btn
 								block
 								class="btn-primary-action pay-button ma-1"
 								elevation="4"
@@ -1100,6 +1107,10 @@
 				</v-col>
 			</v-row>
 		</v-card>
+	<AddStockDialog 
+	ref="addStockDialog"
+	@stock-added="refreshItems"
+	 />
 	</div>
 </template>
 
@@ -1111,6 +1122,7 @@ import Customer from "./Customer.vue";
 import ApprovalDialog from "./ApprovalDialog.vue";
 import { toast } from "vue3-toastify";
 import { datetime } from "@/utils/datetime";
+import AddStockDialog from "./AddStockDialog.vue";
 
 export default {
 	mixins: [format, hardwareUtils],
@@ -1194,6 +1206,7 @@ export default {
 	components: {
 		Customer,
 		ApprovalDialog,
+		AddStockDialog,
 	},
 
 	computed: {
@@ -1241,6 +1254,43 @@ export default {
 
 	methods: {
 		// total field
+		hasBatchOrSerialStockIssue() {
+			if (!this.pos_profile?.custom_allow_add_to_stock_at_pos) return false;
+			return this.items.some((item) => {
+				return (
+					(item.has_serial_no || item.has_batch_no) &&
+					(item.actual_qty == null || item.actual_qty < item.qty)
+				);
+			});
+		},
+		openAddStockDialog() {
+			const item = this.items.find((item) => {
+			const stock = item.available_qty ?? item.actual_qty ?? 0;
+
+			return (
+			(item.has_serial_no || item.has_batch_no) &&
+			stock < item.qty
+			);
+		});
+
+		if (!item) return;
+
+		this.$refs.addStockDialog.open({
+			item_code: item.item_code,
+			item_name: item.item_name,
+			has_serial_no: item.has_serial_no,
+			has_batch_no: item.has_batch_no,
+			qty: item.qty,
+			warehouse: item.warehouse || this.pos_profile?.warehouse,
+		});
+		},
+		async refreshItems() {
+			if (!this.items?.length) return;
+			if (typeof this.update_items_details === "function") {
+				await this.update_items_details(this.items);
+			}
+			this.items = [...this.items];
+		},
 		updateItemTotal(item, newTotal) {
 			if (!item || item.qty <= 0) return;
 			newTotal = newTotal.srcElement.value;

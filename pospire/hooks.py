@@ -325,6 +325,7 @@ fixtures = [
 					"POS Profile-custom_assortment",
 					"POS Profile-custom_denomination",
 					"POS Profile-custom_allow_negative_stock",
+					"POS Profile-custom_allow_add_to_stock_at_pos",
 				),
 			]
 		],

@@ -2220,3 +2220,63 @@ def get_sales_invoice_child_table(sales_invoice: str, sales_invoice_item: str):
 	parent_doc = frappe.get_doc("Sales Invoice", sales_invoice)
 	child_doc = frappe.get_doc("Sales Invoice Item", {"parent": parent_doc.name, "name": sales_invoice_item})
 	return child_doc
+
+
+@frappe.whitelist()
+def create_pos_stock_entry(
+	item_code,
+	qty,
+	warehouse,
+	serial_nos=None,
+	batch_no=None,
+	expiry_date=None,
+):
+	if not item_code or not qty or not warehouse:
+		frappe.throw("Missing required fields")
+	qty = float(qty)
+
+	if serial_nos:
+		serial_list = [s.strip() for s in serial_nos.split("\n") if s.strip()]
+		if len(serial_list) != int(qty):
+			frappe.throw("Serial count must match quantity")
+		serial_nos = "\n".join(serial_list)
+
+	if batch_no:
+		if not frappe.db.exists("Batch", batch_no):
+			batch_doc = frappe.get_doc(
+				{
+					"doctype": "Batch",
+					"batch_id": batch_no,
+					"item": item_code,
+					"expiry_date": expiry_date,
+				}
+			)
+			batch_doc.insert(ignore_permissions=True)
+	stock_entry = frappe.get_doc(
+		{
+			"doctype": "Stock Entry",
+			"stock_entry_type": "Material Receipt",
+			"company": frappe.defaults.get_user_default("Company"),
+			"items": [
+				{
+					"item_code": item_code,
+					"qty": qty,
+					"t_warehouse": warehouse,
+					"serial_no": serial_nos,
+					"batch_no": batch_no,
+					"basic_rate": frappe.db.get_value(
+						"Bin", {"item_code": item_code, "warehouse": warehouse}, "valuation_rate"
+					)
+					or frappe.db.get_value("Item", item_code, "last_purchase_rate")
+					or 0,
+				}
+			],
+		}
+	)
+	stock_entry.flags.ignore_permissions = True
+	stock_entry.insert()
+	stock_entry.submit()
+	return {
+		"status": "success",
+		"stock_entry": stock_entry.name,
+	}

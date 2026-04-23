@@ -8,6 +8,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AddStockDialog: typeof import('./src/components/pos/AddStockDialog.vue')['default']
     ApprovalDialog: typeof import('./src/components/pos/ApprovalDialog.vue')['default']
     ClosingDialog: typeof import('./src/components/pos/ClosingDialog.vue')['default']
     CouponsModal: typeof import('./src/components/pos/CouponsModal.vue')['default']
