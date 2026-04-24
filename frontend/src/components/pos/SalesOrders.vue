@@ -102,7 +102,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import format from "@/utils/format";
 export default {
 	// props: ["draftsDialog"],

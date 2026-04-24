@@ -155,7 +155,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import hardwareUtils from "@/utils/hardwareUtils";
 export default {
   // components: {MyPopup},

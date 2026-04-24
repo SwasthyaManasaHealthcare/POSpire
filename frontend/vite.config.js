@@ -24,6 +24,9 @@ export default defineConfig({
 		alias: {
 			"@": path.resolve(__dirname, "src"),
 		},
+		// Prefer .ts over .js so that migrated TS modules (utils/call.ts,
+		// offline/*.ts) win over any lingering .js shim at the same path.
+		extensions: [".mjs", ".ts", ".js", ".mts", ".jsx", ".tsx", ".vue", ".json"],
 	},
 	optimizeDeps: {
 		exclude: ["frappe-ui"],

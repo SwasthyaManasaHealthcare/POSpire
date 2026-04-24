@@ -361,7 +361,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import { toast } from "vue3-toastify";
 import format from "@/utils/format";
 import { playSound } from "@/utils/sounds";

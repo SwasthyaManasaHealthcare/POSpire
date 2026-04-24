@@ -137,7 +137,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import format from "@/utils/format";
 import { toast } from "vue3-toastify";
 import { amountRules, isAmountValid } from "@/utils/validation";
