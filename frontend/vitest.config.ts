@@ -15,6 +15,12 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			// frappe-ui ships source with ESM-invalid relative imports (missing
+			// file extensions) that break Node's ESM resolver. Tests don't
+			// exercise frappe-ui's real networking anyway; stub it with a minimal
+			// shim that returns never-resolving promises so unit tests exercising
+			// the call() path will fall through to offline/cache/enqueue branches.
+			"frappe-ui": path.resolve(__dirname, "__tests__/stubs/frappe-ui.ts"),
 		},
 		extensions: [".mjs", ".ts", ".js", ".mts", ".jsx", ".tsx", ".vue", ".json"],
 	},

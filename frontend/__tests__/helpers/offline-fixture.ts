@@ -20,12 +20,20 @@ import {
 
 export async function setupOfflineStorage(): Promise<void> {
 	// `initOfflineStorage` is idempotent and handles the crypto-key bootstrap.
-	// On a fresh module graph + fresh indexedDB we get a new key every time.
 	await initOfflineStorage();
-	// Tests may trigger safe mode accidentally (e.g. health probe in
-	// constrained environments). Force-exit so subsequent tests are writable.
+	// Stop the interval part of the health probe immediately.
+	stopHealthProbe();
+	// The one-shot probe that `startHealthProbe` fires synchronously from
+	// `initOfflineStorage` is async and may still be in-flight — its
+	// read-after-write check can race under happy-dom + fake-indexeddb and
+	// trip safe mode. Flush microtasks and a macrotask to let that promise
+	// settle, then clear safe mode before the test body runs.
+	await new Promise((r) => setTimeout(r, 0));
 	exitSafeMode();
 	await clearAllTables();
+	// Final clear in case clearAllTables ran the probe's write-path and
+	// tripped safe mode again inside the transaction.
+	exitSafeMode();
 }
 
 /** Clears every object store. Does not reset the crypto key (module-level). */
@@ -60,8 +68,25 @@ export async function clearAllTables(): Promise<void> {
 	}
 }
 
-/** Delete and re-open the DB — used between test files that need a hard reset. */
+/** Per-test teardown — just stop background timers.
+ *
+ * We intentionally do NOT close `db` or `journalDb` here. Dexie `db` is a
+ * module-level singleton; closing it mid-file leaves subsequent `beforeEach`
+ * calls unable to reopen against the same module graph, surfacing as
+ * `DatabaseClosedError` on every downstream test. Clearing tables in
+ * `setupOfflineStorage` gives the same isolation guarantee without tearing
+ * down the connection.
+ */
 export async function teardownOfflineStorage(): Promise<void> {
+	try {
+		stopHealthProbe();
+	} catch {
+		/* not running */
+	}
+}
+
+/** Hard reset — used in `afterAll` when a file truly needs a closed DB. */
+export async function hardTeardownOfflineStorage(): Promise<void> {
 	try {
 		stopHealthProbe();
 	} catch {

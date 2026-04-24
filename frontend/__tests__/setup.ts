@@ -43,27 +43,9 @@ beforeEach(() => {
 	}
 });
 
-afterEach(async () => {
-	// Best-effort cleanup of any DB left open by a test that crashed before
-	// tearing down. Tests that explicitly open a Dexie instance handle their
-	// own deletion; this is just belt-and-braces.
-	try {
-		const dbs = await indexedDB.databases?.();
-		if (dbs) {
-			await Promise.all(
-				dbs.map(
-					(d) =>
-						new Promise<void>((resolve) => {
-							if (!d.name) return resolve();
-							const req = indexedDB.deleteDatabase(d.name);
-							req.onsuccess = () => resolve();
-							req.onerror = () => resolve();
-							req.onblocked = () => resolve();
-						}),
-				),
-			);
-		}
-	} catch {
-		/* older fake-indexeddb versions don't implement .databases(); fine */
-	}
-});
+// NOTE: no global afterEach database-delete. Per-test isolation is handled
+// by test files calling `setupOfflineStorage()` in their own `beforeEach`,
+// which clears all object stores without tearing down the Dexie connection.
+// A global `indexedDB.deleteDatabase` here would invalidate the module-level
+// Dexie `db` singleton and surface as `DatabaseClosedError` on every test
+// after the first.
