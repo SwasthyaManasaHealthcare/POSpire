@@ -721,7 +721,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { toast } from "vue3-toastify"; // <-- make sure this is imported

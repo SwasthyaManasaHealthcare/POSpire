@@ -56,7 +56,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import UpdateCustomer from "./UpdateCustomer.vue";
 export default {
 	props: {

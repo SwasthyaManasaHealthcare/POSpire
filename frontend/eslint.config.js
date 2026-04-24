@@ -6,7 +6,7 @@ export default [
 	js.configs.recommended,
 	...pluginVue.configs["flat/recommended"],
 	{
-		files: ["src/**/*.{vue,js}"],
+		files: ["src/**/*.{vue,js,ts}"],
 		languageOptions: {
 			ecmaVersion: "latest",
 			sourceType: "module",
@@ -46,6 +46,44 @@ export default [
 			"no-empty": ["warn", { allowEmptyCatch: true }],
 			"no-unreachable": "warn",
 			"no-mixed-spaces-and-tabs": "off",
+			// -----------------------------------------------------------------
+			// P-2 single API boundary — every network call goes through
+			// @/utils/call. Direct frappe-ui imports are banned. See
+			// docs/offline/09-api-boundary.md §5.
+			// -----------------------------------------------------------------
+			"no-restricted-imports": [
+				"error",
+				{
+					paths: [
+						{
+							name: "frappe-ui",
+							message:
+								"Network IO must go through @/utils/call. Import helpers from frappe-ui only inside src/utils/call.ts, src/utils/call-registry.ts, or src/main.js.",
+						},
+					],
+					patterns: [
+						{
+							group: ["frappe-ui/*"],
+							message:
+								"Network IO must go through @/utils/call. Import helpers from frappe-ui only inside src/utils/call.ts, src/utils/call-registry.ts, or src/main.js.",
+						},
+					],
+				},
+			],
+		},
+	},
+	{
+		// Wrapper implementation and the main-bundle bootstrap are the ONLY
+		// files permitted to import from frappe-ui directly.
+		files: [
+			"src/utils/call.ts",
+			"src/utils/call.js",
+			"src/utils/call-registry.ts",
+			"src/offline/connectivity.ts",
+			"src/main.js",
+		],
+		rules: {
+			"no-restricted-imports": "off",
 		},
 	},
 	{

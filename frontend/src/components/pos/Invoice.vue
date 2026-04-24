@@ -1104,7 +1104,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import Customer from "./Customer.vue";

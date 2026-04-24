@@ -75,7 +75,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 export default {
 	data: () => ({
 		dialog: false,

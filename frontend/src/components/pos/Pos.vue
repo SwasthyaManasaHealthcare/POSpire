@@ -58,7 +58,7 @@ import NewAddress from "./NewAddress.vue";
 import Variants from "./Variants.vue";
 import Returns from "./Returns.vue";
 import MpesaPayments from "./Mpesa-Payments.vue";
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import { toast } from "vue3-toastify";
 
 export default {
