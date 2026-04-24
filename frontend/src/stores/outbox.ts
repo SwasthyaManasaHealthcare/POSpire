@@ -157,7 +157,8 @@ export const useOutboxStore = defineStore("outbox", () => {
 	let channel: BroadcastChannel | null = null;
 	try {
 		if (typeof BroadcastChannel !== "undefined") {
-			channel = new BroadcastChannel("pospire-sync");
+			// Must match BROADCAST_CHANNEL_NAME in @/offline/sync.ts
+			channel = new BroadcastChannel("pospire-offline");
 			channel.addEventListener("message", (ev) => {
 				const data = ev.data as { phase?: string } | undefined;
 				if (!data || typeof data.phase !== "string") return;
