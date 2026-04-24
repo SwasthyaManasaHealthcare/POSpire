@@ -257,3 +257,73 @@ export interface JournalRow {
 	 */
 	snapshot: unknown;
 }
+
+// ---------------------------------------------------------------------------
+// Integration-surface types (Agent 2 ↔ Agent 3 runtime bridge).
+//
+// Agent 2's `runtime.ts` imports `OutboxEnqueueFn` and `ReadCache` from this
+// module; Agent 2's `call.ts` imports `OutboxEnqueueAck`. The original Wave 1
+// commit shipped the runtime shim without defining these types — they were
+// implicitly delegated to Agent 3. Added here so the `call()` boundary
+// compiles and both agents agree on the shape.
+// ---------------------------------------------------------------------------
+
+/**
+ * Acknowledgement returned from `call()` to the component when a write is
+ * enqueued (either because we're offline, or because a live send hit a 5xx
+ * and was enqueued for retry). Shape is stable: components type-narrow via
+ * `offline === true` + `status === 'enqueued'`.
+ */
+export interface OutboxEnqueueAck {
+	offline: true;
+	offline_id: string;
+	provisional_name: string;
+	status: "enqueued";
+}
+
+/**
+ * The enqueue function registered at outbox-module init via
+ * `registerOutboxEnqueue`. `call()` invokes it on the offline-write path.
+ *
+ * `type` is an `OutboxType` but kept as `string` on the public surface so
+ * `call-registry.ts` can keep its loose `outboxType?: string` typing; the
+ * outbox implementation validates the string at entry.
+ */
+export type OutboxEnqueueFn = (
+	type: string,
+	payload: Record<string, unknown>,
+	options: OutboxEnqueueOptions,
+) => Promise<OutboxEnqueueAck>;
+
+export interface OutboxEnqueueOptions {
+	/** The registry method path; used to pick the correct server endpoint. */
+	method: string;
+	/** Mirror of `type` above — the outbox-type bucket the payload belongs to. */
+	outboxType: string;
+	/**
+	 * The offline_id to use. `call()` always supplies one so retries carry the
+	 * same id. The outbox MUST NOT re-generate an id when this is provided.
+	 */
+	offlineIdempotencyKey: string;
+	/** Optional: parents (sibling outbox rows that must sync first). */
+	parentOfflineIds?: string[];
+	/** Optional: owning shift (invoice/closing/payment/cash_movement). */
+	shiftOfflineId?: string | null;
+	/** Optional: override posting date (ISO). Defaults to today (device clock). */
+	postingDate?: string;
+	/** Optional: override owner_user. Defaults to the current cashier. */
+	ownerUser?: string;
+}
+
+/**
+ * Read-cache contract consumed by `call()` on the read path. Agent 1's
+ * repos back this (the concrete implementation lives alongside each domain
+ * repo); the shape is intentionally minimal so the adapter can be swapped
+ * without touching `call.ts`.
+ */
+export interface ReadCache {
+	read<T>(
+		key: string,
+	): Promise<{ data: T; cachedAt: number } | null>;
+	write<T>(key: string, data: T, ttlMs?: number): Promise<void>;
+}
