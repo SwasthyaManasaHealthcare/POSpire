@@ -464,7 +464,13 @@ def _get_submitted_approval_request(request_name: str, doc):
 	if request.pos_profile != doc.pos_profile:
 		frappe.throw(_("Approval request {0} belongs to a different POS Profile.").format(request_name))
 
-	if request.requested_by and request.requested_by != frappe.session.user:
+	# Offline submit path runs under a background-worker session, so the
+	# current `frappe.session.user` may not equal the cashier who approved the
+	# action. Prefer the invoice owner (snapshotted from the payload per P-5);
+	# fall back to the live session only when the doc has no owner yet
+	# (in-memory draft during online submit).
+	cashier = getattr(doc, "owner", None) or frappe.session.user
+	if request.requested_by and request.requested_by != cashier:
 		frappe.throw(_("Approval request {0} belongs to a different cashier.").format(request_name))
 
 	if request.invoice and doc.name and request.invoice != doc.name:

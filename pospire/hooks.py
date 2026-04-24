@@ -143,6 +143,11 @@ doc_events = {
 		"on_update": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 		"on_trash": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 	},
+	# POS Offline Recovery Log is immutable post-insert (audit record).
+	"POS Offline Recovery Log": {
+		"on_update": "pospire.pospire.doctype.pos_offline_recovery_log.pos_offline_recovery_log.enforce_immutability",
+		"on_trash": "pospire.pospire.doctype.pos_offline_recovery_log.pos_offline_recovery_log.prevent_delete",
+	},
 }
 
 # Scheduled Tasks
@@ -324,6 +329,21 @@ fixtures = [
 					"Sales Invoice-custom_deleted_pos_items",
 					"POS Profile-custom_assortment",
 					"POS Profile-custom_denomination",
+					"Sales Invoice-pos_offline_id",
+					"Sales Invoice-pos_device_id",
+					"Sales Invoice-pos_opening_shift_offline_id",
+					"Sales Invoice-pos_material_receipt_offline_ids",
+					"POS Opening Shift-pos_offline_id",
+					"POS Opening Shift-pos_device_id",
+					"POS Opening Shift-pos_profile_snapshot_allow_negative_stock",
+					"POS Opening Shift-pos_profile_snapshot_allow_add_to_stock_at_pos",
+					"POS Closing Shift-pos_offline_id",
+					"POS Closing Shift-pos_device_id",
+					"POS Closing Shift-variance_at_close",
+					"POS Closing Shift-variance_at_sync",
+					"Stock Entry-pos_offline_id",
+					"Stock Entry-pos_device_id",
+					"Customer-pos_offline_id",
 				),
 			]
 		],
