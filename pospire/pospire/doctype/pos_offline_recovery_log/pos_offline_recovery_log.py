@@ -15,11 +15,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-
 # Fields a manager may change post-insert (review workflow); everything else is frozen.
-_MUTABLE_REVIEW_FIELDS: frozenset[str] = frozenset(
-	{"reviewed_by", "reviewed_at", "resolution_notes"}
-)
+_MUTABLE_REVIEW_FIELDS: frozenset[str] = frozenset({"reviewed_by", "reviewed_at", "resolution_notes"})
 
 
 class POSOfflineRecoveryLog(Document):

@@ -265,12 +265,15 @@ def snapshot_profile_flags_onto_opening_shift(doc) -> None:
 	if not getattr(doc, "pos_profile", None):
 		return
 
-	profile_values = frappe.db.get_value(
-		"POS Profile",
-		doc.pos_profile,
-		list(POS_PROFILE_OFFLINE_FLAGS),
-		as_dict=True,
-	) or {}
+	profile_values = (
+		frappe.db.get_value(
+			"POS Profile",
+			doc.pos_profile,
+			list(POS_PROFILE_OFFLINE_FLAGS),
+			as_dict=True,
+		)
+		or {}
+	)
 
 	if doc.meta.has_field("pos_profile_snapshot_allow_negative_stock"):
 		doc.pos_profile_snapshot_allow_negative_stock = cint(
@@ -292,19 +295,20 @@ def get_offline_flags_for_shift(opening_shift_name: str) -> dict[str, int]:
 	if not opening_shift_name:
 		return {flag: 0 for flag in POS_PROFILE_OFFLINE_FLAGS}
 
-	snapshot = frappe.db.get_value(
-		"POS Opening Shift",
-		opening_shift_name,
-		[
-			"pos_profile_snapshot_allow_negative_stock",
-			"pos_profile_snapshot_allow_add_to_stock_at_pos",
-		],
-		as_dict=True,
-	) or {}
+	snapshot = (
+		frappe.db.get_value(
+			"POS Opening Shift",
+			opening_shift_name,
+			[
+				"pos_profile_snapshot_allow_negative_stock",
+				"pos_profile_snapshot_allow_add_to_stock_at_pos",
+			],
+			as_dict=True,
+		)
+		or {}
+	)
 	return {
-		"custom_allow_negative_stock": cint(
-			snapshot.get("pos_profile_snapshot_allow_negative_stock") or 0
-		),
+		"custom_allow_negative_stock": cint(snapshot.get("pos_profile_snapshot_allow_negative_stock") or 0),
 		"custom_allow_add_to_stock_at_pos": cint(
 			snapshot.get("pos_profile_snapshot_allow_add_to_stock_at_pos") or 0
 		),
@@ -701,9 +705,7 @@ def create_opening_entry(data: dict | str, offline_id: str, device_id: str) -> d
 	)
 
 
-def _ensure_all_invoices_submitted(
-	opening_offline_id: str, invoice_offline_ids: list[str]
-) -> str:
+def _ensure_all_invoices_submitted(opening_offline_id: str, invoice_offline_ids: list[str]) -> str:
 	"""Strict-closure precondition for offline closing entries (§4.4, P-8).
 
 	Two-part check:
@@ -738,9 +740,7 @@ def _ensure_all_invoices_submitted(
 		if missing_on_server:
 			_throw(
 				ERROR_SIBLINGS_NOT_READY,
-				_("Cannot close: invoice(s) not submitted: {0}").format(
-					", ".join(missing_on_server)
-				),
+				_("Cannot close: invoice(s) not submitted: {0}").format(", ".join(missing_on_server)),
 				{"missing_offline_ids": missing_on_server},
 			)
 
@@ -912,8 +912,8 @@ __all__ = [
 	"ERROR_SIBLINGS_NOT_READY",
 	"ERROR_STOCK_SHORTAGE",
 	"ERROR_VALIDATION",
-	"OfflineSubmitError",
 	"POS_PROFILE_OFFLINE_FLAGS",
+	"OfflineSubmitError",
 	"create_closing_entry",
 	"create_customer",
 	"create_material_receipt",

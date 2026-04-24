@@ -229,9 +229,7 @@ def execute() -> None:
 	for doctype, _fieldname in _UNIQUE_INDEX_TARGETS:
 		table = f"tab{doctype}"
 		try:
-			frappe.db.sql(
-				f"UPDATE `{table}` SET `pos_offline_id` = NULL WHERE `pos_offline_id` = ''"  # noqa: S608 — table name derived from trusted constant
-			)
+			frappe.db.sql(f"UPDATE `{table}` SET `pos_offline_id` = NULL WHERE `pos_offline_id` = ''")
 		except Exception:
 			# If the column does not yet exist in some environments (fixture
 			# hasn't been applied), skip — the post-migrate reload will pick
@@ -245,9 +243,7 @@ def execute() -> None:
 		table = f"tab{doctype}"
 		index_name = f"unique_{fieldname}_idx"
 		try:
-			frappe.db.sql(
-				f"CREATE UNIQUE INDEX `{index_name}` ON `{table}` (`{fieldname}`)"  # noqa: S608 — trusted identifiers
-			)
+			frappe.db.sql(f"CREATE UNIQUE INDEX `{index_name}` ON `{table}` (`{fieldname}`)")
 		except Exception:
 			# Index already exists, or column not yet present — idempotent.
 			continue
