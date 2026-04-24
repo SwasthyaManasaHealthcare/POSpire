@@ -45,6 +45,17 @@
       </v-toolbar-title>
 
       <v-spacer></v-spacer>
+      <!--
+        Offline pending-sync badge. Hidden when queuedCount === 0. Reads
+        from @/stores/outbox (Pinia reactive facade over Dexie liveQuery).
+      -->
+      <div v-if="queuedCount > 0" class="sync-badge-wrapper">
+        <v-chip class="sync-badge" variant="tonal" color="warning" size="small"
+          :title="__('Transactions pending sync')">
+          <v-icon start size="small">mdi-cloud-sync-outline</v-icon>
+          {{ queuedCount }} {{ __('pending') }}
+        </v-chip>
+      </div>
       <div class="user-info">
         <v-chip class="user-chip pospire-chip-neutral" variant="tonal" color="grey-darken-2">
           <v-icon start size="small">mdi-account-circle</v-icon>
@@ -155,11 +166,21 @@
 </template>
 
 <script>
+import { storeToRefs } from "pinia";
 import { call } from "@/utils/call";
 import hardwareUtils from "@/utils/hardwareUtils";
+import { useOutboxStore } from "@/stores/outbox";
 export default {
   // components: {MyPopup},
   mixins: [hardwareUtils],
+  setup() {
+    // Surfaces the outbox depth on the navbar (pending + in-flight). Hidden
+    // in the template when queuedCount is 0 so the navbar is unchanged in
+    // the steady-state online path.
+    const outbox = useOutboxStore();
+    const { queuedCount } = storeToRefs(outbox);
+    return { queuedCount };
+  },
   data() {
     return {
       drawer: false,
@@ -613,6 +634,17 @@ export default {
 
 .user-info {
   margin-right: 8px;
+}
+
+.sync-badge-wrapper {
+  margin-right: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.sync-badge {
+  font-weight: 600;
+  letter-spacing: 0.3px;
 }
 
 .user-chip {
