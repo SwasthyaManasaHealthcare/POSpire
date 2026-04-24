@@ -154,6 +154,14 @@ def create_opening_voucher(
 		new_pos_opening.set("denomination_details", denomination_details)
 		_validate_denomination_total(new_pos_opening)
 
+	# P-12 / Q-2: snapshot the POS Profile offline flags onto the opening
+	# shift so submit-time handlers read them from the shift, never from the
+	# live profile. See docs/offline/12-server-side-changes.md §3 and the
+	# `snapshot_profile_flags_onto_opening_shift` helper.
+	from pospire.pospire.api.offline import snapshot_profile_flags_onto_opening_shift
+
+	snapshot_profile_flags_onto_opening_shift(new_pos_opening)
+
 	new_pos_opening.insert(ignore_permissions=True)
 
 	data = {}
