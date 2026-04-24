@@ -213,21 +213,6 @@ def _idempotent_submit(
 
 
 # ---------------------------------------------------------------------------
-# Permission shim (v16 requires explicit True; see CLAUDE.md)
-# ---------------------------------------------------------------------------
-
-
-def has_permission(doc, ptype=None, user=None) -> bool:
-	"""Allow authenticated POS users access to offline log records.
-
-	Frappe v16 treats any non-True return as "no access"; returning True
-	explicitly preserves the existing POS permission model. The DocType's own
-	Role-based permissions still gate who can read/write.
-	"""
-	return True
-
-
-# ---------------------------------------------------------------------------
 # Rate limiter for observability endpoints
 # ---------------------------------------------------------------------------
 
@@ -934,7 +919,6 @@ __all__ = [
 	"create_material_receipt",
 	"create_opening_entry",
 	"get_offline_flags_for_shift",
-	"has_permission",
 	"log_batch",
 	"ping",
 	"snapshot_profile_flags_onto_opening_shift",

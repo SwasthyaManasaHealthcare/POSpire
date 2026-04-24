@@ -144,8 +144,10 @@ doc_events = {
 		"on_trash": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 	},
 	# POS Offline Recovery Log is immutable post-insert (audit record).
+	# Immutability of captured fields is enforced by the class-level before_save
+	# hook in pos_offline_recovery_log.POSOfflineRecoveryLog; hook-level on_update
+	# would fire post-save where get_doc_before_save() is unreliable.
 	"POS Offline Recovery Log": {
-		"on_update": "pospire.pospire.doctype.pos_offline_recovery_log.pos_offline_recovery_log.enforce_immutability",
 		"on_trash": "pospire.pospire.doctype.pos_offline_recovery_log.pos_offline_recovery_log.prevent_delete",
 	},
 }

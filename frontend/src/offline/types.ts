@@ -46,14 +46,18 @@ export type OutboxBlockedReason =
 	| null;
 
 export type LastErrorCategory =
-	| "network"
-	| "auth"
-	| "validation"
-	| "conflict"
-	| "server_error"
-	| "integrity"
-	| "schema"
-	| "unknown"
+	| "network_error"
+	| "server_5xx"
+	| "timeout"
+	| "idempotent_duplicate"
+	| "validation_error"
+	| "permission_error"
+	| "customer_missing"
+	| "batch_or_serial_conflict"
+	| "stock_shortage"
+	| "accounting_period_closed"
+	| "retry_exhausted"
+	| "schema_mismatch"
 	| null;
 
 // ---------------------------------------------------------------------------

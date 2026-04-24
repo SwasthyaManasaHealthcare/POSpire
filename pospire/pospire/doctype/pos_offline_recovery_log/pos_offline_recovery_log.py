@@ -48,29 +48,6 @@ class POSOfflineRecoveryLog(Document):
 			)
 
 
-def enforce_immutability(doc, method=None) -> None:
-	"""Hook target: reject edits to immutable fields after insert."""
-	if not doc or doc.is_new():
-		return
-
-	before = doc.get_doc_before_save()
-	if before is None:
-		return
-
-	changed = {
-		fieldname
-		for fieldname in ("device_id", "recovered_at", "journal_blob")
-		if (doc.get(fieldname) or "") != (before.get(fieldname) or "")
-	}
-	if changed:
-		frappe.throw(
-			_("POS Offline Recovery Log is immutable. Cannot modify: {0}").format(
-				", ".join(sorted(changed))
-			),
-			frappe.PermissionError,
-		)
-
-
 def prevent_delete(doc, method=None) -> None:
 	"""Hook target: disallow deletion of recovery records."""
 	# System Manager has delete in DocType permissions for cleanup of erroneous
