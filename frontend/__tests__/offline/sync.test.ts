@@ -334,8 +334,17 @@ describe("leader lock", () => {
 					// Hold forever — return a promise that never resolves.
 					return cb({} as Lock).then(() => new Promise<void>(() => {}));
 				}
-				secondGotLock = true;
-				return cb({} as Lock);
+				// Real navigator.locks QUEUES the second request: the callback is
+				// NOT invoked while the first holds the lock. Mirror that by
+				// returning a never-resolving promise without calling `cb`. The
+				// flag flips only if the scheduler's leader-gate is broken and
+				// someone manages to enter the callback.
+				return new Promise<void>((_resolve) => {
+					// Intentionally never resolve, never call cb.
+					// `secondGotLock` remains false unless the scheduler contract
+					// is violated (e.g. the scheduler self-invoked the callback).
+					void _resolve;
+				});
 			},
 		});
 

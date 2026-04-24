@@ -112,8 +112,18 @@ describe("manual override", () => {
 
 		connectivity.clearManualOverride();
 		expect(getState().manualOverride).toBe(null);
-		// Underlying status is still whatever the detector says.
+		// `forceOffline` transitioned the detector's status to 'offline' as well
+		// (so subscribers saw the forced state). Clearing the override does NOT
+		// retroactively reset that status — only the next ping outcome can. This
+		// is the correct behaviour: auto-detection picks up from the last
+		// observed ping. Simulate a successful ping to verify the detector
+		// resumes driving status.
+		expect(isOnline()).toBe(false);
+		connectivity.reportRequestOutcome("success");
+		connectivity.reportRequestOutcome("success");
+		connectivity.reportRequestOutcome("success");
 		expect(isOnline()).toBe(true);
+		expect(getState().manualOverride).toBe(null);
 	});
 
 	it("forceOnline overrides a detector-reported offline status", async () => {

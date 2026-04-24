@@ -125,13 +125,17 @@ describe("outbox store — liveQuery reactivity", () => {
 		// Flip one to in_flight.
 		await markInFlight(ack1.offline_id);
 
+		// Wait on inFlightCount specifically — queuedCount === 2 also matches
+		// the initial {pending: 2, inflight: 0} state before the liveQuery has
+		// re-fired to reflect the markInFlight transition.
 		await waitFor(
-			() => store.queuedCount,
-			(v) => v === 2, // 1 pending + 1 in-flight
+			() => store.inFlightCount,
+			(v) => v === 1,
 		);
 
 		expect(store.pendingCount).toBe(1);
 		expect(store.inFlightCount).toBe(1);
+		expect(store.queuedCount).toBe(2); // 1 pending + 1 in-flight
 
 		// Sync it — depth drops to 1.
 		await markSynced(ack1.offline_id, "SI-1");
