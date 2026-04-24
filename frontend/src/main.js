@@ -12,6 +12,7 @@ import router from "./router";
 import eventBus from "./utils/bus";
 import { __ } from "./utils/translate";
 import { flt, get_currency_symbol, get_number_format, format_number } from "./utils/numberFormat";
+import { registerServiceWorker } from "./offline/registerServiceWorker";
 import App from "./App.vue";
 
 // Expose as window globals — matches Frappe's browser environment where these
@@ -68,4 +69,7 @@ if (import.meta.env.DEV) {
 	});
 } else {
 	app.mount("#app");
+	// Register the Service Worker in production only. Failures are non-fatal —
+	// offline shell is a progressive enhancement, not a requirement.
+	registerServiceWorker();
 }
