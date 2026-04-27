@@ -93,6 +93,36 @@ export class UnregisteredMethod extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers used by adapters to satisfy server-side P-5 / P-11 invariants
+// (offline.py::_apply_payload_metadata requires posting_date + owner_user
+// inside the inner `data` JSON for every queued write).
+// ---------------------------------------------------------------------------
+
+/** Today's date in YYYY-MM-DD (local). Server treats it as the queued
+ *  posting_date snapshot per P-11. */
+function todayIso(): string {
+	const d = new Date();
+	const y = d.getFullYear();
+	const m = String(d.getMonth() + 1).padStart(2, "0");
+	const day = String(d.getDate()).padStart(2, "0");
+	return `${y}-${m}-${day}`;
+}
+
+/** Best-effort cashier lookup. The Vite bundle bans `frappe.*` imports, but
+ *  at runtime the Desk host injects `frappe.session.user` on the global. */
+function currentUser(): string {
+	try {
+		const g = globalThis as unknown as {
+			frappe?: { session?: { user?: string } };
+		};
+		if (g.frappe?.session?.user) return g.frappe.session.user;
+	} catch {
+		/* strict-privacy host */
+	}
+	return "Guest";
+}
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -251,20 +281,40 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		outboxType: "invoice",
 		toOfflinePayload: (args, ctx) => {
-			const invoice = (args.invoice ?? {}) as Record<string, unknown>;
-			const data =
-				typeof args.data === "string"
-					? args.data
-					: JSON.stringify(args.data ?? {});
+			// Payments.vue calls with {data: paymentMetadata, invoice: invoiceDoc}.
+			// offline.submit_invoice expects a SINGLE `data` arg containing the
+			// full invoice doc (with payment metadata merged in). Merge here so
+			// the server receives the Sales Invoice payload it expects (F1).
+			const rawInvoice = args.invoice ?? {};
+			const invoice = (
+				typeof rawInvoice === "string" ? JSON.parse(rawInvoice) : rawInvoice
+			) as Record<string, unknown>;
+			const rawPayment = args.data ?? {};
+			const paymentMeta = (
+				typeof rawPayment === "string" ? JSON.parse(rawPayment) : rawPayment
+			) as Record<string, unknown>;
+
+			const merged: Record<string, unknown> = { ...invoice, ...paymentMeta };
+			// _apply_payload_metadata requires both fields (P-5, P-11).
+			const postingDate = (merged.posting_date as string) ?? todayIso();
+			const ownerUser =
+				(merged.owner_user as string) ??
+				(merged.owner as string) ??
+				currentUser();
+			merged.posting_date = postingDate;
+			merged.owner_user = ownerUser;
+
 			return {
 				method: "pospire.pospire.api.offline.submit_invoice",
 				payload: {
-					data,
-					invoice: typeof args.invoice === "string" ? args.invoice : JSON.stringify(invoice),
+					data: JSON.stringify(merged),
 					offline_id: ctx.offlineId,
 					device_id: ctx.deviceId,
-					opening_entry_offline_id: invoice.pos_opening_shift_offline_id ?? null,
-					material_receipt_offline_ids: invoice.pos_material_receipt_offline_ids ?? null,
+					opening_entry_offline_id:
+						(invoice.pos_opening_shift_offline_id as string) ?? null,
+					material_receipt_offline_ids:
+						(invoice.pos_material_receipt_offline_ids as string[] | string) ??
+						null,
 				},
 				shiftOfflineId: (invoice.pos_opening_shift_offline_id as string) ?? null,
 				parentOfflineIds: ([] as string[])
@@ -275,8 +325,8 @@ export const methodRegistry: Record<string, MethodConfig> = {
 							: [],
 					)
 					.filter(Boolean),
-				postingDate: invoice.posting_date as string | undefined,
-				ownerUser: invoice.owner as string | undefined,
+				postingDate,
+				ownerUser,
 			};
 		},
 	},
@@ -284,27 +334,89 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "write",
 		offline: true,
 		outboxType: "opening_entry",
-		toOfflinePayload: (args, ctx) => ({
-			method: "pospire.pospire.api.offline.create_opening_entry",
-			payload: {
-				data: JSON.stringify(args ?? {}),
-				offline_id: ctx.offlineId,
-				device_id: ctx.deviceId,
-			},
-		}),
+		toOfflinePayload: (args, ctx) => {
+			// posapp.create_opening_voucher accepts loose UI args; the offline
+			// endpoint inserts the payload as a POS Opening Shift doc, so the
+			// adapter must build the doc shape here (F2). Mirrors the field
+			// set in posapp.create_opening_voucher:140-150.
+			const today = todayIso();
+			const user = currentUser();
+			const balance =
+				typeof args.balance_details === "string"
+					? args.balance_details
+					: JSON.stringify(args.balance_details ?? []);
+			const denominations =
+				typeof args.denomination_details === "string"
+					? args.denomination_details
+					: JSON.stringify(args.denomination_details ?? []);
+
+			return {
+				method: "pospire.pospire.api.offline.create_opening_entry",
+				payload: {
+					data: JSON.stringify({
+						doctype: "POS Opening Shift",
+						period_start_date: new Date().toISOString(),
+						posting_date: today,
+						owner_user: user,
+						user,
+						pos_profile: args.pos_profile,
+						company: args.company,
+						balance_details: JSON.parse(balance),
+						denomination_details: JSON.parse(denominations),
+						docstatus: 1,
+					}),
+					offline_id: ctx.offlineId,
+					device_id: ctx.deviceId,
+				},
+				postingDate: today,
+				ownerUser: user,
+			};
+		},
 	},
 	"pospire.pospire.api.posapp.create_customer": {
 		intent: "write",
 		offline: true,
 		outboxType: "customer",
-		toOfflinePayload: (args, ctx) => ({
-			method: "pospire.pospire.api.offline.create_customer",
-			payload: {
-				data: JSON.stringify(args ?? {}),
-				offline_id: ctx.offlineId,
-				device_id: ctx.deviceId,
-			},
-		}),
+		toOfflinePayload: (args, ctx) => {
+			// posapp.create_customer accepts loose UI args. offline.create_customer
+			// requires owner_user and inserts the payload directly as a Customer
+			// doc (F2). Mirrors the field set in posapp.create_customer:1340-1395.
+			const user = currentUser();
+			const doc: Record<string, unknown> = {
+				doctype: "Customer",
+				customer_name: args.customer_name,
+				customer_type: args.customer_type ?? "Individual",
+				customer_group: args.customer_group ?? "All Customer Groups",
+				territory: args.territory ?? "All Territories",
+				owner_user: user,
+				owner: user,
+			};
+			// Optional fields — only include if the UI supplied them so we don't
+			// override doctype defaults with empty strings / null.
+			for (const key of [
+				"tax_id",
+				"mobile_no",
+				"email_id",
+				"gender",
+				"posa_referral_code",
+				"birthday",
+			] as const) {
+				const v = args[key];
+				if (v !== undefined && v !== null && v !== "") doc[key] = v;
+			}
+			if (args.referral_code) doc.posa_referral_code = args.referral_code;
+			if (args.company) doc.posa_referral_company = args.company;
+
+			return {
+				method: "pospire.pospire.api.offline.create_customer",
+				payload: {
+					data: JSON.stringify(doc),
+					offline_id: ctx.offlineId,
+					device_id: ctx.deviceId,
+				},
+				ownerUser: user,
+			};
+		},
 	},
 	// -----------------------------------------------------------------------
 	// Writes — LIVE ONLY

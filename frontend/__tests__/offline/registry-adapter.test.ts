@@ -31,11 +31,13 @@ describe("registry adapter — submit_invoice", () => {
 		expect(cfg.toOfflinePayload).toBeTypeOf("function");
 	});
 
-	it("reshapes UI args to (data, offline_id, device_id, opening_shift, MR list)", () => {
+	it("merges payment metadata into the invoice doc and sends it as a single `data` arg", () => {
 		const result = cfg.toOfflinePayload!(
 			{
-				data: { foo: "bar" },
+				data: { credit_change: -5, is_cashback: 1 },
 				invoice: {
+					doctype: "Sales Invoice",
+					customer: "POS Customer",
 					pos_opening_shift_offline_id: "shift-42",
 					pos_material_receipt_offline_ids: ["mr-1", "mr-2"],
 					posting_date: "2026-04-25",
@@ -50,8 +52,33 @@ describe("registry adapter — submit_invoice", () => {
 		expect(result.payload.device_id).toBe(CTX.deviceId);
 		expect(result.payload.opening_entry_offline_id).toBe("shift-42");
 		expect(result.payload.material_receipt_offline_ids).toEqual(["mr-1", "mr-2"]);
-		// `data` is JSON-stringified for the server's `_load(data)` parser.
+
+		// `data` is the merged invoice + payment metadata, JSON-stringified for
+		// the server's `_load(data)` parser. NOT a separate `invoice` kwarg
+		// (the server would silently drop that — F1).
 		expect(typeof result.payload.data).toBe("string");
+		expect(result.payload).not.toHaveProperty("invoice");
+		const parsed = JSON.parse(result.payload.data as string);
+		expect(parsed.doctype).toBe("Sales Invoice");
+		expect(parsed.customer).toBe("POS Customer");
+		expect(parsed.credit_change).toBe(-5);
+		expect(parsed.is_cashback).toBe(1);
+		// posting_date / owner_user must be inside the merged data so the
+		// server's _apply_payload_metadata sees them (P-5, P-11).
+		expect(parsed.posting_date).toBe("2026-04-25");
+		expect(parsed.owner_user).toBe("cashier@example.com");
+	});
+
+	it("defaults posting_date to today and owner_user to the cashier when missing", () => {
+		const result = cfg.toOfflinePayload!(
+			{ data: {}, invoice: { doctype: "Sales Invoice" } },
+			CTX,
+		);
+		const parsed = JSON.parse(result.payload.data as string);
+		// YYYY-MM-DD format from todayIso()
+		expect(parsed.posting_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+		expect(typeof parsed.owner_user).toBe("string");
+		expect(parsed.owner_user.length).toBeGreaterThan(0);
 	});
 
 	it("produces dependency metadata for the outbox (parents + shift + posting + owner)", () => {
@@ -74,45 +101,85 @@ describe("registry adapter — submit_invoice", () => {
 		expect(result.ownerUser).toBe("cashier@example.com");
 	});
 
-	it("handles missing optional fields gracefully", () => {
+	it("handles missing dependency fields gracefully and supplies defaults", () => {
 		const result = cfg.toOfflinePayload!({ data: {}, invoice: {} }, CTX);
 		expect(result.shiftOfflineId).toBeNull();
 		expect(result.parentOfflineIds).toEqual([]);
-		expect(result.postingDate).toBeUndefined();
-		expect(result.ownerUser).toBeUndefined();
+		// posting_date / owner_user are REQUIRED by the server, so the adapter
+		// supplies defaults — they are never left undefined.
+		expect(result.postingDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+		expect(typeof result.ownerUser).toBe("string");
+		expect(result.ownerUser!.length).toBeGreaterThan(0);
 	});
 });
 
 describe("registry adapter — create_opening_voucher", () => {
 	const cfg = getWrite("pospire.pospire.api.posapp.create_opening_voucher");
 
-	it("routes to offline.create_opening_entry with stringified data", () => {
+	it("constructs a POS Opening Shift doc with posting_date and owner_user", () => {
 		const result = cfg.toOfflinePayload!(
-			{ pos_profile: "Default", company: "POSpire", balance_details: [] },
+			{
+				pos_profile: "Default",
+				company: "POSpire",
+				balance_details: [{ mode_of_payment: "Cash", amount: 100 }],
+				denomination_details: [],
+			},
 			CTX,
 		);
 		expect(result.method).toBe("pospire.pospire.api.offline.create_opening_entry");
 		expect(result.payload.offline_id).toBe(CTX.offlineId);
 		expect(result.payload.device_id).toBe(CTX.deviceId);
-		expect(typeof result.payload.data).toBe("string");
+
 		const parsed = JSON.parse(result.payload.data as string);
+		// Server inserts payload directly as a POS Opening Shift; doctype is required.
+		expect(parsed.doctype).toBe("POS Opening Shift");
 		expect(parsed.pos_profile).toBe("Default");
+		expect(parsed.company).toBe("POSpire");
+		expect(parsed.balance_details).toEqual([
+			{ mode_of_payment: "Cash", amount: 100 },
+		]);
+		// Server validates these via _apply_payload_metadata (F2 root cause).
+		expect(parsed.posting_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+		expect(typeof parsed.owner_user).toBe("string");
+		expect(parsed.owner_user.length).toBeGreaterThan(0);
+
+		// Outbox-side dependency metadata mirrors the inner data.
+		expect(result.postingDate).toBe(parsed.posting_date);
+		expect(result.ownerUser).toBe(parsed.owner_user);
 	});
 });
 
 describe("registry adapter — create_customer", () => {
 	const cfg = getWrite("pospire.pospire.api.posapp.create_customer");
 
-	it("routes to offline.create_customer with stringified data", () => {
+	it("constructs a Customer doc with required owner_user and only-supplied optional fields", () => {
 		const result = cfg.toOfflinePayload!(
-			{ customer_name: "Alice", mobile_no: "555-0100", method: "create" },
+			{
+				customer_name: "Alice",
+				mobile_no: "555-0100",
+				method: "create",
+				company: "POSpire",
+				email_id: "",
+			},
 			CTX,
 		);
 		expect(result.method).toBe("pospire.pospire.api.offline.create_customer");
 		expect(result.payload.offline_id).toBe(CTX.offlineId);
 		expect(result.payload.device_id).toBe(CTX.deviceId);
+
 		const parsed = JSON.parse(result.payload.data as string);
+		expect(parsed.doctype).toBe("Customer");
 		expect(parsed.customer_name).toBe("Alice");
+		expect(parsed.mobile_no).toBe("555-0100");
+		expect(parsed.posa_referral_company).toBe("POSpire");
+		// owner_user required by offline.create_customer (P-5).
+		expect(typeof parsed.owner_user).toBe("string");
+		expect(parsed.owner_user.length).toBeGreaterThan(0);
+		// Empty-string optional fields are NOT serialised (don't override
+		// doctype defaults with "").
+		expect(parsed).not.toHaveProperty("email_id");
+
+		expect(result.ownerUser).toBe(parsed.owner_user);
 	});
 });
 
