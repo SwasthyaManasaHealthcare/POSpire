@@ -34,9 +34,14 @@ app_include_js = ["/assets/pospire/js/pos_approval_desk.js"]
 # include js in page
 # page_js = {"page" : "public/js/file.js"}
 
-# SPA routing — serves pospire.html for all /pospire/* paths
+# SPA routing — serves pospire.html for all /pospire/* paths.
+# Service Worker assets are served at root scope so the SW can control the
+# whole app; the Vite build mirrors them into pospire/www/ and the
+# pospire.api.sw controller adds the Service-Worker-Allowed header.
 website_route_rules = [
 	{"from_route": "/pospire/<path:app_path>", "to_route": "pospire"},
+	{"from_route": "/sw.js", "to_route": "pospire.pospire.api.sw.sw_js"},
+	{"from_route": "/offline.html", "to_route": "pospire.pospire.api.sw.offline_html"},
 ]
 
 # include js in doctype views
