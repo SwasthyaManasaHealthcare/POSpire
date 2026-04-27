@@ -20,6 +20,11 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { fileURLToPath } from "url";
+
+// ESM-compatible __dirname. Used to anchor the www/ mirror destination on
+// the plugin file's location rather than on Vite's outDir (configurable).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const SW_FILENAME = "sw.js";
 const OFFLINE_FILENAME = "offline.html";
@@ -92,11 +97,18 @@ export default function posspireServiceWorkerPlugin(options = {}) {
 
 			fs.writeFileSync(swPath, swSource, "utf8");
 
-			// Mirror sw.js + offline.html into the Frappe app's www/ so a
-			// whitelisted controller (or a website_route_rules entry) can serve
-			// them at root scope. See docs/offline/10-service-worker.md §2.2.
+			// Mirror the patched sw.js + offline.html into the Frappe app's
+			// www/ directory. A tiny .py companion (pospire/www/sw.py and
+			// pospire/www/offline.py) sets headers; Frappe's TemplatePage
+			// renderer serves the file directly at /sw.js and /offline.html.
+			//
+			// Path resolution: __dirname here is the absolute path of
+			// frontend/. The Frappe www/ dir is at ../pospire/www/ from there.
+			// We anchor on __dirname (NOT outDir) because outDir is
+			// configurable via vite.config and shouldn't decide where Python
+			// templates live.
 			try {
-				const wwwDir = path.resolve(outDir, frappeAppRoot, "www");
+				const wwwDir = path.resolve(__dirname, frappeAppRoot, "www");
 				if (!fs.existsSync(wwwDir)) {
 					fs.mkdirSync(wwwDir, { recursive: true });
 				}
