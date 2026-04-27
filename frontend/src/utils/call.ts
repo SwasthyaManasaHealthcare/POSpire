@@ -445,11 +445,61 @@ async function enqueueWrite(
 				"Fix the registry entry.",
 		);
 	}
-	return enqueue(config.outboxType, payload, {
+
+	// Resolve the offline shape via the registry's adapter. Without an
+	// adapter, the live UI payload would be enqueued and later rejected by
+	// the offline endpoint whose signature is (data, offline_id, device_id, …).
+	let methodToPost = opts.method;
+	let payloadToEnqueue = payload;
+	let parentOfflineIds: string[] = [];
+	let shiftOfflineId: string | null = null;
+	let postingDate: string | undefined;
+	let ownerUser: string | undefined;
+
+	if (config.toOfflinePayload) {
+		const adapted = config.toOfflinePayload(opts.args ?? {}, {
+			offlineId,
+			deviceId: getDeviceId(),
+		});
+		methodToPost = adapted.method;
+		payloadToEnqueue = adapted.payload;
+		parentOfflineIds = adapted.parentOfflineIds ?? [];
+		shiftOfflineId = adapted.shiftOfflineId ?? null;
+		postingDate = adapted.postingDate;
+		ownerUser = adapted.ownerUser;
+	} else {
+		// Belt-and-braces: an offline-capable write without an adapter can't
+		// produce a server-shaped payload. Fail loud rather than enqueue
+		// garbage that the scheduler will only discover at drain time.
+		throw new MethodPolicyError(
+			`Method "${opts.method}" is offline-capable but missing toOfflinePayload. ` +
+				"Add the adapter to the registry entry.",
+		);
+	}
+
+	return enqueue(config.outboxType, payloadToEnqueue, {
 		offlineIdempotencyKey: offlineId,
-		method: opts.method,
+		method: methodToPost,
 		outboxType: config.outboxType,
+		parentOfflineIds,
+		shiftOfflineId,
+		postingDate,
+		ownerUser,
 	});
+}
+
+/**
+ * Resolve the device's UUID. Stored at `pospire.device_id` by
+ * `seedDeviceId()` inside `initOfflineStorage`. May be `null` if init never
+ * ran (offline-disabled mode).
+ */
+function getDeviceId(): string | null {
+	if (typeof localStorage === "undefined") return null;
+	try {
+		return localStorage.getItem("pospire.device_id");
+	} catch {
+		return null;
+	}
 }
 
 // ---------------------------------------------------------------------------

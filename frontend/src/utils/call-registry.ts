@@ -23,6 +23,36 @@ export interface ReadMethodConfig {
 	cacheTTLMs?: number;
 }
 
+/**
+ * Result of a registry's `toOfflinePayload` transform. The shape mirrors what
+ * the offline server endpoint expects (offline.py:478 etc.) plus optional
+ * dependency metadata that the outbox uses for ordering.
+ */
+export interface OfflinePayloadAdapterResult {
+	/** Method to POST when the scheduler drains this entry. Should resolve
+	 * to a `pospire.pospire.api.offline.*` endpoint (or another whitelisted
+	 * idempotent endpoint). */
+	method: string;
+	/** Server-shaped payload (typically `{data, offline_id, device_id, ...}`). */
+	payload: Record<string, unknown>;
+	/** Outbox-side dependency metadata. */
+	parentOfflineIds?: string[];
+	shiftOfflineId?: string | null;
+	postingDate?: string;
+	ownerUser?: string;
+}
+
+/**
+ * Adapter function — transforms the live UI args into the shape the offline
+ * endpoint expects. Invoked by `call.ts::enqueueWrite` only when an entry is
+ * about to be enqueued (offline OR network_error). The supplied `ctx` carries
+ * the generated `offline_id` and the device's `device_id`.
+ */
+export type ToOfflinePayload = (
+	args: Record<string, unknown>,
+	ctx: { offlineId: string; deviceId: string | null },
+) => OfflinePayloadAdapterResult;
+
 export interface WriteMethodConfig {
 	intent: "write";
 	/** True if the write is enqueueable in the outbox when offline. */
@@ -30,6 +60,14 @@ export interface WriteMethodConfig {
 	/** Outbox type bucket (invoice, material_receipt, …). Required when
 	 * `offline: true`; ignored when `offline: false`. */
 	outboxType?: string;
+	/**
+	 * REQUIRED when `offline: true`. Translates the UI's argument shape into
+	 * the offline endpoint's `(data, offline_id, device_id, ...)` contract,
+	 * AND returns the offline method name to POST during sync. Without this,
+	 * the live live-method's payload would be sent to the offline endpoint
+	 * and rejected (F5).
+	 */
+	toOfflinePayload?: ToOfflinePayload;
 }
 
 export type MethodConfig = ReadMethodConfig | WriteMethodConfig;
@@ -199,18 +237,85 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	},
 
 	// -----------------------------------------------------------------------
+	// Writes — UI-facing methods, offline-routed via toOfflinePayload
+	//
+	// Components keep calling these `posapp.*` paths. When the call() wrapper
+	// decides to enqueue (offline or post-network_error), it invokes
+	// `toOfflinePayload` to (a) reshape the UI args to the offline endpoint's
+	// (data, offline_id, device_id, ...) contract and (b) provide the
+	// `pospire.pospire.api.offline.*` method name for the scheduler to POST.
+	// Live online sends still go to the original posapp.* method.
+	// -----------------------------------------------------------------------
+	"pospire.pospire.api.posapp.submit_invoice": {
+		intent: "write",
+		offline: true,
+		outboxType: "invoice",
+		toOfflinePayload: (args, ctx) => {
+			const invoice = (args.invoice ?? {}) as Record<string, unknown>;
+			const data =
+				typeof args.data === "string"
+					? args.data
+					: JSON.stringify(args.data ?? {});
+			return {
+				method: "pospire.pospire.api.offline.submit_invoice",
+				payload: {
+					data,
+					invoice: typeof args.invoice === "string" ? args.invoice : JSON.stringify(invoice),
+					offline_id: ctx.offlineId,
+					device_id: ctx.deviceId,
+					opening_entry_offline_id: invoice.pos_opening_shift_offline_id ?? null,
+					material_receipt_offline_ids: invoice.pos_material_receipt_offline_ids ?? null,
+				},
+				shiftOfflineId: (invoice.pos_opening_shift_offline_id as string) ?? null,
+				parentOfflineIds: ([] as string[])
+					.concat(
+						(invoice.pos_material_receipt_offline_ids as string[]) ?? [],
+						invoice.pos_opening_shift_offline_id
+							? [invoice.pos_opening_shift_offline_id as string]
+							: [],
+					)
+					.filter(Boolean),
+				postingDate: invoice.posting_date as string | undefined,
+				ownerUser: invoice.owner as string | undefined,
+			};
+		},
+	},
+	"pospire.pospire.api.posapp.create_opening_voucher": {
+		intent: "write",
+		offline: true,
+		outboxType: "opening_entry",
+		toOfflinePayload: (args, ctx) => ({
+			method: "pospire.pospire.api.offline.create_opening_entry",
+			payload: {
+				data: JSON.stringify(args ?? {}),
+				offline_id: ctx.offlineId,
+				device_id: ctx.deviceId,
+			},
+		}),
+	},
+	"pospire.pospire.api.posapp.create_customer": {
+		intent: "write",
+		offline: true,
+		outboxType: "customer",
+		toOfflinePayload: (args, ctx) => ({
+			method: "pospire.pospire.api.offline.create_customer",
+			payload: {
+				data: JSON.stringify(args ?? {}),
+				offline_id: ctx.offlineId,
+				device_id: ctx.deviceId,
+			},
+		}),
+	},
+	// -----------------------------------------------------------------------
 	// Writes — LIVE ONLY
 	// Existing SPA writes that have NOT (yet) been re-implemented behind the
 	// offline-capable endpoints above. They fire live; on network_error they
 	// propagate to the caller rather than enqueuing. Revisit during Phase 2.
 	// -----------------------------------------------------------------------
-	"pospire.pospire.api.posapp.submit_invoice": { intent: "write", offline: false },
 	"pospire.pospire.api.posapp.update_invoice": { intent: "write", offline: false },
 	"pospire.pospire.api.posapp.update_invoice_from_order": { intent: "write", offline: false },
 	"pospire.pospire.api.posapp.delete_invoice": { intent: "write", offline: false },
 	"pospire.pospire.api.posapp.delete_sales_invoice": { intent: "write", offline: false },
-	"pospire.pospire.api.posapp.create_customer": { intent: "write", offline: false },
-	"pospire.pospire.api.posapp.create_opening_voucher": { intent: "write", offline: false },
 	"pospire.pospire.api.posapp.create_sales_invoice_from_order": {
 		intent: "write",
 		offline: false,
