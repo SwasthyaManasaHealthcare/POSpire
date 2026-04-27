@@ -519,6 +519,11 @@ export class SyncScheduler {
 		>;
 
 		try {
+			// F7: bypass call()'s online/offline gate. The scheduler has
+			// already (a) checked connectivity at drain-loop scope, (b) carries
+			// a resolved offline.* method, and (c) has a server-shaped payload
+			// from the outbox row. Re-entering call()'s normal flow would risk
+			// re-enqueueing if connectivity flips during the send.
 			const res = (await call({
 				method,
 				args: {
@@ -528,38 +533,38 @@ export class SyncScheduler {
 				},
 				intent: "write",
 				offlineIdempotencyKey: entry.offline_id,
-			})) as
-				| {
-						name?: string;
-						server_doc_name?: string;
-						was_already_submitted?: boolean;
-				  }
-				| { offline: true; offline_id: string; provisional_name: string };
-
-			// If we queued again (connectivity dropped mid-send), treat as
-			// transient retry.
-			if (
-				res &&
-				typeof res === "object" &&
-				"offline" in res &&
-				(res as { offline: boolean }).offline === true
-			) {
-				return {
-					kind: "retry",
-					category: "network_error",
-					detail: "re-enqueued during send",
-				};
-			}
-
-			const response = res as {
+				bypassConnectivityForReplay: true,
+			})) as {
 				name?: string;
 				server_doc_name?: string;
 				was_already_submitted?: boolean;
+				docstatus?: number;
+				is_background_job?: boolean;
 			};
 
-			// 2xx + idempotent duplicate → treat as synced (P-5).
+			// F6: refuse to mark "synced" if the server response represents a
+			// not-yet-final state. posapp.submit_invoice can return a draft
+			// (docstatus !== 1) when posa_allow_submissions_in_background_job
+			// is on; treating that as synced hides any later background-job
+			// failure. Idempotency makes a retry safe — the next POST returns
+			// the same name and (eventually) docstatus=1.
+			const docstatus = typeof res.docstatus === "number" ? res.docstatus : null;
+			if (
+				docstatus !== null &&
+				docstatus !== 1 &&
+				docstatus !== 2 // 2 = cancelled, also a settled terminal state
+			) {
+				return {
+					kind: "retry",
+					category: "server_5xx", // closest transient bucket; backoff applies
+					detail: `server returned docstatus=${docstatus}` +
+						(res.is_background_job ? " (background_job)" : ""),
+				};
+			}
+
+			// 2xx with terminal docstatus (or no docstatus reported) → synced.
 			const docName =
-				response.server_doc_name ?? response.name ?? entry.server_doc_name;
+				res.server_doc_name ?? res.name ?? entry.server_doc_name;
 			if (!docName) {
 				return {
 					kind: "needsReview",

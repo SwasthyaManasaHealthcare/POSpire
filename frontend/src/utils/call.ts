@@ -56,6 +56,16 @@ export interface CallOptions {
 	offlineIdempotencyKey?: string;
 	/** Cancel the in-flight request. */
 	abortSignal?: AbortSignal;
+	/**
+	 * Internal use by the sync scheduler. When `true`, bypasses the
+	 * online/offline gate and the registry's `toOfflinePayload` adapter:
+	 * the request goes straight to live fetch with the supplied method+args.
+	 * Prevents replay re-entrancy if connectivity flips mid-drain (F7).
+	 *
+	 * MUST NOT be set by component-level callers; only `@/offline/sync` uses
+	 * it. Idempotency on `pos_offline_id` keeps duplicate POSTs safe.
+	 */
+	bypassConnectivityForReplay?: boolean;
 }
 
 /** A cached read surfaces `stale: true` so callers type-narrow structurally. */
@@ -338,6 +348,24 @@ async function runRead<T>(opts: CallOptions, config: ReadMethodConfig): Promise<
 async function runWrite<T>(opts: CallOptions, config: WriteMethodConfig): Promise<CallResult<T>> {
 	const startedAt = nowMs();
 	const attempt = 1;
+
+	// Sync scheduler replay path (F7): bypass the connectivity gate AND the
+	// registry adapter — the scheduler already has the offline.* method and
+	// the server-shaped payload from the outbox row. Going through the gate
+	// risks re-enqueueing if connectivity flaps mid-drain (idempotency makes
+	// duplicate POSTs safe, but state-machine churn is fragile).
+	if (opts.bypassConnectivityForReplay) {
+		const result = await liveFetch<T>(opts);
+		emit({
+			method: opts.method,
+			intent: "write",
+			offline: false,
+			durationMs: nowMs() - startedAt,
+			outcome: "ok",
+			attempt,
+		});
+		return result;
+	}
 
 	// Generate idempotency key once — SAME id is used on an online-path
 	// network_error retry (P-5). Writes that aren't offline-capable still
