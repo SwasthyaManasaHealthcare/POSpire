@@ -68,7 +68,29 @@ export interface CallOptions {
 	bypassConnectivityForReplay?: boolean;
 }
 
-/** A cached read surfaces `stale: true` so callers type-narrow structurally. */
+/**
+ * A cached read response when the cache hit was stale. Callers MUST type-narrow:
+ *
+ * ```ts
+ * const r = await call<Item[]>({ method: "...", intent: "read", cacheKey: "items" });
+ * if (r && typeof r === "object" && "stale" in r) {
+ *   useStaleData(r.data);    // optionally show a "syncing" indicator
+ * } else if (r && typeof r === "object" && "offline" in r) {
+ *   handleEnqueueAck(r);     // (writes only, won't appear here)
+ * } else {
+ *   useFreshData(r);
+ * }
+ * ```
+ *
+ * Forgetting to unwrap `r.data` and assigning `r` directly to a list/object
+ * binding will surface as `[object Object]` or undefined fields. There is no
+ * runtime warning because the response is structurally valid — TypeScript's
+ * union narrows the wrapper away only when consumers branch on `'stale' in r`.
+ *
+ * Phase 2 component migration (read paths consuming `cacheKey`) MUST audit
+ * each call site for this unwrap. Tracked in
+ * docs/offline/phase-0/phase-2-followups.md.
+ */
 export interface StaleReadResult<T = unknown> {
 	data: T;
 	stale: true;
