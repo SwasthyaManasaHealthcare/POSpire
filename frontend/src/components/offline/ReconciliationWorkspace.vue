@@ -11,59 +11,112 @@
   <v-card class="reconciliation-workspace" elevation="1">
     <v-card-title class="reconciliation-workspace__title">
       {{ __('Reconciliation Workspace') }}
-      <v-chip v-if="needsReviewCount > 0" size="small" color="error" variant="tonal" class="ml-2">
-        {{ needsReviewCount }}
-      </v-chip>
     </v-card-title>
 
     <v-card-subtitle>
-      {{ __('Entries that failed to sync and need manager attention.') }}
+      {{ __('Pending and review entries from the offline outbox.') }}
     </v-card-subtitle>
+
+    <v-tabs v-model="activeTab" density="compact" color="primary">
+      <v-tab value="needs-review">
+        {{ __('Needs review') }}
+        <v-chip v-if="needsReviewCount > 0" size="x-small" color="error" variant="tonal" class="ml-2">
+          {{ needsReviewCount }}
+        </v-chip>
+      </v-tab>
+      <v-tab value="pending">
+        {{ __('Pending') }}
+        <v-chip v-if="pendingEntries.length > 0" size="x-small" color="warning" variant="tonal" class="ml-2">
+          {{ pendingEntries.length }}
+        </v-chip>
+      </v-tab>
+    </v-tabs>
 
     <v-divider />
 
-    <div v-if="entries.length === 0" class="reconciliation-workspace__empty">
-      <v-icon icon="mdi-check-circle-outline" size="48" color="success" />
-      <div>{{ __('No entries currently need review.') }}</div>
-    </div>
+    <v-window v-model="activeTab">
+      <!-- ========== NEEDS REVIEW TAB ========== -->
+      <v-window-item value="needs-review">
+        <div v-if="entries.length === 0" class="reconciliation-workspace__empty">
+          <v-icon icon="mdi-check-circle-outline" size="48" color="success" />
+          <div>{{ __('No entries currently need review.') }}</div>
+        </div>
 
-    <v-list v-else lines="two" class="reconciliation-workspace__list">
-      <v-list-item v-for="entry in entries" :key="entry.offline_id" class="reconciliation-workspace__row">
-        <template #prepend>
-          <v-icon :icon="iconForCategory(entry.last_error_category)" :color="colorForCategory(entry.last_error_category)"
-            size="large" />
-        </template>
+        <v-list v-else lines="two" class="reconciliation-workspace__list">
+          <v-list-item v-for="entry in entries" :key="entry.offline_id" class="reconciliation-workspace__row">
+            <template #prepend>
+              <v-icon :icon="iconForCategory(entry.last_error_category)"
+                :color="colorForCategory(entry.last_error_category)" size="large" />
+            </template>
 
-        <v-list-item-title class="reconciliation-workspace__headline">
-          <span class="reconciliation-workspace__shortid">OFFLINE-{{ shortId(entry.offline_id) }}</span>
-          <v-chip size="x-small" variant="tonal">{{ entry.type }}</v-chip>
-          <v-chip size="x-small" variant="tonal" :color="colorForCategory(entry.last_error_category)">
-            {{ entry.last_error_category || 'unknown' }}
-          </v-chip>
-        </v-list-item-title>
+            <v-list-item-title class="reconciliation-workspace__headline">
+              <span class="reconciliation-workspace__shortid">OFFLINE-{{ shortId(entry.offline_id) }}</span>
+              <v-chip size="x-small" variant="tonal">{{ entry.type }}</v-chip>
+              <v-chip size="x-small" variant="tonal" :color="colorForCategory(entry.last_error_category)">
+                {{ entry.last_error_category || 'unknown' }}
+              </v-chip>
+            </v-list-item-title>
 
-        <v-list-item-subtitle>
-          {{ __('Enqueued') }} {{ formatEnqueued(entry.enqueued_at) }}
-        </v-list-item-subtitle>
+            <v-list-item-subtitle>
+              {{ __('Enqueued') }} {{ formatEnqueued(entry.enqueued_at) }}
+            </v-list-item-subtitle>
 
-        <template #append>
-          <div class="reconciliation-workspace__actions">
-            <v-btn size="small" color="primary" variant="tonal" :loading="busyIds[entry.offline_id] === 'retry'"
-              :disabled="!!busyIds[entry.offline_id]" @click="onRetry(entry.offline_id)">
-              {{ __('Retry') }}
-            </v-btn>
-            <v-btn size="small" color="warning" variant="tonal" :disabled="!!busyIds[entry.offline_id]"
-              @click="onEditRetry">
-              {{ __('Edit & Retry') }}
-            </v-btn>
-            <v-btn size="small" color="error" variant="tonal" :loading="busyIds[entry.offline_id] === 'void'"
-              :disabled="!!busyIds[entry.offline_id]" @click="openVoidDialog(entry.offline_id)">
-              {{ __('Void') }}
-            </v-btn>
-          </div>
-        </template>
-      </v-list-item>
-    </v-list>
+            <template #append>
+              <div class="reconciliation-workspace__actions">
+                <v-btn size="small" color="primary" variant="tonal" :loading="busyIds[entry.offline_id] === 'retry'"
+                  :disabled="!!busyIds[entry.offline_id]" @click="onRetry(entry.offline_id)">
+                  {{ __('Retry') }}
+                </v-btn>
+                <v-btn size="small" color="warning" variant="tonal" :disabled="!!busyIds[entry.offline_id]"
+                  @click="onEditRetry">
+                  {{ __('Edit & Retry') }}
+                </v-btn>
+                <v-btn size="small" color="error" variant="tonal" :loading="busyIds[entry.offline_id] === 'void'"
+                  :disabled="!!busyIds[entry.offline_id]" @click="openVoidDialog(entry.offline_id)">
+                  {{ __('Void') }}
+                </v-btn>
+              </div>
+            </template>
+          </v-list-item>
+        </v-list>
+      </v-window-item>
+
+      <!-- ========== PENDING TAB (read-only) ========== -->
+      <v-window-item value="pending">
+        <div v-if="pendingEntries.length === 0" class="reconciliation-workspace__empty">
+          <v-icon icon="mdi-cloud-check-outline" size="48" color="success" />
+          <div>{{ __('Queue is clear — nothing waiting to sync.') }}</div>
+        </div>
+
+        <v-list v-else lines="two" class="reconciliation-workspace__list">
+          <v-list-item v-for="entry in pendingEntries" :key="entry.offline_id"
+            class="reconciliation-workspace__row">
+            <template #prepend>
+              <v-icon :icon="iconForPendingStatus(entry.status, entry.blocked_reason)" color="grey-darken-1"
+                size="large" />
+            </template>
+
+            <v-list-item-title class="reconciliation-workspace__headline">
+              <span class="reconciliation-workspace__shortid">OFFLINE-{{ shortId(entry.offline_id) }}</span>
+              <v-chip size="x-small" variant="tonal">{{ entry.type }}</v-chip>
+              <v-chip size="x-small" variant="tonal" :color="colorForPendingStatus(entry.status)">
+                {{ labelForPendingStatus(entry.status, entry.blocked_reason) }}
+              </v-chip>
+              <v-chip v-if="entry.attempt_count > 0" size="x-small" variant="tonal" color="warning">
+                {{ __('attempt') }} {{ entry.attempt_count }}
+              </v-chip>
+            </v-list-item-title>
+
+            <v-list-item-subtitle>
+              {{ __('Enqueued') }} {{ formatEnqueued(entry.enqueued_at) }}
+              <span v-if="entry.next_attempt_at && entry.next_attempt_at > Date.now()">
+                · {{ __('next attempt') }} {{ formatEnqueued(entry.next_attempt_at) }}
+              </span>
+            </v-list-item-subtitle>
+          </v-list-item>
+        </v-list>
+      </v-window-item>
+    </v-window>
 
     <!-- Void confirmation dialog -->
     <v-dialog v-model="voidDialog.open" max-width="420" persistent>
@@ -113,12 +166,18 @@ export default defineComponent({
   name: "ReconciliationWorkspace",
   setup() {
     const outbox = useOutboxStore();
-    const { needsReviewEntries, needsReviewCount } = storeToRefs(outbox);
+    const { needsReviewEntries, needsReviewCount, pendingEntries } = storeToRefs(outbox);
 
     // Per-row in-flight guard so double-clicks don't fire duplicate actions.
     // Keyed by offline_id -> action tag (used to drive the right button's
     // loading state).
     const busyIds = reactive({});
+
+    // Active tab: default to needs-review when there's something to fix,
+    // otherwise default to pending so the cashier sees their queue.
+    const activeTab = ref(
+      needsReviewEntries.value.length > 0 ? "needs-review" : "pending",
+    );
 
     const entries = computed(() => needsReviewEntries.value);
 
@@ -155,6 +214,31 @@ export default defineComponent({
         default:
           return "mdi-help-circle-outline";
       }
+    }
+
+    function iconForPendingStatus(status, blockedReason) {
+      if (blockedReason === "waiting_for_parent" || blockedReason === "waiting_for_siblings") {
+        return "mdi-link-variant";
+      }
+      if (status === "in_flight") return "mdi-cloud-upload-outline";
+      if (status === "retry_pending") return "mdi-clock-outline";
+      return "mdi-cloud-sync-outline";
+    }
+
+    function labelForPendingStatus(status, blockedReason) {
+      if (blockedReason === "waiting_for_parent") return "waiting (parent)";
+      if (blockedReason === "waiting_for_siblings") return "waiting (siblings)";
+      if (blockedReason === "integrity_mismatch") return "integrity mismatch";
+      if (blockedReason === "schema_mismatch") return "schema mismatch";
+      if (status === "in_flight") return "syncing";
+      if (status === "retry_pending") return "retry pending";
+      return "queued";
+    }
+
+    function colorForPendingStatus(status) {
+      if (status === "in_flight") return "info";
+      if (status === "retry_pending") return "warning";
+      return "grey-darken-1";
     }
 
     function colorForCategory(cat) {
@@ -232,12 +316,17 @@ export default defineComponent({
     return {
       entries,
       needsReviewCount,
+      pendingEntries,
+      activeTab,
       busyIds,
       voidDialog,
       shortId,
       formatEnqueued,
       iconForCategory,
       colorForCategory,
+      iconForPendingStatus,
+      labelForPendingStatus,
+      colorForPendingStatus,
       onRetry,
       onEditRetry,
       openVoidDialog,

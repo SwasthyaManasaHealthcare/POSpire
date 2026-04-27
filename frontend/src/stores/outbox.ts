@@ -44,6 +44,23 @@ export interface NeedsReviewSummary {
 	enqueued_at: number;
 }
 
+/**
+ * Read-only projection of in-flight / queued rows for the workspace's
+ * "Pending" tab. No actions are exposed for these rows — they're either
+ * already being drained or waiting on the scheduler. Surfaced so the cashier
+ * tapping the navbar badge always lands somewhere useful, even when nothing
+ * has failed yet.
+ */
+export interface PendingSummary {
+	offline_id: string;
+	type: OutboxEntry["type"];
+	status: OutboxEntry["status"];
+	blocked_reason: OutboxEntry["blocked_reason"];
+	attempt_count: number;
+	enqueued_at: number;
+	next_attempt_at: number | null;
+}
+
 export const useOutboxStore = defineStore("outbox", () => {
 	// ---- reactive state -----------------------------------------------------
 
@@ -56,6 +73,9 @@ export const useOutboxStore = defineStore("outbox", () => {
 
 	/** Derived list for the workspace. Intentionally small projection. */
 	const needsReviewEntries = ref<NeedsReviewSummary[]>([]);
+
+	/** Derived list for the workspace's "Pending" tab — read-only. */
+	const pendingEntries = ref<PendingSummary[]>([]);
 
 	// ---- Dexie live subscriptions ------------------------------------------
 
@@ -144,6 +164,37 @@ export const useOutboxStore = defineStore("outbox", () => {
 		},
 	});
 	subscriptions.push(reviewSub);
+
+	/**
+	 * liveQuery for the workspace's "Pending" tab. Surfaces rows the scheduler
+	 * is still working on (enqueued / retry_pending / in_flight). Sorted by
+	 * enqueued_at ascending so the oldest-stuck row is at the top — that's
+	 * what a manager wants to see first when investigating a queue backlog.
+	 */
+	const pendingSub = liveQuery(async () => {
+		const rows = await db.outbox
+			.where("status")
+			.anyOf(["enqueued", "retry_pending", "in_flight"])
+			.toArray();
+		rows.sort((a, b) => a.enqueued_at - b.enqueued_at);
+		return rows.map<PendingSummary>((r) => ({
+			offline_id: r.offline_id,
+			type: r.type,
+			status: r.status,
+			blocked_reason: r.blocked_reason,
+			attempt_count: r.attempt_count,
+			enqueued_at: r.enqueued_at,
+			next_attempt_at: r.next_attempt_at,
+		}));
+	}).subscribe({
+		next: (rows) => {
+			pendingEntries.value = rows;
+		},
+		error: (err) => {
+			console.error("[stores/outbox] pending liveQuery error", err);
+		},
+	});
+	subscriptions.push(pendingSub);
 
 	// ---- BroadcastChannel (scheduler status, advisory only) ----------------
 
@@ -234,6 +285,7 @@ export const useOutboxStore = defineStore("outbox", () => {
 		needsReviewCount,
 		oldestPendingAt,
 		needsReviewEntries,
+		pendingEntries,
 		schedulerPhase,
 		// derived
 		queuedCount,

@@ -21,6 +21,17 @@
     <button v-if="bannerState === 'needs_review'" class="offline-banner__link" @click="$emit('open-reconciliation')">
       {{ __('Review now') }}
     </button>
+    <!--
+      OFFLINE state: cashier-tappable "Try connection now". Forces an immediate
+      ping (bypasses polling cadence). On success, single ping is enough to
+      transition the detector to ONLINE; the scheduler then drains naturally.
+      On failure we surface a toast so the tap doesn't feel ignored.
+    -->
+    <button v-if="bannerState === 'offline'" class="offline-banner__link" :disabled="trying"
+      @click="onTryConnectionNow">
+      <v-icon v-if="trying" size="small" class="mr-1">mdi-loading mdi-spin</v-icon>
+      {{ trying ? __('Checking…') : __('Try connection now') }}
+    </button>
   </div>
 </template>
 
@@ -32,11 +43,13 @@
  * I/O (P-2); no `frappe-ui` imports (component-level rule). The banner is
  * presentational — actions like force-online live on a manager panel.
  */
-import { computed, defineComponent } from "vue";
+import { computed, defineComponent, ref } from "vue";
 import { storeToRefs } from "pinia";
+import { toast } from "vue3-toastify";
 
 import { useConnectivityStore } from "@/stores/connectivity";
 import { useOutboxStore } from "@/stores/outbox";
+import connectivityModule from "@/offline/connectivity";
 
 export default defineComponent({
   name: "OfflineBanner",
@@ -44,6 +57,21 @@ export default defineComponent({
   setup() {
     const connectivity = useConnectivityStore();
     const outbox = useOutboxStore();
+    const trying = ref(false);
+
+    async function onTryConnectionNow() {
+      if (trying.value) return;
+      trying.value = true;
+      try {
+        const ok = await connectivityModule.forcePingNow();
+        if (!ok) {
+          toast.warning(__("Still offline — server unreachable"), { autoClose: 3000 });
+        }
+        // On success the connectivity transition fires; banner auto-hides.
+      } finally {
+        trying.value = false;
+      }
+    }
 
     // `storeToRefs` preserves reactivity on destructured refs.
     const { connectionQuality } = storeToRefs(connectivity);
@@ -113,6 +141,8 @@ export default defineComponent({
       label,
       subLabel,
       iconForState,
+      trying,
+      onTryConnectionNow,
     };
   },
 });

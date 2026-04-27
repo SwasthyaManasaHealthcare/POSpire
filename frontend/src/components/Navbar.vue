@@ -48,10 +48,13 @@
       <!--
         Offline pending-sync badge. Hidden when queuedCount === 0. Reads
         from @/stores/outbox (Pinia reactive facade over Dexie liveQuery).
+        Clickable: emits `open-reconciliation` so the parent can route to the
+        ReconciliationWorkspace. The workspace itself surfaces both pending
+        rows (read-only) and needs_review rows (with Retry/Void/Edit actions).
       -->
       <div v-if="queuedCount > 0" class="sync-badge-wrapper">
-        <v-chip class="sync-badge" variant="tonal" color="warning" size="small"
-          :title="__('Transactions pending sync')">
+        <v-chip class="sync-badge" variant="tonal" color="warning" size="small" clickable
+          :title="__('Tap to view pending and review queue')" @click="$emit('open-reconciliation')">
           <v-icon start size="small">mdi-cloud-sync-outline</v-icon>
           {{ queuedCount }} {{ __('pending') }}
         </v-chip>
@@ -173,6 +176,7 @@ import { useOutboxStore } from "@/stores/outbox";
 export default {
   // components: {MyPopup},
   mixins: [hardwareUtils],
+  emits: ["open-reconciliation"],
   setup() {
     // Surfaces the outbox depth on the navbar (pending + in-flight). Hidden
     // in the template when queuedCount is 0 so the navbar is unchanged in

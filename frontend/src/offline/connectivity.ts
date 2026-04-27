@@ -10,9 +10,13 @@
  *     3 consecutive ping successes → ONLINE. Going online is riskier.
  *   - No recursive setTimeout that outlives the component; `stop()` is
  *     called on `Pos.vue` unmount.
- *   - DEGRADED is observable to the UI even though transitions use the
- *     binary online/offline thresholds; it surfaces the "flapping" state
- *     detected via D-31 adaptive banner debounce.
+ *   - DEGRADED is observable in the type union but is NOT currently emitted
+ *     by `reportRequestOutcome` — Phase 1 ships binary online/offline only.
+ *     Wiring DEGRADED is a Phase 2 task: introduce an RTT band (e.g. > 500ms
+ *     for N consecutive pings → DEGRADED) and a corresponding transition.
+ *     The OfflineBanner already has the amber DEGRADED state styled and
+ *     copy-ready. See docs/offline/04-connectivity-detection.md §3 and the
+ *     Phase 2 plan in docs/offline/16-phase-plan.md.
  */
 
 import { frappeRequest } from "frappe-ui";
@@ -214,6 +218,64 @@ export function drainLog(): ConnectivityLogEntry[] {
 	return out;
 }
 
+/**
+ * User-initiated immediate ping. Bypasses the polling cadence so a cashier
+ * who knows the network is back can recover faster than waiting for the next
+ * scheduled ping.
+ *
+ * Semantics differ from auto-detection:
+ *   - On success: bypasses the THRESHOLD_ONLINE 3-success rule and transitions
+ *     directly to ONLINE if currently OFFLINE/DEGRADED. Rationale — the user
+ *     made an affirmative request; if a single ping succeeds we trust it,
+ *     and auto-detection takes over from there.
+ *   - On failure: increments consecutiveFailures normally (no special
+ *     treatment). May or may not push to OFFLINE depending on threshold.
+ *
+ * Returns whether the ping itself succeeded (not whether the state changed).
+ * The banner uses this to drive a "still offline" toast on failure.
+ */
+export async function forcePingNow(): Promise<boolean> {
+	const startedAt = Date.now();
+	try {
+		const res = (await frappeRequest({
+			url: `/api/method/${PING_METHOD}`,
+			method: "POST",
+		})) as { ok?: boolean; server_time?: string; server_version?: string };
+
+		state.lastPingAt = Date.now();
+		state.lastPingRttMs = Date.now() - startedAt;
+
+		const ok =
+			res &&
+			res.ok === true &&
+			typeof res.server_time === "string" &&
+			!Number.isNaN(Date.parse(res.server_time)) &&
+			typeof res.server_version === "string";
+
+		if (!ok) {
+			recordFailure("force_ping_malformed_response");
+			return false;
+		}
+
+		if (typeof res.server_version === "string") {
+			lastKnownServerVersion = res.server_version;
+		}
+
+		// User-initiated success: jump the threshold so a single tap recovers.
+		state.consecutiveFailures = 0;
+		state.consecutiveSuccesses = THRESHOLD_ONLINE;
+		if (!isStateOnline(state.status)) {
+			transition("online", "force_ping_success");
+		}
+		return true;
+	} catch {
+		state.lastPingAt = Date.now();
+		state.lastPingRttMs = null;
+		recordFailure("force_ping_network_error");
+		return false;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Ping scheduling
 // ---------------------------------------------------------------------------
@@ -405,6 +467,7 @@ export const connectivity = {
 	stop,
 	reportRequestOutcome,
 	drainLog,
+	forcePingNow,
 };
 
 export default connectivity;
