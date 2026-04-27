@@ -208,17 +208,26 @@ export const useOutboxStore = defineStore("outbox", () => {
 	let channel: BroadcastChannel | null = null;
 	try {
 		if (typeof BroadcastChannel !== "undefined") {
-			// Must match BROADCAST_CHANNEL_NAME in @/offline/sync.ts
+			// Must match BROADCAST_CHANNEL_NAME in @/offline/sync.ts. Scheduler
+			// publishes `{kind:"sync_state", phase, leader, queue_depth, ...}`
+			// after each drain cycle and on phase transitions.
 			channel = new BroadcastChannel("pospire-offline");
 			channel.addEventListener("message", (ev) => {
-				const data = ev.data as { phase?: string } | undefined;
-				if (!data || typeof data.phase !== "string") return;
+				const data = ev.data as
+					| { kind?: string; phase?: string }
+					| undefined;
+				if (!data) return;
+				// Accept the canonical "sync_state" payload OR a bare {phase}
+				// payload (defensive, in case any code path posts the simpler
+				// shape).
+				const phase =
+					data.kind === "sync_state" || !data.kind ? data.phase : undefined;
 				if (
-					data.phase === "idle" ||
-					data.phase === "draining" ||
-					data.phase === "paused"
+					phase === "idle" ||
+					phase === "draining" ||
+					phase === "paused"
 				) {
-					schedulerPhase.value = data.phase;
+					schedulerPhase.value = phase;
 				}
 			});
 		}

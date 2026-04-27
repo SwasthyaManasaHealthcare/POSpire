@@ -1,6 +1,8 @@
-# POSpire Service Worker (Agent 4)
+# POSpire Service Worker
 
-Scope: app shell only. Never caches `/api/method/*` or `/api/resource/*`. See
+Scope: app shell only. **Never caches `/api/method/*`, `/api/resource/*`, or
+`/api/v2/*`** (P-3 — non-negotiable). API response caching is the offline
+adapter's job (Agent 1's Dexie repos), not the SW. See
 `docs/offline/01-architecture-principles.md` (P-3) and
 `docs/offline/10-service-worker.md` for the full spec.
 
@@ -8,104 +10,88 @@ Scope: app shell only. Never caches `/api/method/*` or `/api/resource/*`. See
 
 | Path | Role |
 |---|---|
-| `frontend/public/sw.js` | Source Service Worker. Contains placeholders `__BUILD_HASH__` and `__PRECACHE_URLS__`. Not served directly. |
-| `frontend/public/offline.html` | Minimal fallback page (no JS, no bundle). Served when shell isn't cached yet. |
+| `frontend/public/sw.js` | Source SW. Contains placeholders `__BUILD_HASH__` and `__PRECACHE_URLS__` that the Vite plugin patches at build time. |
+| `frontend/public/offline.html` | Minimal fallback page (no JS, no bundle). Served when navigation requests miss the cached shell. |
 | `frontend/src/offline/registerServiceWorker.js` | Registers `/sw.js` at root scope in PROD only. Shows a non-blocking update toast on `NEW_VERSION_AVAILABLE`. |
-| `frontend/vite-plugin-sw.js` | Build-time plugin that injects `BUILD_HASH` + precache URL list, then mirrors `sw.js` / `offline.html` into `pospire/www/`. |
+| `frontend/vite-plugin-sw.js` | Build plugin: substitutes `BUILD_HASH` + precache URL list, then mirrors the patched `sw.js` and `offline.html` into `pospire/www/`. |
+| `pospire/www/sw.js` | **Build artifact** (gitignored). Patched by the Vite plugin; served at `/sw.js` by Frappe's TemplatePage renderer. |
+| `pospire/www/sw.py` | Header-only controller. Sets `Service-Worker-Allowed: /` and `Cache-Control: no-store`. Same canonical pattern as `frappe/www/website_script.py`. |
+| `pospire/www/offline.html` | **Build artifact** (gitignored). Served at `/offline.html`; default `text/html` Content-Type from `mimetypes.guess_type` is correct, no `.py` companion needed. |
 
-## How BUILD_HASH is injected
+## How `BUILD_HASH` is injected
 
-At build time (`vite build`) the plugin in `frontend/vite-plugin-sw.js`:
+At `vite build` time, the plugin in `frontend/vite-plugin-sw.js`:
 
-1. Walks the emitted bundle and builds a precache URL list (every hashed
-   JS/CSS chunk plus assets, scoped to the Vite `base` URL
+1. Walks the emitted bundle and assembles a precache URL list (every hashed
+   JS/CSS chunk plus copied assets, scoped to the Vite `base` URL
    `/assets/pospire/frontend/`).
-2. Computes a 12-char SHA-1 over the sorted URL list — this is `BUILD_HASH`.
-   It changes whenever any shell file changes (because Vite emits
-   content-hashed filenames).
+2. Computes a 12-char SHA-1 over the sorted URL list — that's `BUILD_HASH`.
+   It changes whenever any shell file changes (Vite emits content-hashed
+   filenames).
 3. Replaces the placeholder strings `"__BUILD_HASH__"` and
    `"__PRECACHE_URLS__"` inside the emitted `sw.js`.
-4. Copies the patched `sw.js` plus `offline.html` into
-   `pospire/www/` so Frappe's website layer can serve them.
+4. Mirrors the patched `sw.js` plus `offline.html` into `pospire/www/`.
+   Path is anchored on `__dirname` (derived from `import.meta.url` because
+   the plugin is ESM) — see `vite-plugin-sw.js:11`.
 
-If the placeholders are ever left unreplaced (e.g. someone loads `sw.js`
-directly from the dev server), the SW falls back to `BUILD_HASH = "dev"` and
-`PRECACHE_URLS = ["/offline.html"]`. Registration is gated on `import.meta.env.PROD`
-in `main.js`, so this path should not occur in practice.
+If placeholders are ever left unreplaced, the SW falls back to
+`BUILD_HASH = "dev"` and `PRECACHE_URLS = ["/offline.html"]`. Registration
+is gated on `import.meta.env.PROD` in `main.js` so this path normally only
+appears in dev where SW registration is disabled anyway.
 
-## Serving `/sw.js` and `/offline.html` at root scope (REQUIRED)
+## How `/sw.js` is served at root scope
 
-A Service Worker can only control URLs inside its own scope. Served from
-`/assets/pospire/frontend/sw.js` it would only control `/assets/pospire/frontend/*`,
-which is useless — the SPA mounts at `/pospire/*`. Options, in order of
-preference (per `docs/offline/10-service-worker.md` §2.2):
+A Service Worker only controls URLs inside its own served path's directory
+by default. Served from `/assets/pospire/frontend/sw.js`, it would only
+control `/assets/pospire/frontend/*` — useless because the SPA mounts at
+`/pospire/*`. So we serve the file at `/sw.js` (root).
 
-### Option A — Frappe whitelisted controller (preferred, not yet wired)
+**Mechanism: canonical Frappe www-page pattern.**
 
-Add to `pospire/pospire/api/offline.py`:
-
-```python
-import frappe
-from pathlib import Path
-
-@frappe.whitelist(allow_guest=True, methods=["GET"])
-def sw_js() -> None:
-    path = Path(frappe.get_app_path("pospire")) / "www" / "sw.js"
-    frappe.local.response.type = "binary"
-    frappe.local.response.filename = "sw.js"
-    frappe.local.response.filecontent = path.read_bytes()
-    frappe.local.response.headers["Content-Type"] = "application/javascript"
-    frappe.local.response.headers["Service-Worker-Allowed"] = "/"
-    frappe.local.response.headers["Cache-Control"] = "no-cache"
-
-
-@frappe.whitelist(allow_guest=True, methods=["GET"])
-def offline_html() -> None:
-    path = Path(frappe.get_app_path("pospire")) / "www" / "offline.html"
-    frappe.local.response.type = "binary"
-    frappe.local.response.filename = "offline.html"
-    frappe.local.response.filecontent = path.read_bytes()
-    frappe.local.response.headers["Content-Type"] = "text/html; charset=utf-8"
+```
+pospire/www/sw.js   ← patched JS (build artifact, gitignored)
+pospire/www/sw.py   ← header-only companion controller
 ```
 
-And add to `pospire/hooks.py`:
+When the browser requests `/sw.js`, Frappe's `TemplatePage` resolver matches
+`pospire/www/sw.js` exactly (see `template_page.py:78` —
+`get_index_path_options` tries the bare path first). The companion `sw.py`
+runs as a controller and sets:
 
-```python
-website_route_rules = [
-    {"from_route": "/pospire/<path:app_path>", "to_route": "pospire"},
-    {"from_route": "/sw.js", "to_route": "pospire.pospire.api.offline.sw_js"},
-    {"from_route": "/offline.html", "to_route": "pospire.pospire.api.offline.offline_html"},
-]
-```
+* `Service-Worker-Allowed: /` — defensive; serving from `/sw.js` already
+  defaults to root scope, but explicit is safer behind reverse proxies.
+* `Cache-Control: no-cache, no-store, must-revalidate` — the SW source
+  shouldn't be cached by the browser; the SW manages its own
+  versioned-cache lifecycle.
+* `no_cache = 1` — disables Frappe's Redis cache for the rendered page.
 
-**This is out-of-scope for Agent 4** (the task is the SW itself). The spec's
-§2.2.2 spike validates Option A on staging before Phase 6.
+`Content-Type: application/javascript` is set automatically by
+`frappe/website/utils.py:set_content_type` via `mimetypes.guess_type("/sw.js")`
+— no override needed.
 
-### Option B / C / D
-
-See `docs/offline/10-service-worker.md` §2.2.1. Option B uses
-`website_route_rules` with a header hook; Option C puts the rule in
-nginx/Caddy; Option D ships without SW (degraded mode — offline shell
-unavailable).
+`hooks.py:website_route_rules` does NOT contain an entry for `/sw.js` or
+`/offline.html`. Those rules route to website pages, not to whitelisted
+RPC methods, so `to_route: "<dotted.api.method>"` would not dispatch.
 
 ## Update lifecycle
 
-1. New build deployed. Browser fetches `/sw.js`, byte-compares to the old one;
-   if different, installs.
-2. On `install`, the new SW precaches under `pospire-shell-v{newHash}`. If any
-   precache URL fails, the install rejects and the **old cache stays live**.
-3. On `activate`, caches whose name starts with `pospire-shell-v` and isn't
-   the current one are deleted. The new SW `postMessage`s
+1. New build deployed. Browser fetches `/sw.js`, byte-compares against the
+   installed SW; if different, installs.
+2. On `install`, the new SW precaches under `pospire-shell-v{newHash}`. If
+   any precache URL fails, install rejects and **the old cache stays live**.
+3. On `activate`, caches whose name starts with `pospire-shell-v` and
+   isn't the current one are deleted. The new SW `postMessage`s
    `NEW_VERSION_AVAILABLE` to all controlled clients.
-4. `registerServiceWorker.js` listens for this and displays a non-blocking
-   toast "Update available — reload to apply". No auto-reload.
+4. `registerServiceWorker.js` listens for that message and shows a
+   non-blocking toast "Update available — reload to apply". No auto-reload.
 
 ## Manual "Update now"
 
-The SPA can postMessage `{ type: "SKIP_WAITING" }` to `navigator.serviceWorker.controller`
-to force activation. Use for the admin panel "Update now" action (§5.4).
+The SPA can postMessage `{ type: "SKIP_WAITING" }` to
+`navigator.serviceWorker.controller` to force activation. Use for an admin
+"Update now" action.
 
-## Disabling SW
+## Disabling SW (dev / debugging)
 
 ```js
 navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister()));
@@ -113,12 +99,29 @@ caches.keys().then(keys => keys.filter(k => k.startsWith("pospire-shell-v"))
   .forEach(k => caches.delete(k)));
 ```
 
+## Verifying the chain locally
+
+```bash
+# 1. Build — the Vite plugin patches sw.js and writes to pospire/www/
+cd frontend && npm run build
+
+# 2. Restart so hooks.py + www/ files are picked up
+cd .. && bench restart   # or `bench start` from the bench root
+
+# 3. Confirm the response
+curl -I http://localhost:8000/sw.js
+#   HTTP 200, Content-Type: text/javascript, Service-Worker-Allowed: /, Cache-Control: no-store
+curl -I http://localhost:8000/offline.html
+#   HTTP 200, Content-Type: text/html
+
+# 4. In the browser (POS app reloaded)
+#    DevTools → Application → Service Workers
+#    Should show sw.js registered at scope `/`, status: activated and is running
+```
+
 ## Known gaps
 
-- Frappe controller for `/sw.js` + `/offline.html` routing is **not** in this
-  commit. It needs to ship alongside the SW before a production deploy.
-- CSP headers: if a deployment sets a strict CSP without `worker-src 'self'`,
-  registration silently fails. Deployment playbook must include the CSP
-  adjustment (see spec §6).
-- No test harness included yet; §9 of the spec lists the matrix to cover
-  before Phase 6.
+- CSP: deployments with strict CSP need `worker-src 'self'`. If absent,
+  registration silently fails. The deployment playbook must include this.
+- No SW test harness yet; test matrix in `docs/offline/10-service-worker.md`
+  §9 to cover before production rollout.

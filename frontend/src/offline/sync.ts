@@ -688,19 +688,29 @@ export class SyncScheduler {
 		this.publishStateToPeers(cycle);
 	}
 
-	private publishStateToPeers(cycle: SyncCycleLog): void {
+	/** Compute the scheduler's current phase for peer broadcast. */
+	private currentPhase(draining: boolean): "idle" | "draining" | "paused" {
+		if (!this.running) return "idle";
+		if (draining) return "draining";
+		// Running but no active cycle — non-leader, kill-switched, or offline
+		// → "paused". Leader idling between cycles → "idle".
+		if (!this.leader) return "paused";
+		return "idle";
+	}
+
+	private publishStateToPeers(cycle: SyncCycleLog | null, draining = false): void {
 		if (!this.broadcastChannel) return;
 		try {
 			this.broadcastChannel.postMessage({
-				kind: "sync_cycle",
+				kind: "sync_state",
+				phase: this.currentPhase(draining),
 				leader: this.leader,
-				queue_depth: cycle.queue_depth_start,
-				drained: cycle.drained,
-				needs_review: Object.values(cycle.moved_to_needs_review).reduce(
-					(a, b) => a + b,
-					0,
-				),
-				at: cycle.finished_at,
+				queue_depth: cycle?.queue_depth_start ?? null,
+				drained: cycle?.drained ?? 0,
+				needs_review: cycle
+					? Object.values(cycle.moved_to_needs_review).reduce((a, b) => a + b, 0)
+					: 0,
+				at: cycle?.finished_at ?? Date.now(),
 			});
 		} catch {
 			/* channel closed / post failed — not fatal */
