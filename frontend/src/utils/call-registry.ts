@@ -282,9 +282,12 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		outboxType: "invoice",
 		toOfflinePayload: (args, ctx) => {
 			// Payments.vue calls with {data: paymentMetadata, invoice: invoiceDoc}.
-			// offline.submit_invoice expects a SINGLE `data` arg containing the
-			// full invoice doc (with payment metadata merged in). Merge here so
-			// the server receives the Sales Invoice payload it expects (F1).
+			// offline.submit_invoice (offline.py:568) extracts the payment
+			// metadata from the inner payload as `posa_submit_data` and passes
+			// it as the second arg to posapp.submit_invoice — that's the path
+			// that handles credit_change / is_cashback / customer credit etc.
+			// (posapp.py:882). We must NOT merge the metadata into the invoice
+			// doc; it goes under a SEPARATE `posa_submit_data` key.
 			const rawInvoice = args.invoice ?? {};
 			const invoice = (
 				typeof rawInvoice === "string" ? JSON.parse(rawInvoice) : rawInvoice
@@ -294,20 +297,26 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				typeof rawPayment === "string" ? JSON.parse(rawPayment) : rawPayment
 			) as Record<string, unknown>;
 
-			const merged: Record<string, unknown> = { ...invoice, ...paymentMeta };
-			// _apply_payload_metadata requires both fields (P-5, P-11).
-			const postingDate = (merged.posting_date as string) ?? todayIso();
+			// _apply_payload_metadata requires both fields on the invoice doc
+			// (P-5, P-11).
+			const postingDate = (invoice.posting_date as string) ?? todayIso();
 			const ownerUser =
-				(merged.owner_user as string) ??
-				(merged.owner as string) ??
+				(invoice.owner_user as string) ??
+				(invoice.owner as string) ??
 				currentUser();
-			merged.posting_date = postingDate;
-			merged.owner_user = ownerUser;
+
+			const innerData: Record<string, unknown> = {
+				doctype: "Sales Invoice",
+				...invoice,
+				posa_submit_data: paymentMeta,
+				posting_date: postingDate,
+				owner_user: ownerUser,
+			};
 
 			return {
 				method: "pospire.pospire.api.offline.submit_invoice",
 				payload: {
-					data: JSON.stringify(merged),
+					data: JSON.stringify(innerData),
 					offline_id: ctx.offlineId,
 					device_id: ctx.deviceId,
 					opening_entry_offline_id:
@@ -330,48 +339,15 @@ export const methodRegistry: Record<string, MethodConfig> = {
 			};
 		},
 	},
+	// Opening a shift is live-only for now: posapp.create_opening_voucher
+	// returns a response that includes the full POS Profile doc, items,
+	// customers, payments, offers — all server-resolved data the SPA can't
+	// reconstruct offline. Component (OpeningDialog.vue) blocks the offline
+	// path with a clear message. Phase 2 will pre-cache the response shape
+	// to enable offline opening.
 	"pospire.pospire.api.posapp.create_opening_voucher": {
 		intent: "write",
-		offline: true,
-		outboxType: "opening_entry",
-		toOfflinePayload: (args, ctx) => {
-			// posapp.create_opening_voucher accepts loose UI args; the offline
-			// endpoint inserts the payload as a POS Opening Shift doc, so the
-			// adapter must build the doc shape here (F2). Mirrors the field
-			// set in posapp.create_opening_voucher:140-150.
-			const today = todayIso();
-			const user = currentUser();
-			const balance =
-				typeof args.balance_details === "string"
-					? args.balance_details
-					: JSON.stringify(args.balance_details ?? []);
-			const denominations =
-				typeof args.denomination_details === "string"
-					? args.denomination_details
-					: JSON.stringify(args.denomination_details ?? []);
-
-			return {
-				method: "pospire.pospire.api.offline.create_opening_entry",
-				payload: {
-					data: JSON.stringify({
-						doctype: "POS Opening Shift",
-						period_start_date: new Date().toISOString(),
-						posting_date: today,
-						owner_user: user,
-						user,
-						pos_profile: args.pos_profile,
-						company: args.company,
-						balance_details: JSON.parse(balance),
-						denomination_details: JSON.parse(denominations),
-						docstatus: 1,
-					}),
-					offline_id: ctx.offlineId,
-					device_id: ctx.deviceId,
-				},
-				postingDate: today,
-				ownerUser: user,
-			};
-		},
+		offline: false,
 	},
 	"pospire.pospire.api.posapp.create_customer": {
 		intent: "write",
@@ -399,10 +375,15 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				"email_id",
 				"gender",
 				"posa_referral_code",
-				"birthday",
 			] as const) {
 				const v = args[key];
 				if (v !== undefined && v !== null && v !== "") doc[key] = v;
+			}
+			// Live API stores birthday as `posa_birthday` (posapp.py:1369). Map
+			// the UI's `birthday` arg to that field so offline-created customers
+			// don't lose it.
+			if (args.birthday !== undefined && args.birthday !== null && args.birthday !== "") {
+				doc.posa_birthday = args.birthday;
 			}
 			if (args.referral_code) doc.posa_referral_code = args.referral_code;
 			if (args.company) doc.posa_referral_company = args.company;

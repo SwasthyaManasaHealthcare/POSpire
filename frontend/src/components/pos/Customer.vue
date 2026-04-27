@@ -93,10 +93,14 @@ export default {
 				pos_profile: profile_doc,
 			});
 			if (r) {
-				vm.customers = r;
+				// call() may return a StaleReadResult wrapper {data, stale, cachedAt}
+				// when the cache hit is stale. Unwrap so the customers list gets
+				// the array, not the wrapper object.
+				const customers = r && typeof r === "object" && "stale" in r ? r.data : r;
+				vm.customers = customers;
 				if (profile_doc?.posa_local_storage) {
 					localStorage.setItem("customer_storage", "");
-					localStorage.setItem("customer_storage", JSON.stringify(r));
+					localStorage.setItem("customer_storage", JSON.stringify(customers));
 				}
 			}
 		},

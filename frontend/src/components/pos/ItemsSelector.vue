@@ -469,7 +469,11 @@ export default {
 				customer: vm.customer,
 			}).then((r) => {
 				if (r) {
-					vm.items = r;
+					// call() may return a StaleReadResult wrapper {data, stale, cachedAt}
+					// when the cache hit is stale. Unwrap defensively so the items
+					// list always gets the array, not the wrapper object.
+					const items = r && typeof r === "object" && "stale" in r ? r.data : r;
+					vm.items = items;
 					vm.eventBus.emit("set_all_items", vm.items);
 					vm.loading = false;
 

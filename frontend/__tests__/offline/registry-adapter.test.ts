@@ -31,10 +31,10 @@ describe("registry adapter — submit_invoice", () => {
 		expect(cfg.toOfflinePayload).toBeTypeOf("function");
 	});
 
-	it("merges payment metadata into the invoice doc and sends it as a single `data` arg", () => {
+	it("places payment metadata under posa_submit_data — NOT merged into invoice fields", () => {
 		const result = cfg.toOfflinePayload!(
 			{
-				data: { credit_change: -5, is_cashback: 1 },
+				data: { credit_change: -5, is_cashback: 1, redeemed_customer_credit: 0 },
 				invoice: {
 					doctype: "Sales Invoice",
 					customer: "POS Customer",
@@ -52,19 +52,27 @@ describe("registry adapter — submit_invoice", () => {
 		expect(result.payload.device_id).toBe(CTX.deviceId);
 		expect(result.payload.opening_entry_offline_id).toBe("shift-42");
 		expect(result.payload.material_receipt_offline_ids).toEqual(["mr-1", "mr-2"]);
-
-		// `data` is the merged invoice + payment metadata, JSON-stringified for
-		// the server's `_load(data)` parser. NOT a separate `invoice` kwarg
-		// (the server would silently drop that — F1).
-		expect(typeof result.payload.data).toBe("string");
 		expect(result.payload).not.toHaveProperty("invoice");
+
+		// offline.submit_invoice (offline.py:568) extracts payment metadata from
+		// payload.posa_submit_data and passes it as the second arg to
+		// posapp.submit_invoice. If we merged it into invoice fields it would
+		// be lost — that branch in posapp (credit_change / is_cashback / etc.)
+		// would never fire.
 		const parsed = JSON.parse(result.payload.data as string);
 		expect(parsed.doctype).toBe("Sales Invoice");
 		expect(parsed.customer).toBe("POS Customer");
-		expect(parsed.credit_change).toBe(-5);
-		expect(parsed.is_cashback).toBe(1);
-		// posting_date / owner_user must be inside the merged data so the
-		// server's _apply_payload_metadata sees them (P-5, P-11).
+		// Payment metadata lives under posa_submit_data, separately:
+		expect(parsed.posa_submit_data).toEqual({
+			credit_change: -5,
+			is_cashback: 1,
+			redeemed_customer_credit: 0,
+		});
+		// And NOT scattered into the top-level invoice fields:
+		expect(parsed).not.toHaveProperty("credit_change");
+		expect(parsed).not.toHaveProperty("is_cashback");
+		// posting_date / owner_user are inside the inner data so
+		// _apply_payload_metadata sees them (P-5, P-11).
 		expect(parsed.posting_date).toBe("2026-04-25");
 		expect(parsed.owner_user).toBe("cashier@example.com");
 	});
@@ -113,39 +121,14 @@ describe("registry adapter — submit_invoice", () => {
 	});
 });
 
-describe("registry adapter — create_opening_voucher", () => {
-	const cfg = getWrite("pospire.pospire.api.posapp.create_opening_voucher");
-
-	it("constructs a POS Opening Shift doc with posting_date and owner_user", () => {
-		const result = cfg.toOfflinePayload!(
-			{
-				pos_profile: "Default",
-				company: "POSpire",
-				balance_details: [{ mode_of_payment: "Cash", amount: 100 }],
-				denomination_details: [],
-			},
-			CTX,
-		);
-		expect(result.method).toBe("pospire.pospire.api.offline.create_opening_entry");
-		expect(result.payload.offline_id).toBe(CTX.offlineId);
-		expect(result.payload.device_id).toBe(CTX.deviceId);
-
-		const parsed = JSON.parse(result.payload.data as string);
-		// Server inserts payload directly as a POS Opening Shift; doctype is required.
-		expect(parsed.doctype).toBe("POS Opening Shift");
-		expect(parsed.pos_profile).toBe("Default");
-		expect(parsed.company).toBe("POSpire");
-		expect(parsed.balance_details).toEqual([
-			{ mode_of_payment: "Cash", amount: 100 },
-		]);
-		// Server validates these via _apply_payload_metadata (F2 root cause).
-		expect(parsed.posting_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-		expect(typeof parsed.owner_user).toBe("string");
-		expect(parsed.owner_user.length).toBeGreaterThan(0);
-
-		// Outbox-side dependency metadata mirrors the inner data.
-		expect(result.postingDate).toBe(parsed.posting_date);
-		expect(result.ownerUser).toBe(parsed.owner_user);
+describe("registry — create_opening_voucher (live-only for now)", () => {
+	it("is intentionally NOT offline-capable (server response includes full POS Profile + items + customers + payments — not reconstructible client-side)", () => {
+		const cfg = methodRegistry["pospire.pospire.api.posapp.create_opening_voucher"];
+		expect(cfg).toBeDefined();
+		expect(cfg!.intent).toBe("write");
+		expect(cfg!.offline).toBe(false);
+		// OpeningDialog.vue blocks the offline path with a clear message.
+		// Phase 2 will pre-cache the response shape to enable offline opening.
 	});
 });
 
@@ -180,6 +163,18 @@ describe("registry adapter — create_customer", () => {
 		expect(parsed).not.toHaveProperty("email_id");
 
 		expect(result.ownerUser).toBe(parsed.owner_user);
+	});
+
+	it("maps UI `birthday` to the live API's `posa_birthday` field", () => {
+		// posapp.create_customer stores the field as posa_birthday (posapp.py:1369);
+		// without the rename, offline-created customers would lose the field.
+		const result = cfg.toOfflinePayload!(
+			{ customer_name: "Bob", birthday: "1990-04-25" },
+			CTX,
+		);
+		const parsed = JSON.parse(result.payload.data as string);
+		expect(parsed.posa_birthday).toBe("1990-04-25");
+		expect(parsed).not.toHaveProperty("birthday");
 	});
 });
 

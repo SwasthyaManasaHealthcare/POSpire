@@ -182,6 +182,7 @@
 
 <script>
 import { call } from "@/utils/call";
+import connectivity from "@/offline/connectivity";
 import { datetime } from "@/utils/datetime";
 import { playSound } from "@/utils/sounds";
 import { toast } from "vue3-toastify";
@@ -377,6 +378,19 @@ export default {
 				// If text is present but onBirthdayInput couldn't produce a valid Date, block.
 				if (!this.birthday) return;
 			}
+			// Edits ("update" path) are NOT offline-capable: the offline
+			// create_customer endpoint is create-only and would either fail or
+			// silently produce a duplicate. Block offline edits with a clear
+			// message; create still works offline via the adapter.
+			const isEdit = !!this.customer_id;
+			if (isEdit && !connectivity.isOnline()) {
+				toast.warning(
+					__("Editing an existing customer requires an online connection."),
+					{ autoClose: 4000 },
+				);
+				return;
+			}
+
 			this.submittingCustomer = true;
 			const args = {
 				customer_id: this.customer_id,
@@ -391,7 +405,7 @@ export default {
 				territory: this.territory,
 				customer_type: this.customer_type,
 				gender: this.gender,
-				method: this.customer_id ? "update" : "create",
+				method: isEdit ? "update" : "create",
 				pos_profile_doc: this.pos_profile,
 			};
 			try {

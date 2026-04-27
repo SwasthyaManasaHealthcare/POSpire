@@ -138,6 +138,7 @@
 
 <script>
 import { call } from "@/utils/call";
+import connectivity from "@/offline/connectivity";
 import format from "@/utils/format";
 import { toast } from "vue3-toastify";
 import { amountRules, isAmountValid } from "@/utils/validation";
@@ -326,6 +327,21 @@ export default {
 				denomination_details = JSON.stringify(rows);
 			}
 
+			// Opening a shift requires the full POS Profile doc + items + customers
+			// + payments + offers — all of which the server fetches on
+			// `update_opening_shift_data`. We can't reconstruct that response
+			// shape from cached client state alone. Block the offline path with
+			// a clear message; once a shift is opened online, the rest of the
+			// shift (sales, customer creation, returns) can run offline.
+			if (!connectivity.isOnline()) {
+				this.is_loading = false;
+				toast.warning(
+					__("Opening a shift requires an online connection. The rest of the shift can run offline once opened."),
+					{ autoClose: 5000 },
+				);
+				return;
+			}
+
 			try {
 				const r = await call("pospire.pospire.api.posapp.create_opening_voucher", {
 					pos_profile: this.pos_profile,
@@ -333,31 +349,6 @@ export default {
 					balance_details,
 					denomination_details,
 				});
-
-				// Offline-enqueue ack: { offline:true, offline_id, provisional_name,
-				// status:"enqueued" }. The shift doesn't exist server-side yet —
-				// emit a minimal shape that downstream listeners can use, marked
-				// with `pos_offline` so the SPA knows it's a provisional shift.
-				if (r && r.offline === true && r.status === "enqueued") {
-					this.eventBus.emit("register_pos_data", {
-						pos_opening_shift: {
-							name: r.provisional_name,
-							pos_offline_id: r.offline_id,
-							pos_profile: this.pos_profile,
-							company: this.company,
-						},
-						pos_profile: this.pos_profile,
-						company: this.company,
-						pos_offline: true,
-					});
-					this.eventBus.emit("set_company", this.company);
-					toast.info(
-						__("Opening shift queued offline — will sync when online."),
-						{ autoClose: 3000 },
-					);
-					this.close_opening_dialog();
-					return;
-				}
 
 				if (r) {
 					this.eventBus.emit("register_pos_data", r);
