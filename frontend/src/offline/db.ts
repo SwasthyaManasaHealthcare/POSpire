@@ -277,7 +277,12 @@ export function initOfflineStorage(): Promise<void> {
 	if (initPromise) return initPromise;
 	initPromise = (async () => {
 		try {
-			cleanupLegacyLocalStorage();
+			// Legacy localStorage cleanup is intentionally deferred until Phase 2
+			// component migration. POS components still read `customer_storage`,
+			// `items_storage`, `sales_persons_storage` directly; removing those
+			// keys here would break their offline reads. Re-enable
+			// `cleanupLegacyLocalStorage()` once the components have moved to
+			// either Agent 1's domain repos or `call({cacheKey})`.
 			seedDeviceId();
 			syncSchemaVersion();
 			await db.open();
