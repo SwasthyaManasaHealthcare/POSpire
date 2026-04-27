@@ -396,6 +396,26 @@ export default {
 			};
 			try {
 				const r = await call("pospire.pospire.api.posapp.create_customer", args);
+
+				// Offline-enqueue ack: r.offline === true with provisional_name.
+				// We treat it as success so the cashier can keep working — the
+				// provisional name (OFFLINE-CUST-…) replaces r.name everywhere
+				// the customer is referenced until sync resolves it server-side.
+				if (r && r.offline === true && r.status === "enqueued") {
+					const provisionalName = r.provisional_name;
+					toast.info(
+						__("Customer queued offline — will sync when online."),
+						{ autoClose: 3000 },
+					);
+					args.name = provisionalName;
+					args.pos_offline_id = r.offline_id;
+					playSound("submit");
+					this.eventBus.emit("add_customer_to_list", args);
+					this.eventBus.emit("set_customer", provisionalName);
+					this.close_dialog();
+					return;
+				}
+
 				if (r && r.name) {
 					const text = this.customer_id
 						? __("Customer Updated Successfully.")

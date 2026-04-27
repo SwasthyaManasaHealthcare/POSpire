@@ -333,6 +333,32 @@ export default {
 					balance_details,
 					denomination_details,
 				});
+
+				// Offline-enqueue ack: { offline:true, offline_id, provisional_name,
+				// status:"enqueued" }. The shift doesn't exist server-side yet —
+				// emit a minimal shape that downstream listeners can use, marked
+				// with `pos_offline` so the SPA knows it's a provisional shift.
+				if (r && r.offline === true && r.status === "enqueued") {
+					this.eventBus.emit("register_pos_data", {
+						pos_opening_shift: {
+							name: r.provisional_name,
+							pos_offline_id: r.offline_id,
+							pos_profile: this.pos_profile,
+							company: this.company,
+						},
+						pos_profile: this.pos_profile,
+						company: this.company,
+						pos_offline: true,
+					});
+					this.eventBus.emit("set_company", this.company);
+					toast.info(
+						__("Opening shift queued offline — will sync when online."),
+						{ autoClose: 3000 },
+					);
+					this.close_opening_dialog();
+					return;
+				}
+
 				if (r) {
 					this.eventBus.emit("register_pos_data", r);
 					this.eventBus.emit("set_company", r.company);
