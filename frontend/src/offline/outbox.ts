@@ -378,14 +378,33 @@ export async function markSynced(
 	serverDocName: string,
 ): Promise<void> {
 	assertWritable();
-	await outboxRepo.updateSchedulerFields(offlineId, {
-		status: "synced",
-		server_doc_name: serverDocName,
-		synced_at: Date.now(),
-		last_error_category: null,
-		last_error_detail: null,
-		blocked_reason: null,
-		next_attempt_at: null,
+	// Compare-and-swap: if a manager voided the row while the scheduler was
+	// mid-POST, leave the `voided` status intact. The server will have an
+	// extra doc; idempotency means a future replay returns the same name
+	// without inserting a duplicate. The local audit trail (status=voided)
+	// stays truthful.
+	await db.transaction("rw", db.outbox, async () => {
+		const row = await db.outbox.get(offlineId);
+		if (!row) return;
+		if (row.status === "voided") {
+			// Persist the server name so reconciliation can still link the
+			// voided local row to the remote doc, but don't change the status.
+			await db.outbox.put({
+				...row,
+				server_doc_name: serverDocName,
+			});
+			return;
+		}
+		await db.outbox.put({
+			...row,
+			status: "synced",
+			server_doc_name: serverDocName,
+			synced_at: Date.now(),
+			last_error_category: null,
+			last_error_detail: null,
+			blocked_reason: null,
+			next_attempt_at: null,
+		});
 	});
 }
 

@@ -89,6 +89,31 @@ describe("registry adapter — submit_invoice", () => {
 		expect(parsed.owner_user.length).toBeGreaterThan(0);
 	});
 
+	it("forwards customer_offline_id into inner data AND adds it to parentOfflineIds", () => {
+		// When an invoice references a customer that was created offline in
+		// the same shift, the server-side `_resolve_customer_by_offline_id`
+		// (offline.py:443) rewrites the customer link to the real name once
+		// the customer outbox row syncs — but only if `customer_offline_id`
+		// is present in the inner data.
+		const customerOffId = "aaaaaaaa-1111-4222-8333-444444444444";
+		const result = cfg.toOfflinePayload!(
+			{
+				data: {},
+				invoice: {
+					doctype: "Sales Invoice",
+					customer: "OFFLINE-CUST-aaaaaaaa",
+					customer_offline_id: customerOffId,
+				},
+			},
+			CTX,
+		);
+		const parsed = JSON.parse(result.payload.data as string);
+		expect(parsed.customer_offline_id).toBe(customerOffId);
+		// And added to parentOfflineIds so the scheduler waits for the
+		// customer outbox row to sync first (dependency ordering).
+		expect(result.parentOfflineIds).toContain(customerOffId);
+	});
+
 	it("produces dependency metadata for the outbox (parents + shift + posting + owner)", () => {
 		const result = cfg.toOfflinePayload!(
 			{
@@ -179,17 +204,14 @@ describe("registry adapter — create_customer", () => {
 });
 
 describe("registry hygiene", () => {
-	it("every offline-capable UI write has an outboxType AND a toOfflinePayload adapter", () => {
-		// `pospire.pospire.api.offline.*` entries are scheduler-replay-only:
-		// the scheduler POSTs them directly via `bypassConnectivityForReplay`,
-		// which skips both the connectivity gate and the adapter. Components
-		// must NOT call them directly. They still need to be registered (the
-		// registry validates every call() target), but they don't need an
-		// adapter because they ARE the offline endpoints.
+	it("every offline-capable write has an outboxType AND a toOfflinePayload adapter", () => {
+		// `offline.*` entries are scheduler-replay-only and registered as
+		// `offline: false` so a stray non-bypass call fails fast (T5). The
+		// loop's `if (!cfg.offline) continue` already skips them; no name-based
+		// exception needed.
 		for (const [name, cfg] of Object.entries(methodRegistry)) {
 			if (cfg.intent !== "write") continue;
 			if (!cfg.offline) continue;
-			if (name.includes("pospire.pospire.api.offline.")) continue;
 			expect(cfg.outboxType, `${name} missing outboxType`).toBeTruthy();
 			expect(
 				cfg.toOfflinePayload,

@@ -70,6 +70,10 @@ export default {
 		pos_profile: "",
 		customers: [],
 		customer: "",
+		// pos_offline_id of the current customer when it was offline-created
+		// (UpdateCustomer.vue emits `set_customer_offline_id` paired with the
+		// provisional name). null when the customer is server-resolved.
+		customer_offline_id: null,
 		readonly: false,
 		customer_info: {},
 	}),
@@ -146,6 +150,16 @@ export default {
 			});
 			this.eventBus.on("set_customer", (customer) => {
 				this.customer = customer;
+				// Default: clear any prior offline_id. UpdateCustomer.vue
+				// emits `set_customer_offline_id` AFTER set_customer when
+				// the customer was offline-created.
+				this.customer_offline_id = null;
+			});
+			this.eventBus.on("set_customer_offline_id", (offlineId) => {
+				this.customer_offline_id = offlineId;
+				// Re-broadcast paired with the customer so Invoice.vue can
+				// keep its own copy in sync without re-deriving.
+				this.eventBus.emit("update_customer_offline_id", offlineId);
 			});
 			this.eventBus.on("add_customer_to_list", (customer) => {
 				this.customers.push(customer);

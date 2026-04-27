@@ -235,35 +235,40 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	// Writes — offline-capable (outbox queues when offline; server enforces
 	// idempotency on offline_id per P-5)
 	// -----------------------------------------------------------------------
+	// These `offline.*` entries are scheduler-replay-only. The scheduler always
+	// sets `bypassConnectivityForReplay` when calling them, so the connectivity
+	// gate AND the registry adapter are both skipped. They're listed here only
+	// because call() validates every method against the registry. Mark
+	// `offline: false` so a stray non-bypass call (a future caller forgetting
+	// the bypass flag) fails loudly with `OfflineWriteUnavailable` when offline,
+	// instead of attempting to enqueue without an adapter.
 	"pospire.pospire.api.offline.submit_invoice": {
 		intent: "write",
-		offline: true,
-		outboxType: "invoice",
+		offline: false,
 	},
 	"pospire.pospire.api.offline.create_material_receipt": {
 		intent: "write",
-		offline: true,
-		outboxType: "material_receipt",
+		offline: false,
 	},
 	"pospire.pospire.api.offline.create_opening_entry": {
 		intent: "write",
-		offline: true,
-		outboxType: "opening_entry",
+		offline: false,
 	},
 	"pospire.pospire.api.offline.create_closing_entry": {
 		intent: "write",
-		offline: true,
-		outboxType: "closing_entry",
+		offline: false,
 	},
 	"pospire.pospire.api.offline.create_customer": {
 		intent: "write",
-		offline: true,
-		outboxType: "customer",
+		offline: false,
 	},
+	// T6: server endpoint not yet implemented (Phase 2 followup #4). Until it
+	// lands, mark live-only so a stray call fails fast instead of accumulating
+	// in an unreachable retry loop. Re-enable as offline-capable when the
+	// server endpoint ships.
 	"pospire.pospire.api.offline.create_return": {
 		intent: "write",
-		offline: true,
-		outboxType: "return",
+		offline: false,
 	},
 
 	// -----------------------------------------------------------------------
@@ -305,6 +310,15 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				(invoice.owner as string) ??
 				currentUser();
 
+			// Customer offline_id: when the cart's customer was offline-created,
+			// Invoice.vue sets `invoice.customer_offline_id`. Forward it inside
+			// the inner data so server's `_resolve_customer_by_offline_id`
+			// (offline.py:506-508) rewrites the link to the real customer name
+			// at sync time. Also add to parentOfflineIds so the scheduler waits
+			// for the customer outbox row to sync before draining this invoice.
+			const customerOfflineId =
+				(invoice.customer_offline_id as string | undefined) ?? undefined;
+
 			const innerData: Record<string, unknown> = {
 				doctype: "Sales Invoice",
 				...invoice,
@@ -312,6 +326,12 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				posting_date: postingDate,
 				owner_user: ownerUser,
 			};
+			// Server pops `customer_offline_id` from the inner data and uses it
+			// to resolve the link. Make sure it's there even if `invoice` came
+			// in as a JSON string with the field omitted at the top level.
+			if (customerOfflineId) {
+				innerData.customer_offline_id = customerOfflineId;
+			}
 
 			return {
 				method: "pospire.pospire.api.offline.submit_invoice",
@@ -332,6 +352,7 @@ export const methodRegistry: Record<string, MethodConfig> = {
 						invoice.pos_opening_shift_offline_id
 							? [invoice.pos_opening_shift_offline_id as string]
 							: [],
+						customerOfflineId ? [customerOfflineId] : [],
 					)
 					.filter(Boolean),
 				postingDate,

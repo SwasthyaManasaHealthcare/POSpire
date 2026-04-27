@@ -1126,6 +1126,10 @@ export default {
 			invoice_doc: "",
 			return_doc: "",
 			customer: "",
+			// Set when the cart's customer was offline-created. Forwarded onto
+			// the invoice doc as `customer_offline_id`; server resolves to the
+			// real customer name when the customer outbox row syncs.
+			customer_offline_id: null,
 			customer_info: "",
 			discount_amount: 0,
 			additional_discount_percentage: 0,
@@ -2077,6 +2081,14 @@ export default {
 			doc.update_stock = this.pos_profile.update_stock ? 1 : 0;
 			doc.naming_series = doc.naming_series || this.pos_profile.naming_series;
 			doc.customer = this.customer;
+			// When the customer was offline-created, server-side
+			// `_resolve_customer_by_offline_id` rewrites the link to the real
+			// name once the customer outbox row syncs. Without this field the
+			// invoice payload's `customer` value is the OFFLINE-CUST-... name
+			// which the server can't insert as a doc link.
+			if (this.customer_offline_id) {
+				doc.customer_offline_id = this.customer_offline_id;
+			}
 			doc.items = this.get_invoice_items();
 			doc.total = this.subtotal;
 			doc.discount_amount = flt(this.discount_amount);
@@ -3823,6 +3835,14 @@ export default {
 		});
 		this.eventBus.on("update_customer", (customer) => {
 			this.customer = customer;
+			// Selecting a different customer clears any stale offline_id from
+			// a previously-loaded offline-created customer. Customer.vue
+			// re-broadcasts `update_customer_offline_id` immediately after
+			// `update_customer` if the new selection is itself offline-created.
+			this.customer_offline_id = null;
+		});
+		this.eventBus.on("update_customer_offline_id", (offlineId) => {
+			this.customer_offline_id = offlineId;
 		});
 		this.eventBus.on("fetch_customer_details", () => {
 			this.fetch_customer_details();

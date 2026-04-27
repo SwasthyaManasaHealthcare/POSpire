@@ -426,6 +426,11 @@ export default {
 					playSound("submit");
 					this.eventBus.emit("add_customer_to_list", args);
 					this.eventBus.emit("set_customer", provisionalName);
+					// Pair the offline_id with the provisional name so the cart
+					// can pass `customer_offline_id` on the invoice — the server
+					// resolves it to the real customer name once the customer
+					// outbox row syncs.
+					this.eventBus.emit("set_customer_offline_id", r.offline_id);
 					this.close_dialog();
 					return;
 				}
@@ -439,6 +444,10 @@ export default {
 					playSound("submit");
 					this.eventBus.emit("add_customer_to_list", args);
 					this.eventBus.emit("set_customer", r.name);
+					// Real customer (online create / update) — ensure no stale
+					// offline_id from a previous offline customer leaks into the
+					// invoice.
+					this.eventBus.emit("set_customer_offline_id", null);
 					this.eventBus.emit("fetch_customer_details");
 					this.close_dialog();
 				} else {

@@ -679,7 +679,7 @@ export class SyncScheduler {
 	// -------------------------------------------------------------------
 
 	private beginCycle(): SyncCycleLog {
-		return {
+		const cycle = {
 			cycle_id: cryptoRandomId(),
 			started_at: Date.now(),
 			finished_at: 0,
@@ -690,6 +690,12 @@ export class SyncScheduler {
 			next_wake_ms: DEFAULT_WAKE_MS,
 			leader: this.leader,
 		};
+		// Broadcast `phase: "draining"` to non-leader tabs at cycle START so
+		// their UI can show "syncing…" in real time. Without this, peers only
+		// see the phase change at cycle END (when finishCycle publishes), and
+		// a long drain looks like "idle" until the very last entry resolves.
+		this.publishStateToPeers(null, /* draining */ true);
+		return cycle;
 	}
 
 	private async finishCycle(cycle: SyncCycleLog): Promise<void> {
@@ -829,6 +835,19 @@ function classifySendError(
 				kind: "needsReview",
 				category: errorCodeToCategory(errorCode, "validation_error"),
 				detail,
+			};
+		}
+		if (status === 401) {
+			// Session expired mid-drain. Returning `retry` would burn through
+			// 8 attempts in seconds (each one fails the same way). Mark as
+			// needs_review so the cashier can re-authenticate and replay from
+			// the workspace. We also signal the connectivity detector so the
+			// UI flips to a not-online state and the drain pauses.
+			connectivity.reportRequestOutcome("network_error");
+			return {
+				kind: "needsReview",
+				category: "permission_error",
+				detail: `session expired (401): ${detail}`,
 			};
 		}
 		if (status === 403) {
