@@ -261,19 +261,36 @@ def snapshot_profile_flags_onto_opening_shift(doc) -> None:
 	Called from `create_opening_entry` (offline path) and from the existing
 	online `create_opening_voucher` flow. The resulting snapshot is the
 	only source of truth read by submit-time handlers (Q-2 constraint).
+
+	**Cross-branch dependency**: the source POS Profile flags
+	(`custom_allow_negative_stock`, `custom_allow_add_to_stock_at_pos`) are
+	defined on the `feature/allow-negative-stock-pos` branch, NOT on this
+	(offline) branch. We cannot assume they exist on the running database —
+	the offline branch may run alone, alongside the feature branch, or
+	post-merge. To stay branch-independent we filter the read field list to
+	whatever the live POS Profile schema actually contains; missing flags
+	default to 0 in the snapshot. When the feature branch lands, this
+	function picks up the live values automatically with no code change.
 	"""
 	if not getattr(doc, "pos_profile", None):
 		return
 
-	profile_values = (
-		frappe.db.get_value(
-			"POS Profile",
-			doc.pos_profile,
-			list(POS_PROFILE_OFFLINE_FLAGS),
-			as_dict=True,
+	# Read only POS Profile fields that actually exist on this database.
+	profile_meta = frappe.get_meta("POS Profile")
+	source_fields = [f for f in POS_PROFILE_OFFLINE_FLAGS if profile_meta.has_field(f)]
+
+	if source_fields:
+		profile_values = (
+			frappe.db.get_value(
+				"POS Profile",
+				doc.pos_profile,
+				source_fields,
+				as_dict=True,
+			)
+			or {}
 		)
-		or {}
-	)
+	else:
+		profile_values = {}
 
 	if doc.meta.has_field("pos_profile_snapshot_allow_negative_stock"):
 		doc.pos_profile_snapshot_allow_negative_stock = cint(
