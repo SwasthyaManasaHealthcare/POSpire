@@ -33,6 +33,7 @@ import {
 	markSynced,
 	markNeedsReview,
 	nextReady,
+	resetForRetry,
 	scheduleRetry,
 	voidEntry,
 	getEntry,
@@ -352,6 +353,72 @@ describe("void", () => {
 		await expect(voidEntry(ack.offline_id, "oops")).rejects.toThrow(
 			/already synced/,
 		);
+	});
+
+	it("markSynced does NOT overwrite a voided row's status (T4 voided-race)", async () => {
+		const ack = await enqueue("invoice", { total: 10 });
+		await markInFlight(ack.offline_id);
+		await voidEntry(ack.offline_id, "manager cancelled mid-flight");
+
+		// Scheduler tries to mark synced AFTER void won the race.
+		await markSynced(ack.offline_id, "SI-1234");
+
+		const row = await db.outbox.get(ack.offline_id);
+		expect(row?.status).toBe("voided");
+		// Server-doc-name is still recorded for audit trail.
+		expect(row?.server_doc_name).toBe("SI-1234");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cascade-unblock dependents (T7)
+// ---------------------------------------------------------------------------
+
+describe("cascade-unblock dependents", () => {
+	it("clears blocked_reason on dependents when their parent is markSynced", async () => {
+		const customer = await enqueue("customer", { customer_name: "X" });
+		const inv = await enqueue(
+			"invoice",
+			{ customer: "X" },
+			{ parentOfflineIds: [customer.offline_id] },
+		);
+
+		// Simulate the scheduler having parked the invoice as blocked.
+		const invRow = await db.outbox.get(inv.offline_id);
+		await db.outbox.put({
+			...invRow!,
+			blocked_reason: "waiting_for_parent",
+		});
+
+		// Parent succeeds → invoice should be unblocked.
+		await markInFlight(customer.offline_id);
+		await markSynced(customer.offline_id, "CUST-1");
+
+		const after = await db.outbox.get(inv.offline_id);
+		expect(after?.blocked_reason).toBe(null);
+	});
+
+	it("clears blocked_reason on dependents when their parent is resetForRetry", async () => {
+		const customer = await enqueue("customer", { customer_name: "Y" });
+		const inv = await enqueue(
+			"invoice",
+			{ customer: "Y" },
+			{ parentOfflineIds: [customer.offline_id] },
+		);
+
+		// Customer hits needs_review (e.g. stock_shortage on a different
+		// dependent, or a parent of its own — doesn't matter for this test)
+		// then user retries it. Park the invoice as blocked.
+		const invRow = await db.outbox.get(inv.offline_id);
+		await db.outbox.put({
+			...invRow!,
+			blocked_reason: "waiting_for_parent",
+		});
+
+		await resetForRetry(customer.offline_id);
+
+		const after = await db.outbox.get(inv.offline_id);
+		expect(after?.blocked_reason).toBe(null);
 	});
 });
 

@@ -383,6 +383,7 @@ export async function markSynced(
 	// extra doc; idempotency means a future replay returns the same name
 	// without inserting a duplicate. The local audit trail (status=voided)
 	// stays truthful.
+	let cascade = false;
 	await db.transaction("rw", db.outbox, async () => {
 		const row = await db.outbox.get(offlineId);
 		if (!row) return;
@@ -405,7 +406,14 @@ export async function markSynced(
 			blocked_reason: null,
 			next_attempt_at: null,
 		});
+		cascade = true;
 	});
+	// Cascade-unblock any rows that were waiting on this parent (T7). Done
+	// outside the synced row's transaction because we want a fresh `rw` txn
+	// for the dependent puts and we don't need atomicity across the boundary.
+	if (cascade) {
+		await clearDependentsBlockedOn(offlineId);
+	}
 }
 
 export async function markNeedsReview(
@@ -537,10 +545,47 @@ export async function clearBlocked(offlineId: string): Promise<void> {
 	const stored = await db.outbox.get(offlineId);
 	if (!stored) return;
 	if (stored.blocked_reason === null) return;
+	if (stored.status === "voided") return; // terminal — don't unblock
 	await db.outbox.put({
 		...stored,
 		blocked_reason: null,
 		next_attempt_at: Date.now(),
+	});
+}
+
+/**
+ * Find all outbox rows that list `parentOfflineId` in their
+ * `parent_offline_ids`, and clear their `blocked_reason` so they re-enter
+ * the drain queue. Called from `markSynced` and `resetForRetry` to cascade-
+ * unblock dependents when their parent transitions to a syncable state.
+ *
+ * `evaluateParents` re-runs at drain time, so if OTHER parents are still
+ * in needs_review the row will be re-blocked then. Optimistic clearing
+ * keeps the state machine moving without coupling the dependency graph
+ * traversal into this helper.
+ */
+export async function clearDependentsBlockedOn(
+	parentOfflineId: string,
+): Promise<void> {
+	assertWritable();
+	const all = await db.outbox.toArray();
+	const dependents = all.filter(
+		(row) =>
+			row.parent_offline_ids.includes(parentOfflineId) &&
+			(row.blocked_reason === "waiting_for_parent" ||
+				row.blocked_reason === "waiting_for_siblings") &&
+			row.status !== "voided" &&
+			row.status !== "synced",
+	);
+	if (dependents.length === 0) return;
+	await db.transaction("rw", db.outbox, async () => {
+		for (const dep of dependents) {
+			await db.outbox.put({
+				...dep,
+				blocked_reason: null,
+				next_attempt_at: Date.now(),
+			});
+		}
 	});
 }
 
@@ -749,6 +794,7 @@ export async function resetForRetry(offlineId: string): Promise<void> {
 	assertWritable();
 	const stored = await db.outbox.get(offlineId);
 	if (!stored) throw new Error(`outbox ${offlineId} not found`);
+	if (stored.status === "voided") return; // terminal — refuse to revive
 	await db.outbox.put({
 		...stored,
 		status: "enqueued",
@@ -760,6 +806,11 @@ export async function resetForRetry(offlineId: string): Promise<void> {
 	});
 	// Wake the scheduler.
 	notifyEnqueued(await outboxRepoInternal.fromStored(stored));
+	// Cascade-unblock dependents that were parked on this parent (T7).
+	// They'll re-evaluate parents on the next drain — if this one is now
+	// in retry_pending/in_flight, they'll move to "waiting" not "blocked",
+	// keeping them out of the workspace's manual-action queue.
+	await clearDependentsBlockedOn(offlineId);
 }
 
 // ---------------------------------------------------------------------------

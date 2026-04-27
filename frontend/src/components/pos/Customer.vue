@@ -150,16 +150,9 @@ export default {
 			});
 			this.eventBus.on("set_customer", (customer) => {
 				this.customer = customer;
-				// Default: clear any prior offline_id. UpdateCustomer.vue
-				// emits `set_customer_offline_id` AFTER set_customer when
-				// the customer was offline-created.
-				this.customer_offline_id = null;
-			});
-			this.eventBus.on("set_customer_offline_id", (offlineId) => {
-				this.customer_offline_id = offlineId;
-				// Re-broadcast paired with the customer so Invoice.vue can
-				// keep its own copy in sync without re-deriving.
-				this.eventBus.emit("update_customer_offline_id", offlineId);
+				// customer_offline_id is derived in the watcher below from
+				// the customers list — single source of truth, avoids
+				// emit-ordering bugs.
 			});
 			this.eventBus.on("add_customer_to_list", (customer) => {
 				this.customers.push(customer);
@@ -200,8 +193,18 @@ export default {
 	},
 
 	watch: {
-		customer() {
-			this.eventBus.emit("update_customer", this.customer);
+		customer(newName) {
+			// Derive offline_id from the customers list (the single source of
+			// truth for offline-created customers — UpdateCustomer.vue pushes
+			// new offline customers via add_customer_to_list with pos_offline_id
+			// set). Emit both events together so Invoice.vue gets a coherent
+			// snapshot in one tick, avoiding the watcher-vs-handler race that
+			// previously erased the offline_id.
+			const entry = this.customers.find((c) => c && c.name === newName);
+			const offlineId = (entry && entry.pos_offline_id) || null;
+			this.customer_offline_id = offlineId;
+			this.eventBus.emit("update_customer", newName);
+			this.eventBus.emit("update_customer_offline_id", offlineId);
 		},
 	},
 };

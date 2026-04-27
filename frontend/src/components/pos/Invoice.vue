@@ -1875,6 +1875,10 @@ export default {
 			this.eventBus.emit("set_pos_coupons", []);
 			this.posa_coupons = [];
 			this.customer = this.pos_profile.customer;
+			// Reset any offline_id from a previously-resolved offline customer.
+			// Without this, the next sale would carry a stale offline_id onto
+			// its invoice doc and the server would resolve to the wrong customer.
+			this.customer_offline_id = null;
 			this.invoice_doc = "";
 			this.return_doc = "";
 			this.discount_amount = 0;
@@ -2023,6 +2027,7 @@ export default {
 				this.items = [];
 				this.deleted_items = [];
 				this.customer = this.pos_profile.customer;
+				this.customer_offline_id = null;
 				this.invoice_doc = "";
 				this.discount_amount = 0;
 				this.additional_discount_percentage = 0;
@@ -3834,12 +3839,12 @@ export default {
 			this.add_item(item);
 		});
 		this.eventBus.on("update_customer", (customer) => {
+			// Customer.vue's watcher pairs `update_customer` with
+			// `update_customer_offline_id` in the same tick (it derives the
+			// offline_id from the customers list). So we MUST NOT reset
+			// offline_id here — doing so would erase the value the paired
+			// listener just set.
 			this.customer = customer;
-			// Selecting a different customer clears any stale offline_id from
-			// a previously-loaded offline-created customer. Customer.vue
-			// re-broadcasts `update_customer_offline_id` immediately after
-			// `update_customer` if the new selection is itself offline-created.
-			this.customer_offline_id = null;
 		});
 		this.eventBus.on("update_customer_offline_id", (offlineId) => {
 			this.customer_offline_id = offlineId;

@@ -249,11 +249,23 @@ export async function updateSchedulerFields(
 	}>,
 ): Promise<void> {
 	assertWritable();
-	const stored = await db.outbox.get(offlineId);
-	if (!stored) {
-		throw new Error(`outbox ${offlineId} not found`);
-	}
-	await db.outbox.put({ ...stored, ...patch });
+	// Read-modify-write inside a single Dexie transaction so a parallel
+	// `voidEntry` can't sneak in between get() and put(). Voided rows are
+	// terminal — we preserve the voided status but still apply non-status
+	// fields (e.g. `server_doc_name`) so reconciliation can link the local
+	// audit row to the remote doc the scheduler eventually heard back about.
+	await db.transaction("rw", db.outbox, async () => {
+		const stored = await db.outbox.get(offlineId);
+		if (!stored) {
+			throw new Error(`outbox ${offlineId} not found`);
+		}
+		const merged = { ...stored, ...patch };
+		if (stored.status === "voided") {
+			merged.status = "voided";
+			merged.blocked_reason = stored.blocked_reason;
+		}
+		await db.outbox.put(merged);
+	});
 }
 
 /**
