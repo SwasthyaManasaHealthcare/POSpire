@@ -518,6 +518,19 @@ export class SyncScheduler {
 			unknown
 		>;
 
+		// Defensive: ensure posting_date + owner_user are inside the inner
+		// `data` JSON so the server's _apply_payload_metadata accepts the
+		// request. The adapter normally puts them there at enqueue time, but
+		// (a) older queued rows pre-dating the adapter fix may not have them,
+		// and (b) the outbox stores authoritative posting_date / owner_user
+		// snapshots at the entry level — we prefer the entry's snapshot over
+		// any value left over from cart-time defaults.
+		const replayPayload = patchInnerDataMetadata(
+			resolvedPayload,
+			entry.posting_date,
+			entry.owner_user,
+		);
+
 		try {
 			// F7: bypass call()'s online/offline gate. The scheduler has
 			// already (a) checked connectivity at drain-loop scope, (b) carries
@@ -527,7 +540,7 @@ export class SyncScheduler {
 			const res = (await call({
 				method,
 				args: {
-					...resolvedPayload,
+					...replayPayload,
 					offline_id: entry.offline_id,
 					device_id: entry.device_id,
 				},
@@ -582,7 +595,7 @@ export class SyncScheduler {
 					detail: "kill switch flipped during send",
 				};
 			}
-			return classifySendError(err, entry.attempt_count);
+			return classifySendError(err, entry.attempt_count, entry);
 		}
 	}
 
@@ -775,20 +788,31 @@ function methodForEntry(entry: OutboxEntry<unknown>): string | null {
 // Error classification — maps thrown errors to SendResult categories.
 // ---------------------------------------------------------------------------
 
-function classifySendError(err: unknown, attemptCount: number): SendResult {
+function classifySendError(
+	err: unknown,
+	attemptCount: number,
+	entry?: { server_doc_name: string | null },
+): SendResult {
 	// frappe-ui rejections + our own wrappers all end up here. We pull
 	// `status`, `error_code`, and a few common shapes.
 	const detail = err instanceof Error ? err.message : String(err);
 	const status = extractStatus(err);
 	const errorCode = extractErrorCode(err);
 
-	// Idempotent duplicate — server returned 2xx with `was_already_submitted`
-	// but frappe-ui surfaced it as an error. Treat as success.
+	// Idempotent duplicate — the server already accepted this offline_id on a
+	// prior attempt. Mark synced (not retry): semantically this IS success
+	// (P-5). Use the doc name from the error envelope, or the one we stored
+	// from a prior attempt. If neither is available, fall through to retry
+	// so a fresh POST gets us a 2xx with the canonical name.
 	if (errorCode === "was_already_submitted") {
+		const docName = extractServerDocName(err) ?? entry?.server_doc_name ?? null;
+		if (docName) {
+			return { kind: "synced", serverDocName: docName };
+		}
 		return {
 			kind: "retry",
 			category: "idempotent_duplicate",
-			detail,
+			detail: "was_already_submitted but no doc name in envelope",
 		};
 	}
 
@@ -843,6 +867,63 @@ function classifySendError(err: unknown, attemptCount: number): SendResult {
 		return { kind: "retry", category: "timeout", detail };
 	}
 	return { kind: "retry", category: "network_error", detail };
+}
+
+/**
+ * Defensively patches posting_date + owner_user into the inner `data` JSON
+ * so the server's `_apply_payload_metadata` (P-5, P-11) accepts the request
+ * even if the adapter at enqueue time forgot them, or the outbox row was
+ * created before the adapters were fixed.
+ */
+function patchInnerDataMetadata(
+	payload: Record<string, unknown>,
+	postingDate: string | null | undefined,
+	ownerUser: string | null | undefined,
+): Record<string, unknown> {
+	const dataField = payload.data;
+	if (typeof dataField !== "string") return payload;
+	let inner: Record<string, unknown>;
+	try {
+		const parsed = JSON.parse(dataField);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return payload;
+		}
+		inner = parsed as Record<string, unknown>;
+	} catch {
+		return payload; // not JSON — leave alone
+	}
+	let mutated = false;
+	if (!inner.posting_date && postingDate) {
+		inner.posting_date = postingDate;
+		mutated = true;
+	}
+	if (!inner.owner_user && !inner.owner && ownerUser) {
+		inner.owner_user = ownerUser;
+		mutated = true;
+	}
+	if (!mutated) return payload;
+	return { ...payload, data: JSON.stringify(inner) };
+}
+
+/**
+ * Pulls a server doc name out of an error envelope, if present. Frappe's
+ * error shapes vary; we probe the common locations.
+ */
+function extractServerDocName(err: unknown): string | undefined {
+	if (!err || typeof err !== "object") return undefined;
+	const e = err as Record<string, unknown>;
+	for (const k of ["server_doc_name", "name", "doc_name"]) {
+		const v = e[k];
+		if (typeof v === "string" && v.length > 0) return v;
+	}
+	const details = e["details"] as Record<string, unknown> | undefined;
+	if (details) {
+		for (const k of ["server_doc_name", "name", "doc_name"]) {
+			const v = details[k];
+			if (typeof v === "string" && v.length > 0) return v;
+		}
+	}
+	return undefined;
 }
 
 function extractStatus(err: unknown): number | undefined {
