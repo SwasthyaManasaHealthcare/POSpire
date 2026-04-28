@@ -22,10 +22,15 @@ def validate(doc, method):
 
 
 def before_submit(doc, method):
+	apply_negative_stock_override(doc)
 	validate_approval_requests(doc)
 	add_loyalty_point(doc)
 	create_sales_order(doc)
 	update_coupon(doc, "used")
+
+
+def on_submit(doc, method):
+	restore_negative_stock_override(doc)
 
 
 def before_cancel(doc, method):
@@ -500,3 +505,43 @@ def validate_shift(doc):
 		# check if shift is for the same company
 		if shift.company != doc.company:
 			frappe.throw(_("POS Opening Shift {0} is not for the same company").format(shift.name))
+
+
+def apply_negative_stock_override(doc):
+	pos_profile = doc.pos_profile
+	allow_negative = frappe.get_cached_value("POS Profile", pos_profile, "posa_allow_negative_stock")
+	if not allow_negative:
+		return
+	doc._items_modified_for_negative = set()
+	for item in doc.items:
+		item_doc = frappe.get_cached_doc("Item", item.item_code)
+
+		# Skip batch/serial items
+		if item_doc.has_batch_no or item_doc.has_serial_no:
+			continue
+		if not item_doc.allow_negative_stock:
+			frappe.db.set_value(
+				"Item",
+				item.item_code,
+				"allow_negative_stock",
+				1,
+				update_modified=False,
+			)
+			frappe.clear_document_cache("Item", item.item_code)
+
+			doc._items_modified_for_negative.add(item.item_code)
+
+
+def restore_negative_stock_override(doc):
+	modified_items = getattr(doc, "_items_modified_for_negative", None)
+	if not modified_items:
+		return
+	for item_code in modified_items:
+		frappe.db.set_value(
+			"Item",
+			item_code,
+			"allow_negative_stock",
+			0,
+			update_modified=False,
+		)
+		frappe.clear_document_cache("Item", item_code)

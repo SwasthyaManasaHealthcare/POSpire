@@ -74,7 +74,7 @@ def get_opening_dialog_data() -> dict:
 	data["pos_profiles_data"] = frappe.get_list(
 		"POS Profile",
 		filters={"disabled": 0},
-		fields=["name", "company", "currency"],
+		fields=["name", "company", "currency", "posa_allow_negative_stock"],
 		limit_page_length=0,
 		order_by="name",
 	)
@@ -230,6 +230,7 @@ def get_items(
 		search_batch_no = pos_profile.get("posa_search_batch_no")
 		posa_show_template_items = pos_profile.get("posa_show_template_items")
 		warehouse = pos_profile.get("warehouse")
+		allow_negative = pos_profile.get("posa_allow_negative_stock")
 		use_limit_search = pos_profile.get("pose_use_limit_search")
 		search_limit = 0
 
@@ -333,6 +334,9 @@ def get_items(
 
 			for item in items_data:
 				item_code = item.item_code
+				has_batch_no = item.has_batch_no
+				has_serial_no = item.has_serial_no
+				has_expiry_date = frappe.db.get_value("Item", item_code, "has_expiry_date")
 				item_price = {}
 				if item_prices.get(item_code):
 					item_price = (
@@ -389,24 +393,34 @@ def get_items(
 						fields=["attribute", "attribute_value"],
 						filters={"parent": item.item_code, "parentfield": "attributes"},
 					)
-				if posa_display_items_in_stock and (not item_stock_qty or item_stock_qty < 0):
-					pass
-				else:
-					row = {}
-					row.update(item)
-					row.update(
-						{
-							"rate": item_price.get("price_list_rate") or 0,
-							"currency": item_price.get("currency") or pos_profile.get("currency"),
-							"item_barcode": item_barcode or [],
-							"actual_qty": item_stock_qty or 0,
-							"serial_no_data": serial_no_data or [],
-							"batch_no_data": batch_no_data or [],
-							"attributes": attributes or "",
-							"item_attributes": item_attributes or "",
-						}
-					)
-					result.append(row)
+				allow_add_to_stock = bool(pos_profile.get("posa_allow_add_to_stock_at_pos"))
+				is_batch_or_serial = bool(has_batch_no) or bool(has_serial_no)
+
+				if posa_display_items_in_stock and item_stock_qty <= 0:
+					if allow_negative and allow_add_to_stock:
+						pass
+					elif allow_negative and not is_batch_or_serial:
+						pass
+					elif allow_add_to_stock and is_batch_or_serial:
+						pass
+					else:
+						continue
+				row = {}
+				row.update(item)
+				row.update(
+					{
+						"rate": item_price.get("price_list_rate") or 0,
+						"currency": item_price.get("currency") or pos_profile.get("currency"),
+						"item_barcode": item_barcode or [],
+						"actual_qty": item_stock_qty or 0,
+						"serial_no_data": serial_no_data or [],
+						"batch_no_data": batch_no_data or [],
+						"attributes": attributes or "",
+						"item_attributes": item_attributes or "",
+						"has_expiry_date": has_expiry_date or 0,
+					}
+				)
+				result.append(row)
 		return result
 
 	# When "display items in stock" is on, row membership depends on live qty — never Redis-cache.
@@ -420,6 +434,8 @@ def get_items(
 		# Fetched here, not at the top of get_items, so the DB round-trip is skipped
 		# entirely when caching is disabled or the stock-display bypass is active.
 		profile_modified = frappe.db.get_value("POS Profile", profile_name, "modified")
+		full_profile = frappe.get_cached_doc("POS Profile", profile_name).as_dict()
+		allow_negative = full_profile.get("posa_allow_negative_stock")
 		cache_key = _make_pos_cache_key(
 			f"{ITEMS_KEY_PREFIX}{profile_name}",
 			price_list,
@@ -427,12 +443,12 @@ def get_items(
 			search_value,
 			customer,
 			profile_modified,
+			allow_negative,
 		)
 		cached_items = frappe.cache.get_value(cache_key, expires=True)
 		if cached_items is not None:
 			return cached_items
 
-		full_profile = frappe.get_cached_doc("POS Profile", profile_name).as_dict()
 		items = _get_items(full_profile, price_list, item_group, search_value, customer)
 		frappe.cache.set_value(cache_key, items, expires_in_sec=ttl or 1800)
 		return items
@@ -848,7 +864,32 @@ def update_invoice(data: str | dict):
 	today_date = getdate()
 	if invoice_doc.get("posting_date") and getdate(invoice_doc.posting_date) != today_date:
 		invoice_doc.set_posting_time = 1
+	allow_add_to_stock = frappe.get_cached_value(
+		"POS Profile", invoice_doc.pos_profile, "posa_allow_add_to_stock_at_pos"
+	)
+	if allow_add_to_stock:
+		pos_warehouse = frappe.get_cached_value("POS Profile", invoice_doc.pos_profile, "warehouse")
+		for item in invoice_doc.items:
+			has_batch = frappe.get_cached_value("Item", item.item_code, "has_batch_no")
+			if has_batch and item.batch_no:
+				warehouse = item.warehouse or pos_warehouse
+				live_batch_qty = (
+					frappe.db.get_value(
+						"Stock Ledger Entry",
+						filters={
+							"item_code": item.item_code,
+							"batch_no": item.batch_no,
+							"warehouse": warehouse,
+							"is_cancelled": 0,
+						},
+						fieldname="qty_after_transaction",
+						order_by="posting_date desc, posting_time desc, creation desc",
+					)
+					or 0
+				)
 
+				item.actual_qty = live_batch_qty
+				item.warehouse = warehouse
 	invoice_doc.save()
 	return invoice_doc
 
@@ -962,42 +1003,7 @@ def submit_invoice(invoice: str | dict, data: str | dict) -> dict:
 				},
 			)
 	else:
-		allow_negative = frappe.get_cached_value(
-			"POS Profile", invoice_doc.pos_profile, "custom_allow_negative_stock"
-		)
-
-		item_codes_to_restore = []
-
-		try:
-			if allow_negative:
-				for item in invoice_doc.items:
-					has_batch = frappe.get_cached_value("Item", item.item_code, "has_batch_no")
-					has_serial = frappe.get_cached_value("Item", item.item_code, "has_serial_no")
-
-					if has_batch or has_serial:
-						if item.actual_qty is None or item.actual_qty < item.qty:
-							frappe.throw(
-								f"Negative stock not allowed for Batch/Serial item: {item.item_code}"
-							)
-						continue
-
-					current = frappe.get_cached_value("Item", item.item_code, "allow_negative_stock")
-					if not current:
-						frappe.db.set_value(
-							"Item", item.item_code, "allow_negative_stock", 1, update_modified=False
-						)
-						frappe.clear_document_cache("Item", item.item_code)
-						item_codes_to_restore.append(item.item_code)
-
-					if not item.incoming_rate:
-						item.allow_zero_valuation_rate = 1
-
-			invoice_doc.submit()
-
-		finally:
-			for item_code in item_codes_to_restore:
-				frappe.db.set_value("Item", item_code, "allow_negative_stock", 0, update_modified=False)
-				frappe.clear_document_cache("Item", item_code)
+		invoice_doc.submit()
 		if invoice_doc.is_return and invoice_doc.return_against and not is_cashback:
 			original_invoice = frappe.get_doc("Sales Invoice", invoice_doc.return_against)
 			custom_delivery_charge = flt(original_invoice.get("custom_delivery_charge_rate") or 0)
@@ -1243,6 +1249,7 @@ def get_items_details(pos_profile: str | dict, items_data: str | list) -> list:
 		for item in items_data:
 			item_code = item.get("item_code")
 			item_stock_qty = get_stock_availability(item_code, warehouse)
+			has_expiry_date = frappe.db.get_value("Item", item_code, "has_expiry_date")
 			(has_batch_no, has_serial_no) = frappe.db.get_value(
 				"Item", item_code, ["has_batch_no", "has_serial_no"]
 			)
@@ -1293,6 +1300,7 @@ def get_items_details(pos_profile: str | dict, items_data: str | list) -> list:
 					"actual_qty": item_stock_qty or 0,
 					"has_batch_no": has_batch_no,
 					"has_serial_no": has_serial_no,
+					"has_expiry_date": has_expiry_date or 0,
 				}
 			)
 
@@ -1343,6 +1351,7 @@ def get_item_detail(
 		res["actual_qty"] = get_stock_availability(item_code, warehouse)
 	res["max_discount"] = max_discount
 	res["batch_no_data"] = batch_no_data
+	res["has_expiry_date"] = frappe.db.get_value("Item", item_code, "has_expiry_date") or 0
 	return res
 
 
@@ -2220,63 +2229,3 @@ def get_sales_invoice_child_table(sales_invoice: str, sales_invoice_item: str):
 	parent_doc = frappe.get_doc("Sales Invoice", sales_invoice)
 	child_doc = frappe.get_doc("Sales Invoice Item", {"parent": parent_doc.name, "name": sales_invoice_item})
 	return child_doc
-
-
-@frappe.whitelist()
-def create_pos_stock_entry(
-	item_code,
-	qty,
-	warehouse,
-	serial_nos=None,
-	batch_no=None,
-	expiry_date=None,
-):
-	if not item_code or not qty or not warehouse:
-		frappe.throw("Missing required fields")
-	qty = float(qty)
-
-	if serial_nos:
-		serial_list = [s.strip() for s in serial_nos.split("\n") if s.strip()]
-		if len(serial_list) != int(qty):
-			frappe.throw("Serial count must match quantity")
-		serial_nos = "\n".join(serial_list)
-
-	if batch_no:
-		if not frappe.db.exists("Batch", batch_no):
-			batch_doc = frappe.get_doc(
-				{
-					"doctype": "Batch",
-					"batch_id": batch_no,
-					"item": item_code,
-					"expiry_date": expiry_date,
-				}
-			)
-			batch_doc.insert(ignore_permissions=True)
-	stock_entry = frappe.get_doc(
-		{
-			"doctype": "Stock Entry",
-			"stock_entry_type": "Material Receipt",
-			"company": frappe.defaults.get_user_default("Company"),
-			"items": [
-				{
-					"item_code": item_code,
-					"qty": qty,
-					"t_warehouse": warehouse,
-					"serial_no": serial_nos,
-					"batch_no": batch_no,
-					"basic_rate": frappe.db.get_value(
-						"Bin", {"item_code": item_code, "warehouse": warehouse}, "valuation_rate"
-					)
-					or frappe.db.get_value("Item", item_code, "last_purchase_rate")
-					or 0,
-				}
-			],
-		}
-	)
-	stock_entry.flags.ignore_permissions = True
-	stock_entry.insert()
-	stock_entry.submit()
-	return {
-		"status": "success",
-		"stock_entry": stock_entry.name,
-	}

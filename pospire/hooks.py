@@ -107,6 +107,7 @@ doc_events = {
 		"validate": "pospire.pospire.api.invoice.validate",
 		"before_submit": "pospire.pospire.api.invoice.before_submit",
 		"before_cancel": "pospire.pospire.api.invoice.before_cancel",
+		"on_submit": "pospire.pospire.api.invoice.on_submit",
 	},
 	"Customer": {
 		"validate": "pospire.pospire.api.customer.validate",

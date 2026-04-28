@@ -1109,7 +1109,7 @@
 		</v-card>
 	<AddStockDialog 
 	ref="addStockDialog"
-	@stock-added="refreshItems"
+	@stock-added="handleStockAdded"
 	 />
 	</div>
 </template>
@@ -1255,40 +1255,110 @@ export default {
 	methods: {
 		// total field
 		hasBatchOrSerialStockIssue() {
-			if (!this.pos_profile?.custom_allow_add_to_stock_at_pos) return false;
+			if (!this.pos_profile?.posa_allow_add_to_stock_at_pos) return false;
 			return this.items.some((item) => {
 				return (
 					(item.has_serial_no || item.has_batch_no) &&
-					(item.actual_qty == null || item.actual_qty < item.qty)
+					(item.actual_qty == null || item.actual_qty <= 0)
 				);
 			});
 		},
 		openAddStockDialog() {
 			const item = this.items.find((item) => {
-			const stock = item.available_qty ?? item.actual_qty ?? 0;
+				const stock = item.available_qty ?? item.actual_qty ?? 0;
+				return (
+					(item.has_serial_no || item.has_batch_no) &&
+					stock < item.qty
+				);
+			});
 
-			return (
-			(item.has_serial_no || item.has_batch_no) &&
-			stock < item.qty
-			);
-		});
+			if (!item) return;
 
-		if (!item) return;
+			this.$refs.addStockDialog.open({
+				item_code: item.item_code,
+				item_name: item.item_name,
+				posa_row_id: item.posa_row_id, 
+				has_serial_no: item.has_serial_no,
+				has_batch_no: item.has_batch_no,
+				has_expiry_date: item.has_expiry_date,
+				qty: item.qty,
+				warehouse: item.warehouse || this.pos_profile?.warehouse,
+				pos_profile: this.pos_profile.name,
+			});
+		},
+		async handleStockAdded(data) {
+			let item = data.posa_row_id 
+				? this.items.find(i => i.posa_row_id === data.posa_row_id)
+				: this.items.find(i => i.item_code === data.item_code);
+			
+			if (!item) return;
 
-		this.$refs.addStockDialog.open({
-			item_code: item.item_code,
-			item_name: item.item_name,
-			has_serial_no: item.has_serial_no,
-			has_batch_no: item.has_batch_no,
-			qty: item.qty,
-			warehouse: item.warehouse || this.pos_profile?.warehouse,
-		});
+			if (data.batch_no) {
+				item.batch_no = data.batch_no;
+				item.actual_batch_qty = item.qty;
+			}
+			if (data.serial_nos) {
+				item.serial_no = data.serial_nos;
+				item.serial_no_data = data.serial_nos
+					.split("\n")
+					.filter(s => s.trim())
+					.map(s => ({ serial_no: s.trim() }));
+				item.serial_no_selected = data.serial_nos
+					.split("\n")
+					.filter(s => s.trim());
+			}
+
+			await this.refreshItems();
+
+			let refreshedItem = data.posa_row_id
+				? this.items.find(i => i.posa_row_id === data.posa_row_id)
+				: this.items.find(i => i.item_code === data.item_code);
+
+			if (refreshedItem) {
+				if (data.batch_no) {
+					refreshedItem.batch_no = data.batch_no;
+					refreshedItem.actual_batch_qty = refreshedItem.qty;
+				}
+				if (data.serial_nos) {
+					refreshedItem.serial_no = data.serial_nos;
+					refreshedItem.serial_no_data = data.serial_nos
+						.split("\n")
+						.filter(s => s.trim())
+						.map(s => ({ serial_no: s.trim() }));
+					refreshedItem.serial_no_selected = data.serial_nos
+						.split("\n")
+						.filter(s => s.trim());
+				}
+			}
+
+			this.items = [...this.items];
 		},
 		async refreshItems() {
 			if (!this.items?.length) return;
-			if (typeof this.update_items_details === "function") {
-				await this.update_items_details(this.items);
-			}
+
+			const savedBatchSerials = this.items.map(i => ({
+				posa_row_id: i.posa_row_id,
+				batch_no: i.batch_no,
+				serial_no: i.serial_no,
+				actual_batch_qty: i.actual_batch_qty,
+				serial_no_data: i.serial_no_data,  
+				serial_no_selected: i.serial_no_selected,
+			}));
+			this.eventBus.emit("update_cur_items_details");
+			await new Promise(resolve => setTimeout(resolve, 1000));
+			this.items.forEach(item => {
+				const saved = savedBatchSerials.find(
+					s => s.posa_row_id === item.posa_row_id
+				);
+				if (saved) {
+					if (saved.batch_no) item.batch_no = saved.batch_no;
+					if (saved.serial_no) item.serial_no = saved.serial_no;
+					if (saved.actual_batch_qty) item.actual_batch_qty = saved.actual_batch_qty;
+					if (saved.serial_no_data?.length) item.serial_no_data = saved.serial_no_data;       
+					if (saved.serial_no_selected?.length) item.serial_no_selected = saved.serial_no_selected;
+				}
+			});
+
 			this.items = [...this.items];
 		},
 		updateItemTotal(item, newTotal) {
@@ -2444,7 +2514,7 @@ export default {
 						}
 					}
 				}
-				if (this.stock_settings.allow_negative_stock != 1 && !this.pos_profile.custom_allow_negative_stock) {
+				if (this.stock_settings.allow_negative_stock != 1 && !this.pos_profile.posa_allow_negative_stock) {
 					if (
 						this.invoiceType == "Invoice" &&
 						((item.is_stock_item && item.stock_qty && !item.actual_qty) ||
@@ -2459,7 +2529,7 @@ export default {
 						value = false;
 					}
 				}
-				if (this.pos_profile.custom_allow_negative_stock) {
+				if (this.pos_profile.posa_allow_negative_stock) {
 					if (
 						(item.has_serial_no || item.has_batch_no) &&
 						(item.actual_qty == null || item.actual_qty < item.qty)

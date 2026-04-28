@@ -440,9 +440,6 @@ export default {
 					vm.items = JSON.parse(localStorage.getItem("items_storage"));
 					// Strip zero-stock items from the hydrated cache immediately so they
 					// are never shown, even before update_items_details returns.
-					if (vm.pos_profile.posa_display_items_in_stock) {
-						vm.items = vm.items.filter((item) => item.actual_qty > 0);
-					}
 					this.eventBus.emit("set_all_items", vm.items);
 					vm.loading = false;
 
@@ -719,7 +716,20 @@ export default {
 				// deplete between the get_items call and this get_items_details
 				// response, leaving items in the list with actual_qty = 0.
 				if (vm.pos_profile.posa_display_items_in_stock) {
-					vm.items = vm.items.filter((item) => item.actual_qty > 0);
+					vm.items = vm.items.filter((item) => {
+					if (item.actual_qty > 0) return true;
+
+					const isBatch = Boolean(item.has_batch_no);
+					const isSerial = Boolean(item.has_serial_no);
+					const allowNegative = vm.pos_profile.posa_allow_negative_stock;
+					const allowAddStock = vm.pos_profile.posa_allow_add_to_stock_at_pos;
+
+					if (allowNegative && allowAddStock) return true;
+					if (allowNegative && !isBatch && !isSerial) return true;
+					if (allowAddStock && (isBatch || isSerial)) return true;
+
+					return false;
+				});
 					vm.eventBus.emit("set_all_items", vm.items);
 				}
 			}

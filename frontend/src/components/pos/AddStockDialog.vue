@@ -18,6 +18,7 @@
           v-model="warehouse"
           variant="outlined"
           class="mb-3"
+          readonly
         />
         <v-text-field
           :label="__('Quantity')"
@@ -40,7 +41,9 @@
             variant="outlined"
             class="mb-2"
           />
+
           <v-text-field
+            v-if="has_expiry_date"  
             :label="__('Expiry Date')"
             v-model="expiry_date"
             type="date"
@@ -81,20 +84,25 @@ export default {
       serial_nos: "",
       batch_no: "",
       expiry_date: "",
+      pos_profile: "",
+      has_expiry_date: false,
+      posa_row_id: "",
     };
   },
 
   methods: {
     open(data) {
       this.dialog = true;
-
       this.item_code = data.item_code;
       this.item_name = data.item_name;
       this.has_serial_no = data.has_serial_no;
       this.has_batch_no = data.has_batch_no;
+      this.has_expiry_date = data.has_expiry_date;
+      this.posa_row_id = data.posa_row_id || "";
 
       this.qty = data.qty || 1;
       this.warehouse = data.warehouse || "";
+      this.pos_profile = data.pos_profile;
     },
     async submitStock(){
         if (!this.qty || this.qty <= 0) {
@@ -116,33 +124,68 @@ export default {
             }
         }
         try {
-            await call(
-                "pospire.pospire.api.posapp.create_pos_stock_entry",
-                {
-                    item_code: this.item_code,
-                    qty: this.qty,
-                    warehouse: this.warehouse,
-                    serial_nos: this.serial_nos,
-                    batch_no: this.batch_no,
-                    expiry_date: this.expiry_date,
-                }
-            );
-            this.$emit("stock-added");
-            this.dialog = false;
+          const result = await call( 
+              "pospire.pospire.api.stock_receipt.create_pos_stock_entry",
+              {
+                  item_code: this.item_code,
+                  qty: this.qty,
+                  warehouse: this.warehouse,
+                  pos_profile: this.pos_profile,
+                  serial_nos: this.serial_nos,
+                  batch_no: this.batch_no,
+                  expiry_date: this.expiry_date,
+              }
+          );
+          this.$emit("stock-added", {
+              item_code: this.item_code,
+              batch_no: result.batch_no || null,   
+              serial_nos: result.serial_nos || null, 
+              posa_row_id: this.posa_row_id, 
+          });
 
-            this.serial_nos = "";
-            this.batch_no = "";
-            this.expiry_date = "";
-        } catch(e){
-            console.error(e);
-            let message = e?.message || "";
-            if (message.includes(":")) {
-                message = message.split(":").pop().trim();
-            }
-            toast.error(message || __("Failed to add stock"));
+          this.dialog = false;
+          this.serial_nos = "";  
+          this.batch_no = "";    
+          this.expiry_date = "";
+        } catch (e) {
+          let message = __("Failed to add stock");
+          try {
+              if (e?._server_messages) {
+                  const serverMessages = JSON.parse(e._server_messages);
+                  if (serverMessages.length) {
+                      const parsed = JSON.parse(serverMessages[0]);
+                      message = parsed.message || message;
+                  }
+              }
+              else if (e?.exc) {
+                  const excLines = e.exc.split("\n").filter(l => l.trim());
+                  const lastLine = excLines[excLines.length - 1];
+                  if (lastLine && lastLine.includes(":")) {
+                      message = lastLine.split(":").slice(1).join(":").trim();
+                  }
+              }
+              else if (e?.exc_type === "ValidationError" && e?.message) {
+                  const msg = e.message;
+                  if (!msg.includes("pospire.pospire.api")) {
+                      message = msg;
+                  }
+              }
+          } catch (parseErr) {
+          }
+
+          message = message.replace(/<[^>]*>/g, "").trim();
+
+          if (message.includes("linked to another item") || message.includes("Invalid Batch")) {
+              message = __("This Batch belongs to a different item. Please use the correct batch.");
+          }
+          if (message.includes("No valuation rate") || message.includes("no valuation rate") || message.includes("Cannot add stock")) {
+              message = __("Cannot add stock. Please create a Stock Entry with Basic Rate in ERP first.");
+          }
+
+          toast.error(message, { autoClose: 5000 });
         }
-    }
-  },
+  }
+},
   watch: {
     serial_nos(val) {
         if (this.has_serial_no) {
@@ -151,6 +194,6 @@ export default {
                 .filter(s => s.trim()).length || 0;
         }
     }
-    }
+  }
 };
 </script>
