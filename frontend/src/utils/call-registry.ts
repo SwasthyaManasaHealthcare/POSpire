@@ -9,6 +9,8 @@
  * Do NOT introduce a default policy. See §3.1 of the spec for why.
  */
 
+import { currentCashier } from "@/offline/cashier";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -92,6 +94,22 @@ export class UnregisteredMethod extends Error {
 	}
 }
 
+/**
+ * Thrown when a Sales Return would be enqueued offline.
+ *
+ * Returns remain live-only in the current rollout because the client does not
+ * yet maintain a durable offline index for "return against" lookup across
+ * historical invoices.
+ */
+export class OfflineReturnDeferredError extends Error {
+	constructor() {
+		super(
+			"Sales Return offline enqueue is disabled for this phase. Reconnect and retry the return.",
+		);
+		this.name = "OfflineReturnDeferredError";
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers used by adapters to satisfy server-side P-5 / P-11 invariants
 // (offline.py::_apply_payload_metadata requires posting_date + owner_user
@@ -108,19 +126,13 @@ function todayIso(): string {
 	return `${y}-${m}-${day}`;
 }
 
-/** Best-effort cashier lookup. The Vite bundle bans `frappe.*` imports, but
- *  at runtime the Desk host injects `frappe.session.user` on the global. */
-function currentUser(): string {
-	try {
-		const g = globalThis as unknown as {
-			frappe?: { session?: { user?: string } };
-		};
-		if (g.frappe?.session?.user) return g.frappe.session.user;
-	} catch {
-		/* strict-privacy host */
-	}
-	return "Guest";
-}
+// Cashier-user resolution is shared with the outbox via @/offline/cashier.
+// The previous local `currentCashier()` here returned "Guest" whenever the
+// /pospire/pos route was open without the Desk shell injecting
+// `frappe.session.user`. Adapters pre-stamped that "Guest" into the
+// payload via `options.ownerUser`, which short-circuited outbox.ts's safer
+// cookie fallback and got every offline write rejected by the server's
+// `_apply_payload_metadata` validator. One source of truth closes the gap.
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -226,6 +238,7 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	"frappe.client.get_list": { intent: "read", offline: false },
 	"frappe.client.get": { intent: "read", offline: false },
 	"frappe.client.get_value": { intent: "read", offline: false },
+	"frappe.client.get_single_value": { intent: "read", offline: false },
 	"frappe.client.get_doc": { intent: "read", offline: false },
 
 	// Auth
@@ -262,10 +275,9 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "write",
 		offline: false,
 	},
-	// T6: server endpoint not yet implemented (Phase 2 followup #4). Until it
-	// lands, mark live-only so a stray call fails fast instead of accumulating
-	// in an unreachable retry loop. Re-enable as offline-capable when the
-	// server endpoint ships.
+	// Returns are intentionally deferred from offline enqueue in the current
+	// rollout. Keep this live-only so return handling stays explicit until the
+	// client ships a durable return-against offline index + adapter path.
 	"pospire.pospire.api.offline.create_return": {
 		intent: "write",
 		offline: false,
@@ -301,6 +313,12 @@ export const methodRegistry: Record<string, MethodConfig> = {
 			const paymentMeta = (
 				typeof rawPayment === "string" ? JSON.parse(rawPayment) : rawPayment
 			) as Record<string, unknown>;
+			// Returns are intentionally live-only in this phase. Prevent the
+			// generic submit_invoice adapter from silently queuing them as
+			// `invoice` outbox rows when offline/network_error.
+			if (Boolean(invoice.is_return)) {
+				throw new OfflineReturnDeferredError();
+			}
 
 			// _apply_payload_metadata requires both fields on the invoice doc
 			// (P-5, P-11).
@@ -308,7 +326,7 @@ export const methodRegistry: Record<string, MethodConfig> = {
 			const ownerUser =
 				(invoice.owner_user as string) ??
 				(invoice.owner as string) ??
-				currentUser();
+				currentCashier();
 
 			// Customer offline_id: when the cart's customer was offline-created,
 			// Invoice.vue sets `invoice.customer_offline_id`. Forward it inside
@@ -360,15 +378,73 @@ export const methodRegistry: Record<string, MethodConfig> = {
 			};
 		},
 	},
-	// Opening a shift is live-only for now: posapp.create_opening_voucher
-	// returns a response that includes the full POS Profile doc, items,
-	// customers, payments, offers — all server-resolved data the SPA can't
-	// reconstruct offline. Component (OpeningDialog.vue) blocks the offline
-	// path with a clear message. Phase 2 will pre-cache the response shape
-	// to enable offline opening.
+	// Offline shift open (F2). The live posapp.create_opening_voucher returns
+	// a fat payload (POS Profile + Company + stock_settings); we can't
+	// reconstruct that from server data offline. The strategy is:
+	//   1. The cashier's previous online session left a localStorage snapshot
+	//      under `pospire.opening_shift_snapshot` (Pos.vue cached it on the
+	//      last successful check_opening_shift). That snapshot carries the
+	//      full pos_profile + company.
+	//   2. When offline, OpeningDialog.vue builds a provisional shift doc and
+	//      calls call() — this adapter routes to offline.create_opening_entry,
+	//      which enqueues. The component then synthesises the `data` shape
+	//      using snapshot.pos_profile + snapshot.company + the provisional
+	//      shift (with offline_id). register_pos_data fires as usual.
+	//   3. Subsequent invoices stamp `pos_opening_shift_offline_id` on the
+	//      queued payload; the server resolves it to the real shift name on
+	//      sync via `_resolve_opening_shift`.
 	"pospire.pospire.api.posapp.create_opening_voucher": {
 		intent: "write",
-		offline: false,
+		offline: true,
+		outboxType: "opening_entry",
+		toOfflinePayload: (args, ctx) => {
+			const user = currentCashier();
+			const posProfileName =
+				typeof args.pos_profile === "string"
+					? args.pos_profile
+					: args.pos_profile?.name;
+			const company = args.company;
+			const balanceDetails =
+				typeof args.balance_details === "string"
+					? JSON.parse(args.balance_details)
+					: args.balance_details ?? [];
+			const denominationDetails = args.denomination_details
+				? typeof args.denomination_details === "string"
+					? JSON.parse(args.denomination_details)
+					: args.denomination_details
+				: null;
+
+			// Build a POS Opening Shift doc the server can insert as-is. The
+			// `period_start_date` and `posting_date` are snapshotted at queue
+			// time per P-11 — never recomputed at sync.
+			const nowIso = new Date().toISOString();
+			const todayIsoDate = nowIso.slice(0, 10);
+			const doc: Record<string, unknown> = {
+				doctype: "POS Opening Shift",
+				period_start_date: nowIso.replace("T", " ").slice(0, 19),
+				posting_date: todayIsoDate,
+				user,
+				pos_profile: posProfileName,
+				company,
+				docstatus: 1,
+				balance_details: balanceDetails,
+				owner_user: user,
+			};
+			if (denominationDetails) {
+				doc.denomination_details = denominationDetails;
+			}
+
+			return {
+				method: "pospire.pospire.api.offline.create_opening_entry",
+				payload: {
+					data: JSON.stringify(doc),
+					offline_id: ctx.offlineId,
+					device_id: ctx.deviceId,
+				},
+				postingDate: todayIsoDate,
+				ownerUser: user,
+			};
+		},
 	},
 	"pospire.pospire.api.posapp.create_customer": {
 		intent: "write",
@@ -378,7 +454,7 @@ export const methodRegistry: Record<string, MethodConfig> = {
 			// posapp.create_customer accepts loose UI args. offline.create_customer
 			// requires owner_user and inserts the payload directly as a Customer
 			// doc (F2). Mirrors the field set in posapp.create_customer:1340-1395.
-			const user = currentUser();
+			const user = currentCashier();
 			const doc: Record<string, unknown> = {
 				doctype: "Customer",
 				customer_name: args.customer_name,
@@ -459,20 +535,155 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	},
 	"pospire.pospire.api.posapp.create_payment_request": { intent: "write", offline: false },
 
-	// Shift close/open desk endpoints (live-only in Phase 1).
+	// Shift close. `make_closing_shift_from_opening` stays live-only — when
+	// offline, Pos.vue catches the failure and synthesises a minimal closing
+	// shape from the cached opening shift's balance_details (no aggregated
+	// expected amounts; the cashier reconciles after sync). The submit path
+	// routes through the offline adapter so the queued closing waits on its
+	// parents (opening + every invoice in the shift) via parent_offline_ids.
 	"pospire.pospire.doctype.pos_closing_shift.pos_closing_shift.make_closing_shift_from_opening":
 		{ intent: "read", offline: false },
 	"pospire.pospire.doctype.pos_closing_shift.pos_closing_shift.submit_closing_shift": {
 		intent: "write",
-		offline: false,
+		offline: true,
+		outboxType: "closing_entry",
+		toOfflinePayload: (args, ctx) => {
+			const user = currentCashier();
+			const cs =
+				typeof args.closing_shift === "string"
+					? JSON.parse(args.closing_shift)
+					: args.closing_shift;
+
+			// Mixed-mode shift handling.
+			// If the shift was opened OFFLINE: `pos_opening_shift.pos_offline_id`
+			// is a UUID v4; the server resolves it via _resolve_opening_shift.
+			// If the shift was opened ONLINE: there's no offline_id, only the
+			// real shift name (e.g. POSA-OS-26-0000030). The server-side
+			// resolver now accepts either form, so we send whichever is
+			// available.
+			const openingOfflineId = cs.pos_opening_shift_offline_id ?? null;
+			const openingServerName = cs.pos_opening_shift ?? null;
+
+			// Strict closure on the server requires the full list of invoice
+			// offline_ids the cashier rang up under this shift. The component
+			// (ClosingDialog → Pos.vue.submit_closing_pos) supplies them via
+			// `cs.invoice_offline_ids`. The scheduler holds the closing in
+			// `waiting_for_siblings` until every one is synced.
+			const invoiceOfflineIds = Array.isArray(cs.invoice_offline_ids)
+				? cs.invoice_offline_ids.filter(Boolean)
+				: [];
+
+			// Build the POS Closing Shift doc the offline endpoint will insert.
+			const nowIso = new Date().toISOString();
+			const todayIsoDate = nowIso.slice(0, 10);
+			const doc: Record<string, unknown> = {
+				doctype: "POS Closing Shift",
+				period_start_date:
+					cs.period_start_date ?? nowIso.replace("T", " ").slice(0, 19),
+				period_end_date: nowIso.replace("T", " ").slice(0, 19),
+				posting_date: cs.posting_date ?? todayIsoDate,
+				user: cs.user ?? user,
+				pos_profile: cs.pos_profile,
+				company: cs.company,
+				docstatus: 1,
+				payment_reconciliation: cs.payment_reconciliation ?? [],
+				denomination_details: cs.denomination_details ?? [],
+				pos_transactions: cs.pos_transactions ?? [],
+				taxes: cs.taxes ?? [],
+				grand_total: cs.grand_total ?? 0,
+				net_total: cs.net_total ?? 0,
+				total_quantity: cs.total_quantity ?? 0,
+				owner_user: user,
+				// Server pops these and uses them for parent resolution + strict
+				// closure. They never get persisted onto the doc.
+				invoice_offline_ids: invoiceOfflineIds,
+			};
+
+			// Parents the scheduler waits on before sending: the opening shift
+			// (must be synced first so its name resolves) and every invoice in
+			// the shift (strict closure).
+			const parentOfflineIds = [
+				...(openingOfflineId ? [openingOfflineId] : []),
+				...invoiceOfflineIds,
+			];
+
+			return {
+				method: "pospire.pospire.api.offline.create_closing_entry",
+				payload: {
+					data: JSON.stringify(doc),
+					offline_id: ctx.offlineId,
+					device_id: ctx.deviceId,
+					// Send EITHER the offline_id (UUID v4) OR the real shift
+					// name. Server-side `_resolve_opening_shift_flexible`
+					// disambiguates.
+					opening_entry_ref: openingOfflineId || openingServerName,
+				},
+				shiftOfflineId: openingOfflineId,
+				parentOfflineIds,
+				postingDate: doc.posting_date as string,
+				ownerUser: user,
+			};
+		},
 	},
 
 	// -----------------------------------------------------------------------
 	// Operational / diagnostic (always fire live)
 	// -----------------------------------------------------------------------
 	"pospire.pospire.api.offline.ping": { intent: "read", offline: false },
+	// Kill switch: cashier-callable boolean lookup. Permission-checked at
+	// the framework level (whitelist-only, no Guest), but bypasses the
+	// POSpire Offline Settings doctype's role restrictions so cashier
+	// sessions can poll the bit without 403.
+	"pospire.pospire.api.offline.is_offline_enabled": {
+		intent: "read",
+		offline: false,
+	},
+	// Cashier-tunable runtime knobs (Phase 2-D). Cached for 12h because
+	// the values are admin-set retention settings — they don't change
+	// faster than that. Same offline:false pattern as is_offline_enabled
+	// (we don't queue read of config on a known-down link; the client
+	// falls back to its bundled defaults when offline).
+	"pospire.pospire.api.offline.get_offline_runtime_config": {
+		intent: "read",
+		offline: false,
+	},
+	// Reference data for the offline-capable Create / Update Customer
+	// dialog (customer groups, territories, genders). Marked offline:true
+	// with a long TTL because the lists rarely change, and a stale entry
+	// just means a freshly-added Customer Group / Territory may be missing
+	// from the dropdown until the next online refresh — no correctness
+	// risk. The dialog renders empty without this when offline, blocking
+	// walk-in customer creation, so caching matters.
+	"pospire.pospire.api.offline.get_customer_form_options": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 12 * 60 * 60 * 1000,
+	},
+	// B5 — observability beacon. Live-only: there's no value in queueing a
+	// stale beacon if the device is offline (the next beacon overwrites the
+	// dashboard with current state on reconnect anyway).
+	"pospire.pospire.api.offline.record_beacon": { intent: "write", offline: false },
+	// B6 — observability dashboard payload. Aggregates the latest beacon per
+	// device + outlet rollup + 7-day trend.
+	"pospire.pospire.api.offline.get_observability_summary": {
+		intent: "read",
+		offline: false,
+	},
 	"pospire.pospire.api.offline.log_batch": { intent: "write", offline: false },
 	"pospire.pospire.api.offline.submit_recovery_log": { intent: "write", offline: false },
+	// Handoff for offline-sync recovery (Phase 1b). Live-only: handing off
+	// while the device is offline is a no-op — the scheduler keeps the row
+	// in `needs_review`, the next online cycle attempts the handoff, and
+	// the entry transitions to `handed_off` (tombstone) on success. The
+	// endpoint itself is idempotent on offline_id, so a retry that crosses
+	// a transient failure boundary returns the existing recovery row.
+	"pospire.pospire.api.recovery.handoff": { intent: "write", offline: false },
+	// Vacuum lookup: cashier-side polling for resolution of locally-
+	// tombstoned offline_ids. Live-only — when offline, the vacuum is
+	// skipped entirely (no point asking the server for state we can't
+	// reach). The endpoint server-side filters by cashier_user so a
+	// malicious call can't enumerate other cashiers' rows.
+	"pospire.pospire.api.recovery.lookup_resolution": { intent: "read", offline: false },
 };
 
 // ---------------------------------------------------------------------------

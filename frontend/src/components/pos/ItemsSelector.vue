@@ -108,7 +108,8 @@
 									@click="add_item(item, idx)"
 									class="pospire-product-card hover-vibrant ripple-effect"
 									:class="{
-										'out-of-stock': item.actual_qty <= 0,
+										'out-of-stock':
+											stockContextReliable && item.actual_qty <= 0,
 										'item-selected': selectedItemIdx === idx,
 									}"
 								>
@@ -125,8 +126,18 @@
 										>
 										</v-img>
 
-										<!-- Stock Badge Overlay -->
+										<!--
+											Stock Badge Overlay. Rendered only when the
+											stock numbers came from a recent online fetch
+											(stockContextReliable). While offline /
+											degraded the displayed actual_qty is whatever
+											was last hydrated from cache and would lie
+											about every item being OUT, so we drop the
+											badge entirely rather than mislead the
+											cashier. The card itself is still tappable.
+										-->
 										<div
+											v-if="stockContextReliable"
 											class="pospire-stock-badge"
 											:class="{
 												'badge-success': item.actual_qty > 5,
@@ -160,7 +171,10 @@
 										</div>
 
 										<!-- SUPPORT TEXT: 12px Regular -->
-										<div class="pospire-product-stock">
+										<div
+											v-if="stockContextReliable"
+											class="pospire-product-stock"
+										>
 											<span
 												class="stock-dot"
 												:class="{
@@ -234,11 +248,18 @@
 								</template>
 								<template v-slot:item.actual_qty="{ item }">
 									<span
+										v-if="stockContextReliable"
 										class="font-weight-medium"
 										:style="getStockColorStyle(item.actual_qty)"
 									>
 										{{ formatFloat(item.actual_qty) }}
 									</span>
+									<!--
+										Offline / degraded: drop the number entirely
+										rather than show a stale 0 next to every item.
+										Em-dash matches Frappe's "no value" convention.
+									-->
+									<span v-else class="text-medium-emphasis">—</span>
 								</template>
 								<template v-slot:item.item_name="{ item }">
 									<div class="d-flex align-center">
@@ -361,13 +382,29 @@
 </template>
 
 <script>
-import { call } from "@/utils/call";
+import { call, unwrapStale } from "@/utils/call";
 import { toast } from "vue3-toastify";
+import { storeToRefs } from "pinia";
 import format from "@/utils/format";
 import { playSound } from "@/utils/sounds";
+import { useConnectivityStore } from "@/stores/connectivity";
 import _ from "lodash";
 export default {
 	mixins: [format],
+	setup() {
+		// Expose `connectionQuality` so the template and the customer
+		// watcher can gate on it. The stock badges (OUT / LOW / STOCK)
+		// only mean something when actual_qty came from a recent online
+		// fetch — while offline / degraded the displayed value is
+		// whatever localStorage cached, which a previous customer-switch
+		// fallback path could have populated as 0 across the board.
+		// Customer change is also gated: re-fetching get_items offline
+		// throws and used to leave the grid in a worse state than just
+		// keeping the last-known catalog.
+		const connectivity = useConnectivityStore();
+		const { connectionQuality } = storeToRefs(connectivity);
+		return { connectionQuality };
+	},
 	data: () => ({
 		pos_profile: "",
 		flags: {},
@@ -400,7 +437,37 @@ export default {
 			}
 		},
 		customer() {
+			// When offline, a customer change can't usefully re-query the
+			// catalog: the customer-keyed cache entry will miss, and any
+			// fallback we attempted historically risked persisting bad
+			// data into localStorage — which then poisons every subsequent
+			// get_items hydration even after we reconnect. Skip the
+			// refetch in that state and keep the existing items list
+			// as-is. The connectionQuality watcher below handles the
+			// "customer was switched while offline, now back online"
+			// case by re-running get_items the moment we reconnect, so
+			// the grid catches up with the right customer-keyed prices
+			// and fresh actual_qty values then.
+			if (this.connectionQuality !== "online") {
+				return;
+			}
 			this.get_items();
+		},
+		/**
+		 * Refresh the catalog the instant we transition back to online.
+		 * The customer watcher's offline early-return means a customer
+		 * switch made while offline never triggered a refetch — so the
+		 * grid still has the previous customer's prices and possibly
+		 * stale actual_qty. Firing get_items() on reconnect closes that
+		 * gap: fresh stock numbers populate (and re-enable the OUT /
+		 * LOW / STOCK badges via stockContextReliable), and the current
+		 * customer's price-list-keyed cache entry is repopulated for
+		 * the next offline window.
+		 */
+		connectionQuality(newVal, oldVal) {
+			if (newVal === "online" && oldVal !== "online") {
+				this.get_items();
+			}
 		},
 		new_line() {
 			this.eventBus.emit("set_new_line", this.new_line);
@@ -437,7 +504,15 @@ export default {
 				!vm.pos_profile.pose_use_limit_search
 			) {
 				try {
-					vm.items = JSON.parse(localStorage.getItem("items_storage"));
+					// Defensive unwrap: a previous build wrote the
+					// StaleReadResult wrapper { data, stale, cachedAt } here
+					// instead of the bare items array. Strip it on read so
+					// devices already on the bad cache shape recover the next
+					// time they boot.
+					const hydrated = unwrapStale(
+						JSON.parse(localStorage.getItem("items_storage")),
+					);
+					vm.items = Array.isArray(hydrated) ? hydrated : [];
 					// Strip zero-stock items from the hydrated cache immediately so they
 					// are never shown, even before update_items_details returns.
 					if (vm.pos_profile.posa_display_items_in_stock) {
@@ -469,21 +544,26 @@ export default {
 				customer: vm.customer,
 			}).then((r) => {
 				if (r) {
-					// call() may return a StaleReadResult wrapper {data, stale, cachedAt}
-					// when the cache hit is stale. Unwrap defensively so the items
-					// list always gets the array, not the wrapper object.
-					const items = r && typeof r === "object" && "stale" in r ? r.data : r;
-					vm.items = items;
+					// `get_items` is registered as offline:true with a TTL.
+					// On a stale-cache hit call() returns a StaleReadResult
+					// wrapper. Unwrap once and use the bare array everywhere
+					// — including the localStorage write below. Persisting the
+					// wrapper object would make subsequent boots set
+					// `vm.items = wrapper`, which breaks every downstream
+					// `.filter / .find / .forEach` on the items list.
+					const items = unwrapStale(r);
+					vm.items = Array.isArray(items) ? items : [];
 					vm.eventBus.emit("set_all_items", vm.items);
 					vm.loading = false;
 
-					// Update localStorage if enabled
+					// Update localStorage if enabled. Always store the
+					// unwrapped array, never the wrapper.
 					if (
 						vm.pos_profile.posa_local_storage &&
 						!vm.pos_profile.pose_use_limit_search
 					) {
 						try {
-							localStorage.setItem("items_storage", JSON.stringify(r));
+							localStorage.setItem("items_storage", JSON.stringify(items));
 						} catch (e) {}
 					}
 
@@ -501,6 +581,11 @@ export default {
 						vm.enter_event();
 					}
 				}
+			}).catch(() => {
+				// Offline (OfflineReadUnavailable) or transport failure. The
+				// localStorage fallback above (if enabled) has already populated
+				// the grid; swallow so we don't surface an unhandled rejection.
+				vm.loading = false;
 			});
 		},
 		async get_items_groups() {
@@ -519,9 +604,22 @@ export default {
 				});
 			} else {
 				const vm = this;
-				const r = await call("pospire.pospire.api.posapp.get_items_groups", {});
-				if (r) {
-					r.forEach((element) => {
+				// `get_items_groups` is offline:true, so on a stale-cache hit
+				// call() returns a StaleReadResult wrapper. Unwrap before
+				// iterating, and swallow OfflineReadUnavailable on cold cache
+				// (cashier sees the empty group filter, which is benign — the
+				// fallback path above using pos_profile.item_groups is the
+				// preferred source when configured).
+				let groups = null;
+				try {
+					groups = unwrapStale(
+						await call("pospire.pospire.api.posapp.get_items_groups", {}),
+					);
+				} catch {
+					return;
+				}
+				if (Array.isArray(groups)) {
+					groups.forEach((element) => {
 						vm.items_group.push(element.name);
 					});
 				}
@@ -804,6 +902,20 @@ export default {
 	},
 
 	computed: {
+		/**
+		 * True when the displayed actual_qty on items is from a
+		 * recent online fetch and can be trusted enough to render the
+		 * OUT / LOW / STOCK badges. False while offline or on degraded
+		 * connectivity, when the items array is whatever was last
+		 * hydrated from localStorage (or worse, from a stock-agnostic
+		 * fallback fetch that ran without warehouse-customer context).
+		 * Hiding the badges in those states avoids the cashier seeing
+		 * "OUT" on every item just because a customer switch missed
+		 * the cache.
+		 */
+		stockContextReliable() {
+			return this.connectionQuality === "online";
+		},
 		filtered_items() {
 			this.search = this.get_search(this.first_search);
 			if (!this.pos_profile.pose_use_limit_search) {

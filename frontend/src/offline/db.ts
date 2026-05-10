@@ -55,9 +55,10 @@ import type {
 // they are private to the db module; callers go through repos.
 // ---------------------------------------------------------------------------
 
-const META_KEY_ACTIVE_KEY = "crypto.active_key";
-const META_KEY_ACTIVE_KEY_ID = "crypto.active_key_id";
-const META_KEY_HISTORICAL_KEY_PREFIX = "crypto.historical_key.";
+export const META_KEY_ACTIVE_KEY = "crypto.active_key";
+export const META_KEY_ACTIVE_KEY_ID = "crypto.active_key_id";
+export const META_KEY_HISTORICAL_KEY_PREFIX = "crypto.historical_key.";
+export const META_KEY_LAST_ROTATION = "crypto.last_rotation";
 const META_KEY_DEVICE_ID = "device.id";
 
 // ---------------------------------------------------------------------------

@@ -1152,7 +1152,9 @@ body:has(.pos-page) .enhanced-notification.warning,
 @media (min-aspect-ratio: 1.5/1) and (max-aspect-ratio: 1.65/1) {
 	/* Balanced layout */
 	.enhanced-cart-panel {
-		max-height: calc(100vh - 100px);
+		max-height: calc(
+			100vh - 100px - var(--pospire-banner-height, 0px)
+		);
 	}
 }
 
@@ -4571,11 +4573,18 @@ body:has(.pos-page) .page-body {
 	margin: 0 !important;
 }
 
-/* Override Vuetify's --v-layout-top on v-main for correct layout offset */
-/* Reduced to 48px to ensure footer borders are fully visible */
-.v-main:has(.pos-page) {
-	--v-layout-top: 48px !important;
-}
+/*
+ * NOTE: A previous version of this file forced --v-layout-top: 48px on
+ * .v-main:has(.pos-page) "to ensure footer borders are fully visible".
+ * That hack lied about the navbar height (real height: 72px, see
+ * Navbar.vue) and caused the navbar to overlay the top 24px of v-main's
+ * content area — invisible while there was nothing pinned to the top of
+ * v-main, but it clipped the OfflineBanner once we mounted it inside
+ * v-main as a status strip. Footer-border visibility is already handled
+ * locally by .pos-page's padding-bottom (see ~line 4625), so the
+ * override is redundant on top of being incorrect. We let Vuetify write
+ * the real navbar height into --v-layout-top now.
+ */
 
 /* Level 1: Page Container - Constrain to viewport */
 .pos-page {
@@ -4583,9 +4592,18 @@ body:has(.pos-page) .page-body {
 	margin: 0 !important;
 	margin-top: 0 !important;
 	padding: 0 !important;
-	/* Use viewport height minus navbar offset (48px) */
-	height: calc(100dvh - var(--v-layout-top, 48px));
-	max-height: calc(100dvh - var(--v-layout-top, 48px));
+	/*
+	 * Subtract navbar (--v-layout-top) AND offline banner (--pospire-banner-height,
+	 * set on <v-app> in App.vue — 0px hidden / 44px visible). Without the banner
+	 * term, the cart/invoice panel inside .pos-page extends past the viewport
+	 * and the banner clips it from underneath.
+	 */
+	height: calc(
+		100dvh - var(--v-layout-top, 48px) - var(--pospire-banner-height, 0px)
+	);
+	max-height: calc(
+		100dvh - var(--v-layout-top, 48px) - var(--pospire-banner-height, 0px)
+	);
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;

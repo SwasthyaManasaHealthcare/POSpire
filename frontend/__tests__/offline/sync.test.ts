@@ -308,6 +308,38 @@ describe("scheduler lifecycle", () => {
 		// would surface it. This test just documents the expectation.
 		expect(sync.scheduler.status().running).toBe(false);
 	});
+
+	it("crash recovery: revives orphaned in_flight rows on start (T11)", async () => {
+		vi.resetModules();
+		stubNavigatorLocks({
+			request: (_: string, __: LockOptions, cb: (l: Lock) => Promise<unknown>) =>
+				cb({} as Lock),
+		});
+
+		// Seed an in_flight row directly to simulate a prior tab that crashed
+		// mid-POST. Without recovery, listReady (enqueued + retry_pending only)
+		// would never pick it up.
+		const dbMod = await import("@/offline/db");
+		const fixture = await import("../helpers/offline-fixture");
+		await fixture.setupOfflineStorage();
+		const outboxMod = await import("@/offline/outbox");
+		const ack = await outboxMod.enqueue("invoice", { total: 1 });
+		await outboxMod.markInFlight(ack.offline_id);
+
+		// Confirm the row really is in_flight before recovery.
+		const before = await dbMod.db.outbox.get(ack.offline_id);
+		expect(before?.status).toBe("in_flight");
+
+		// Start the scheduler — its private reviveOrphanedInFlight runs.
+		const sync = await import("@/offline/sync");
+		await sync.scheduler.start();
+
+		const after = await dbMod.db.outbox.get(ack.offline_id);
+		expect(after?.status).toBe("enqueued");
+		expect(after?.next_attempt_at).toBeGreaterThan(0);
+
+		await sync.scheduler.stop();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -378,6 +410,112 @@ describe("leader lock", () => {
 		// Cleanup: stop both schedulers (a's drain loop is still running).
 		await a.stop();
 		await b.stop();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// F6 docstatus guard — non-submittable doctypes (regression for customer sync)
+//
+// Root cause that prompted this: `create_customer` returns docstatus:0 because
+// Customer is a non-submittable Frappe doctype. The original F6 guard (designed
+// for Sales Invoices that must reach docstatus:1) was applied universally and
+// caused customer entries to spin through retries until retry_exhausted, which
+// in turn blocked all dependent invoice entries with "waiting_for_parent".
+// ---------------------------------------------------------------------------
+
+describe("F6 docstatus guard — non-submittable doctypes", () => {
+	function mockCall(
+		responses: Record<string, unknown>,
+	): ReturnType<typeof vi.fn> {
+		return vi.fn().mockImplementation(
+			async (opts: { method?: string } | string) => {
+				const method = typeof opts === "string" ? opts : opts?.method;
+				return method && method in responses ? responses[method] : null;
+			},
+		);
+	}
+
+	it("customer entry with docstatus=0 (was_already_submitted) transitions to synced", async () => {
+		vi.resetModules();
+		stubNavigatorLocks({
+			request: (_: string, __: LockOptions, cb: (l: Lock) => Promise<unknown>) =>
+				cb({} as Lock),
+		});
+
+		vi.doMock("@/utils/call", () => ({
+			call: mockCall({
+				"pospire.pospire.api.offline.is_offline_enabled": true,
+				"pospire.pospire.api.offline.create_customer": {
+					name: "Test Customer",
+					was_already_submitted: true,
+					docstatus: 0,
+				},
+			}),
+		}));
+
+		const fixture = await import("../helpers/offline-fixture");
+		await fixture.setupOfflineStorage();
+		const outboxMod = await import("@/offline/outbox");
+		const dbMod = await import("@/offline/db");
+
+		const ack = await outboxMod.enqueue("customer", { customer_name: "Walk-in" });
+
+		const { scheduler } = await import("@/offline/sync");
+		await scheduler.start();
+
+		let row = await dbMod.db.outbox.get(ack.offline_id);
+		for (let i = 0; i < 40 && row?.status !== "synced"; i++) {
+			await new Promise((r) => setTimeout(r, 50));
+			row = await dbMod.db.outbox.get(ack.offline_id);
+		}
+
+		await scheduler.stop();
+
+		expect(row?.status).toBe("synced");
+		expect(row?.server_doc_name).toBe("Test Customer");
+	});
+
+	it("invoice entry with docstatus=0 (background job in progress) is retried, not synced", async () => {
+		vi.resetModules();
+		stubNavigatorLocks({
+			request: (_: string, __: LockOptions, cb: (l: Lock) => Promise<unknown>) =>
+				cb({} as Lock),
+		});
+
+		vi.doMock("@/utils/call", () => ({
+			call: mockCall({
+				"pospire.pospire.api.offline.is_offline_enabled": true,
+				"pospire.pospire.api.offline.submit_invoice": {
+					name: "SINV-0001",
+					docstatus: 0,
+					is_background_job: true,
+				},
+			}),
+		}));
+
+		const fixture = await import("../helpers/offline-fixture");
+		await fixture.setupOfflineStorage();
+		const outboxMod = await import("@/offline/outbox");
+		const dbMod = await import("@/offline/db");
+
+		const ack = await outboxMod.enqueue(
+			"invoice",
+			{ customer: "Walk-in", total: 100 },
+			{ shiftOfflineId: "SHIFT-X" },
+		);
+
+		const { scheduler } = await import("@/offline/sync");
+		await scheduler.start();
+
+		// One drain cycle is enough to see the entry move out of enqueued.
+		await new Promise((r) => setTimeout(r, 300));
+		await scheduler.stop();
+
+		const row = await dbMod.db.outbox.get(ack.offline_id);
+		expect(row?.status).not.toBe("synced");
+		// After one failed cycle the entry lands in retry_pending;
+		// in_flight is also valid if we catch the row mid-cycle.
+		expect(["retry_pending", "in_flight"]).toContain(row?.status);
 	});
 });
 

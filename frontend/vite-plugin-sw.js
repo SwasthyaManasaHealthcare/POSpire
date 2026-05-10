@@ -2,16 +2,20 @@
  * vite-plugin-sw — post-processes the Service Worker for POSpire.
  *
  * What it does (PROD builds only):
- *   1. Walks the emitted Vite bundle and builds a precache URL list: every
- *      JS/CSS chunk, every copied asset, the root index.html, /offline.html,
- *      and critical fonts.
- *   2. Computes a BUILD_HASH from the concatenated hashes of the bundle
- *      entries (stable per-deploy, changes whenever any entry changes).
- *   3. Replaces "__BUILD_HASH__" and "__PRECACHE_URLS__" placeholders in the
- *      emitted sw.js chunk.
- *   4. Writes a copy of sw.js AND offline.html to `../pospire/www/` so a
- *      Frappe controller can serve them at root scope (/sw.js, /offline.html)
- *      per docs/offline/10-service-worker.md §2.2.
+ *   1. Walks the emitted Vite bundle and builds a REQUIRED precache list:
+ *      every JS/CSS chunk, every copied asset, /offline.html, and critical
+ *      fonts. Failure on any of these aborts SW install.
+ *   2. Builds a BEST-EFFORT shell-route list (`/pospire/pos`, etc.). The
+ *      install precaches these too, but tolerates failures (auth redirect,
+ *      route disabled). Without them, hard-reload offline falls through to
+ *      `/offline.html` instead of booting the cached SPA.
+ *   3. Computes BUILD_HASH from the sorted precache list AND shell routes.
+ *      Changing either invalidates the cache.
+ *   4. Replaces `__BUILD_HASH__`, `__PRECACHE_URLS__`, and `__SHELL_ROUTES__`
+ *      placeholders in the emitted sw.js chunk.
+ *   5. Mirrors sw.js + offline.html into `../pospire/www/` so a Frappe
+ *      controller serves them at root scope (/sw.js, /offline.html) per
+ *      docs/offline/10-service-worker.md §2.2.
  *
  * DEV mode: no-op. main.js gates registration on import.meta.env.PROD, so the
  * dev server never exposes the SW.
@@ -32,6 +36,15 @@ const OFFLINE_FILENAME = "offline.html";
 export default function posspireServiceWorkerPlugin(options = {}) {
 	const frappeAppRoot = options.frappeAppRoot || "../pospire";
 	const baseUrl = options.baseUrl || "/assets/pospire/frontend/";
+
+	// Frappe-rendered SPA shell routes to precache (best-effort, sw.js install
+	// tolerates failures here). All SPA paths route to the same template, so
+	// caching one is enough for offline navigation fallback — but we cache
+	// multiple to cover hard-reload after auth-redirect edge cases.
+	const shellRoutes = options.shellRoutes || [
+		"/pospire/pos",
+		"/pospire/payments",
+	];
 
 	let outDir = null;
 	let isProd = false;
@@ -80,9 +93,14 @@ export default function posspireServiceWorkerPlugin(options = {}) {
 			// Critical fonts emitted by Vuetify / mdi-font live under assets/.
 			// They're already captured by the loop above.
 
-			// BUILD_HASH: stable SHA1 of the sorted precache list (so it only
-			// changes when the shell itself changes).
-			const hashInput = Array.from(precacheUrls).sort().join("\n");
+			// BUILD_HASH: stable SHA1 of the sorted precache list AND shell
+			// routes. Changing either invalidates the cache, so a deploy that
+			// adds a new SPA route forces clients to re-precache.
+			const hashInput = [
+				...Array.from(precacheUrls).sort(),
+				"---shell---",
+				...Array.from(shellRoutes).sort(),
+			].join("\n");
 			const buildHash = crypto
 				.createHash("sha1")
 				.update(hashInput)
@@ -93,7 +111,14 @@ export default function posspireServiceWorkerPlugin(options = {}) {
 
 			swSource = swSource
 				.replace(/"__BUILD_HASH__"/g, JSON.stringify(buildHash))
-				.replace(/"__PRECACHE_URLS__"/g, JSON.stringify(JSON.stringify(Array.from(precacheUrls))));
+				.replace(
+					/"__PRECACHE_URLS__"/g,
+					JSON.stringify(JSON.stringify(Array.from(precacheUrls))),
+				)
+				.replace(
+					/"__SHELL_ROUTES__"/g,
+					JSON.stringify(JSON.stringify(Array.from(shellRoutes))),
+				);
 
 			fs.writeFileSync(swPath, swSource, "utf8");
 
@@ -123,7 +148,7 @@ export default function posspireServiceWorkerPlugin(options = {}) {
 
 			// eslint-disable-next-line no-console
 			console.log(
-				`[pospire-sw] patched ${SW_FILENAME} (buildHash=${buildHash}, precache=${precacheUrls.size} urls)`,
+				`[pospire-sw] patched ${SW_FILENAME} (buildHash=${buildHash}, precache=${precacheUrls.size} urls, shellRoutes=${shellRoutes.length})`,
 			);
 		},
 	};

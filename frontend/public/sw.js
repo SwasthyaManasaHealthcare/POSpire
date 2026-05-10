@@ -36,10 +36,9 @@ const SHELL_CACHE = `pospire-shell-v${BUILD_HASH}`;
 const CACHE_PREFIX = "pospire-shell-v";
 const OFFLINE_URL = "/offline.html";
 
-// PRECACHE_URLS is appended to at build time with the Vite manifest entries.
-// The placeholder below is replaced by a JSON array of public paths — see
-// scripts/inject-sw-build-hash.js. At minimum, /offline.html is always present
-// so hard-reloads on first-visit offline still render a useful page.
+// PRECACHE_URLS is the REQUIRED precache list — Vite assets (/assets/...) and
+// /offline.html. A failure on any of these aborts install (these are the
+// minimum we need to claim "shell-cached"). Substituted at build time.
 const INJECTED_PRECACHE = "__PRECACHE_URLS__";
 const PRECACHE_URLS = (() => {
 	if (
@@ -53,13 +52,39 @@ const PRECACHE_URLS = (() => {
 				return Array.from(new Set([OFFLINE_URL, ...parsed]));
 			}
 		} catch (err) {
-			// fall through to the defaults — the install will still succeed with
-			// just /offline.html. Log at install time, not at parse time.
 			self.__SW_PRECACHE_PARSE_ERROR__ = err && err.message;
 		}
 	}
 	return [OFFLINE_URL];
 })();
+
+// SHELL_ROUTES is the BEST-EFFORT precache list — the Frappe-rendered SPA
+// shell routes (/pospire/pos etc.). These can fail (auth redirect, 4xx) at
+// install time without aborting the install. Once a user successfully
+// navigates online, handleNavigation caches the response too — but precaching
+// here means hard-reload offline works without first having visited each
+// route while online.
+const INJECTED_SHELL_ROUTES = "__SHELL_ROUTES__";
+const SHELL_ROUTES = (() => {
+	if (
+		INJECTED_SHELL_ROUTES &&
+		INJECTED_SHELL_ROUTES !== "__SHELL" + "_ROUTES__" &&
+		INJECTED_SHELL_ROUTES.startsWith("[")
+	) {
+		try {
+			const parsed = JSON.parse(INJECTED_SHELL_ROUTES);
+			if (Array.isArray(parsed)) return parsed;
+		} catch (err) {
+			self.__SW_SHELL_ROUTES_PARSE_ERROR__ = err && err.message;
+		}
+	}
+	return ["/pospire/pos"];
+})();
+
+// SHELL_PATH_PREFIX is used by handleNavigation to find any cached SPA shell
+// when the exact requested route isn't in cache. All /pospire/<x> routes
+// route to the same Frappe template, so any cached one is interchangeable.
+const SHELL_PATH_PREFIX = "/pospire";
 
 // Paths the SW must never intercept. Passed through to network on every fetch.
 const API_PASSTHROUGH_PREFIXES = ["/api/method/", "/api/resource/", "/api/v2/"];
@@ -130,13 +155,11 @@ self.addEventListener("install", (event) => {
 		(async () => {
 			const cache = await caches.open(SHELL_CACHE);
 
-			// Precache with explicit per-URL handling so a single 404 doesn't
-			// poison the whole install silently. addAll() rejects on any
-			// failure, which is what we want, but the default error is opaque.
+			// REQUIRED precache — Vite assets + /offline.html. A failure here
+			// aborts the install: these are the irreducible minimum.
 			const results = await Promise.allSettled(
 				PRECACHE_URLS.map(async (url) => {
-					// Bypass HTTP cache so we grab the freshly-deployed asset,
-					// not a stale entry left over from an earlier SW generation.
+					// Bypass HTTP cache so we grab the freshly-deployed asset.
 					const req = new Request(url, { cache: "reload", credentials: "same-origin" });
 					const res = await fetch(req);
 					if (!res.ok) {
@@ -151,17 +174,46 @@ self.addEventListener("install", (event) => {
 				.filter(Boolean);
 
 			if (failures.length) {
-				// Drop the half-filled cache so activate() doesn't promote it.
 				await caches.delete(SHELL_CACHE);
 				log("install failed — keeping previous cache intact", failures);
 				throw new Error(`precache failed: ${failures.join("; ")}`);
 			}
 
-			log("install complete", { cache: SHELL_CACHE, entries: PRECACHE_URLS.length });
-			// skipWaiting() is opt-in; we call it here because the new cache is
-			// proven-complete at this point (install only reaches this line on
-			// success). Clients are still notified via NEW_VERSION_AVAILABLE so
-			// the UI can prompt the user to reload on their own schedule.
+			// BEST-EFFORT precache — Frappe-rendered SPA shell routes. Without
+			// these, hard-reload offline falls through to /offline.html (because
+			// listReady doesn't include any /pospire/* HTML). With them, offline
+			// navigation serves the cached shell and the SPA boots from the
+			// already-cached Vite bundle.
+			//
+			// We tolerate failures here: Frappe might redirect to login if the
+			// session cookie isn't present at install time, or the route might
+			// not exist in some deployments. handleNavigation also caches on
+			// successful navigation, so a failed precache is recoverable.
+			const shellResults = await Promise.allSettled(
+				SHELL_ROUTES.map(async (url) => {
+					const req = new Request(url, { cache: "reload", credentials: "same-origin" });
+					const res = await fetch(req);
+					if (!res.ok) {
+						throw new Error(`shell ${url} -> HTTP ${res.status}`);
+					}
+					if (res.type !== "basic") {
+						throw new Error(`shell ${url} -> non-basic response (likely a redirect)`);
+					}
+					await cache.put(url, res.clone());
+				}),
+			);
+			const shellFailures = shellResults
+				.map((r, i) => (r.status === "rejected" ? `${SHELL_ROUTES[i]}: ${r.reason}` : null))
+				.filter(Boolean);
+			if (shellFailures.length) {
+				log("shell precache best-effort partial:", shellFailures);
+			}
+
+			log("install complete", {
+				cache: SHELL_CACHE,
+				required: PRECACHE_URLS.length,
+				shellRoutes: SHELL_ROUTES.length - shellFailures.length,
+			});
 			await self.skipWaiting();
 		})(),
 	);
@@ -177,20 +229,28 @@ self.addEventListener("activate", (event) => {
 	event.waitUntil(
 		(async () => {
 			const names = await caches.keys();
-			await Promise.all(
-				names
-					.filter((name) => name.startsWith(CACHE_PREFIX) && name !== SHELL_CACHE)
-					.map((name) => caches.delete(name)),
+			const oldShellCaches = names.filter(
+				(name) => name.startsWith(CACHE_PREFIX) && name !== SHELL_CACHE,
 			);
+			await Promise.all(oldShellCaches.map((name) => caches.delete(name)));
 
 			await self.clients.claim();
-			await broadcastToClients({
-				type: "NEW_VERSION_AVAILABLE",
-				buildHash: BUILD_HASH,
-				cache: SHELL_CACHE,
-			});
 
-			log("activate complete", { cache: SHELL_CACHE });
+			// Only signal an update when this SW actually replaced an older shell
+			// cache. On first install there is no prior cache, so broadcasting
+			// would surface a spurious "Update available" toast to the user.
+			if (oldShellCaches.length > 0) {
+				await broadcastToClients({
+					type: "NEW_VERSION_AVAILABLE",
+					buildHash: BUILD_HASH,
+					cache: SHELL_CACHE,
+				});
+			}
+
+			log("activate complete", {
+				cache: SHELL_CACHE,
+				replacedOldCaches: oldShellCaches.length,
+			});
 		})(),
 	);
 });
@@ -239,8 +299,11 @@ self.addEventListener("fetch", (event) => {
 
 async function handleNavigation(request) {
 	// Network-first for navigations so the cashier sees fresh HTML when online.
-	// On failure, serve the cached shell — this is what enables the offline SPA
-	// boot. If no shell cached (first-visit-offline), serve /offline.html.
+	// On failure, fall back through (in order):
+	//   1. The exact requested route, cached.
+	//   2. ANY cached /pospire/* shell — all SPA routes return the same
+	//      Frappe template, so any cached one boots the app correctly.
+	//   3. /offline.html — last resort when no SPA shell is cached at all.
 	try {
 		const fresh = await fetch(request);
 		// Opportunistically refresh the cached shell copy — but only for
@@ -254,23 +317,49 @@ async function handleNavigation(request) {
 		return fresh;
 	} catch (err) {
 		const cache = await caches.open(SHELL_CACHE);
+
+		// 1. Exact match for the requested route.
 		const cachedShell = await cache.match(request, { ignoreSearch: true });
 		if (cachedShell) {
-			log("nav offline — served cached shell", request.url);
+			log("nav offline — served cached shell (exact)", request.url);
 			return cachedShell;
 		}
-		// Try any cached navigation we have — same-origin HTML — before the
-		// offline fallback. This handles /pospire/pos vs /pospire/payments etc.
-		const rootShell = await cache.match("/");
-		if (rootShell) {
-			log("nav offline — served root shell", request.url);
-			return rootShell;
+
+		// 2. ANY cached /pospire/* shell. Walk the cache keys looking for a
+		//    same-prefix navigation we previously stored (either via precache
+		//    or a successful prior online visit).
+		const requestedUrl = new URL(request.url);
+		if (requestedUrl.pathname.startsWith(SHELL_PATH_PREFIX)) {
+			const keys = await cache.keys();
+			for (const cachedReq of keys) {
+				let cachedUrl;
+				try {
+					cachedUrl = new URL(cachedReq.url);
+				} catch {
+					continue;
+				}
+				if (cachedUrl.origin !== self.location.origin) continue;
+				if (!cachedUrl.pathname.startsWith(SHELL_PATH_PREFIX)) continue;
+				if (cachedUrl.pathname === OFFLINE_URL) continue;
+				const r = await cache.match(cachedReq);
+				if (r) {
+					log("nav offline — served fallback shell", {
+						requested: request.url,
+						served: cachedReq.url,
+					});
+					return r;
+				}
+			}
 		}
+
+		// 3. /offline.html — the SPA can't boot from this, but the user gets
+		//    a real "you are offline" page instead of a connection error.
 		const fallback = await cache.match(OFFLINE_URL);
 		if (fallback) {
-			log("nav offline — served /offline.html", request.url);
+			log("nav offline — served /offline.html (no shell cached)", request.url);
 			return fallback;
 		}
+
 		log("nav offline — no shell and no offline fallback", err);
 		return new Response(
 			"<!doctype html><title>Offline</title><p>You are offline. Please reconnect.</p>",
@@ -286,8 +375,18 @@ async function handleShellAsset(request) {
 	// Cache-first with background revalidation (stale-while-revalidate for the
 	// shell). This is safe because Vite emits content-hashed filenames — a new
 	// build produces new URLs, so stale cached copies can't shadow fresh code.
+	//
+	// ignoreSearch: the MDI CSS references fonts as
+	//   materialdesignicons-webfont-HASH.woff2?v=7.4.47
+	// but the precache stores them without the query string (Vite bundle
+	// entries don't include the ?v= suffix). Without ignoreSearch:true the
+	// cache.match is an exact-URL miss on every font request, so icons are
+	// absent on any offline visit where background revalidation hasn't yet
+	// had a chance to warm the ?v= variant. Vite assets are already
+	// content-hashed in the filename, so query strings carry no identity
+	// information and ignoring them is safe for all /assets/ paths.
 	const cache = await caches.open(SHELL_CACHE);
-	const cached = await cache.match(request);
+	const cached = await cache.match(request, { ignoreSearch: true });
 
 	const networkFetch = fetch(request)
 		.then((res) => {

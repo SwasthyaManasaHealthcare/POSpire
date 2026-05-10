@@ -414,27 +414,27 @@
 							<template v-slot:item="{ props, item }">
 								<v-list-item v-bind="props">
 									<v-list-item-title class="text-primary text-subtitle-1">
-										<div v-html="item.raw.address_title"></div>
+										<div>{{ item.raw.address_title }}</div>
 									</v-list-item-title>
 									<v-list-item-title>
-										<div v-html="item.raw.address_line1"></div>
+										<div>{{ item.raw.address_line1 }}</div>
 									</v-list-item-title>
 									<v-list-item-subtitle
 										v-if="item.raw.custoaddress_line2mer_name"
 									>
-										<div v-html="item.raw.address_line2"></div>
+										<div>{{ item.raw.address_line2 }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.city">
-										<div v-html="item.raw.city"></div>
+										<div>{{ item.raw.city }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.state">
-										<div v-html="item.raw.state"></div>
+										<div>{{ item.raw.state }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.country">
-										<div v-html="item.raw.mobile_no"></div>
+										<div>{{ item.raw.mobile_no }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.address_type">
-										<div v-html="item.raw.address_type"></div>
+										<div>{{ item.raw.address_type }}</div>
 									</v-list-item-subtitle>
 								</v-list-item>
 							</template>
@@ -722,6 +722,7 @@
 
 <script>
 import { call } from "@/utils/call";
+import { OfflineReturnDeferredError } from "@/utils/call-registry";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { toast } from "vue3-toastify"; // <-- make sure this is imported
@@ -886,10 +887,34 @@ export default {
 			data["is_cashback"] = this.is_cashback;
 
 			const vm = this;
-			const r = await call("pospire.pospire.api.posapp.submit_invoice", {
-				data: data,
-				invoice: this.invoice_doc,
-			});
+			// forceQueue (T10): if the cart's customer was offline-created,
+			// the live posapp.submit_invoice can't resolve "OFFLINE-CUST-..."
+			// to a real customer link. Route through the offline endpoint
+			// instead — it pops customer_offline_id, looks up the synced
+			// customer, and substitutes the real name. forceQueue is a no-op
+			// when the registry entry isn't offline-capable.
+			const hasOfflineCustomer = !!this.invoice_doc?.customer_offline_id;
+			let r = null;
+			try {
+				r = await call({
+					method: "pospire.pospire.api.posapp.submit_invoice",
+					args: {
+						data: data,
+						invoice: this.invoice_doc,
+					},
+					intent: "write",
+					forceQueue: hasOfflineCustomer,
+				});
+			} catch (err) {
+				if (err instanceof OfflineReturnDeferredError) {
+					toast.warning(
+						__("Sales Return requires an online connection in this phase."),
+					);
+					return;
+				}
+				toast.error(err && err.message ? err.message : "Error submitting invoice");
+				return;
+			}
 			if (!r) {
 				toast.error("Error submitting invoice");
 				return;
@@ -1167,9 +1192,16 @@ export default {
 			if (!vm.invoice_doc) {
 				return;
 			}
-			const r = await call("pospire.pospire.api.posapp.get_customer_addresses", {
-				customer: vm.invoice_doc.customer,
-			});
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_customer_addresses", {
+					customer: vm.invoice_doc.customer,
+				});
+			} catch {
+				// Offline: leave previously-loaded addresses in place; new
+				// address fetches resume on reconnect.
+				return;
+			}
 			if (r) {
 				vm.addresses = r;
 			} else {
@@ -1199,7 +1231,14 @@ export default {
 			if (vm.pos_profile.posa_local_storage && localStorage.sales_persons_storage) {
 				vm.sales_persons = JSON.parse(localStorage.getItem("sales_persons_storage"));
 			}
-			const r = await call("pospire.pospire.api.posapp.get_sales_person_names");
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_sales_person_names");
+			} catch {
+				// Offline: localStorage hydration above (if enabled) leaves a
+				// usable list. Otherwise the dropdown is empty until reconnect.
+				return;
+			}
 			if (r) {
 				vm.sales_persons = r;
 				if (vm.pos_profile.posa_local_storage) {

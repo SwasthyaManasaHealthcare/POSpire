@@ -34,7 +34,12 @@ export default [
 			"vue/singleline-html-element-content-newline": "off",
 			// Common patterns in this project
 			"vue/multi-word-component-names": "off",
-			"vue/no-v-html": "off",
+			// XSS surface — every v-html site that took cashier-entered or
+			// stored content was migrated to text interpolation (or
+			// `white-space: pre-line` for newline-preserving descriptions).
+			// Keeping this as `error` enforces the boundary at PR time so a
+			// future addition can't sneak v-html back in unreviewed.
+			"vue/no-v-html": "error",
 			"no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
 			// Vuetify 3 uses v-slot modifier syntax (e.g. v-slot:activator.stop)
 			"vue/valid-v-slot": ["error", { allowModifiers: true }],

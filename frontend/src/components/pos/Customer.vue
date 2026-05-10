@@ -32,20 +32,31 @@
 			</template>
 			<template v-slot:item="{ props, item }">
 				<v-list-item v-bind="props">
+					<template v-slot:append v-if="isPendingSync(item.raw)">
+						<v-chip
+							size="x-small"
+							color="warning"
+							variant="tonal"
+							:title="__('This customer was created offline and has not yet synced to the server.')"
+						>
+							<v-icon start size="x-small">mdi-cloud-sync-outline</v-icon>
+							{{ __('pending sync') }}
+						</v-chip>
+					</template>
 					<v-list-item-subtitle v-if="item.raw.customer_name != item.raw.name">
-						<div v-html="`ID: ${item.raw.name}`"></div>
+						<div>ID: {{ item.raw.name }}</div>
 					</v-list-item-subtitle>
 					<v-list-item-subtitle v-if="item.raw.tax_id">
-						<div v-html="`TAX ID: ${item.raw.tax_id}`"></div>
+						<div>TAX ID: {{ item.raw.tax_id }}</div>
 					</v-list-item-subtitle>
 					<v-list-item-subtitle v-if="item.raw.email_id">
-						<div v-html="`Email: ${item.raw.email_id}`"></div>
+						<div>Email: {{ item.raw.email_id }}</div>
 					</v-list-item-subtitle>
 					<v-list-item-subtitle v-if="item.raw.mobile_no">
-						<div v-html="`Mobile No: ${item.raw.mobile_no}`"></div>
+						<div>Mobile No: {{ item.raw.mobile_no }}</div>
 					</v-list-item-subtitle>
 					<v-list-item-subtitle v-if="item.raw.primary_address">
-						<div v-html="`Primary Address: ${item.raw.primary_address}`"></div>
+						<div>Primary Address: {{ item.raw.primary_address }}</div>
 					</v-list-item-subtitle>
 				</v-list-item>
 			</template>
@@ -56,8 +67,10 @@
 </template>
 
 <script>
-import { call } from "@/utils/call";
+import { call, unwrapStale } from "@/utils/call";
 import UpdateCustomer from "./UpdateCustomer.vue";
+import { onSynced } from "@/offline/outbox";
+import { renameCustomer, listOfflineCreated } from "@/offline/repos/customers";
 export default {
 	props: {
 		showActions: {
@@ -90,22 +103,68 @@ export default {
 			}
 			const profile_doc = vm.pos_profile.pos_profile;
 			if (profile_doc?.posa_local_storage && localStorage.customer_storage) {
-				vm.customers = JSON.parse(localStorage.getItem("customer_storage"));
+				// Defensive unwrap on hydrate: an earlier build path could
+				// have stored the StaleReadResult wrapper here. Strip it on
+				// read so a device with the bad cache shape recovers without
+				// manual intervention.
+				const hydrated = unwrapStale(
+					JSON.parse(localStorage.getItem("customer_storage")),
+				);
+				vm.customers = Array.isArray(hydrated) ? hydrated : [];
 			}
 
-			const r = await call("pospire.pospire.api.posapp.get_customer_names", {
-				pos_profile: profile_doc,
-			});
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_customer_names", {
+					pos_profile: profile_doc,
+				});
+			} catch {
+				// Offline / transport failure. The localStorage hydration above
+				// (if posa_local_storage is enabled) has already populated the
+				// dropdown, so swallow rather than rejecting upward.
+				return;
+			}
 			if (r) {
-				// call() may return a StaleReadResult wrapper {data, stale, cachedAt}
-				// when the cache hit is stale. Unwrap so the customers list gets
-				// the array, not the wrapper object.
-				const customers = r && typeof r === "object" && "stale" in r ? r.data : r;
-				vm.customers = customers;
+				// `get_customer_names` is offline:true; on a stale-cache hit
+				// call() returns a StaleReadResult wrapper { data, stale,
+				// cachedAt }. Unwrap before persistence + binding.
+				const customers = unwrapStale(r);
+				vm.customers = Array.isArray(customers) ? customers : [];
 				if (profile_doc?.posa_local_storage) {
 					localStorage.setItem("customer_storage", "");
-					localStorage.setItem("customer_storage", JSON.stringify(customers));
+					localStorage.setItem("customer_storage", JSON.stringify(vm.customers));
 				}
+			}
+
+			// M3 — merge offline-created customers from Dexie that haven't
+			// yet synced. UpdateCustomer.vue persists each provisional
+			// customer to the encrypted Dexie table at create time, but
+			// without this rehydrate the picker would only show server-side
+			// customers after a reload, dropping the still-pending ones from
+			// the cashier's view until the outbox drains.
+			try {
+				const offlineCustomers = await listOfflineCreated();
+				const existingNames = new Set(
+					vm.customers.map((c) => (c && typeof c.name === "string" ? c.name : null)),
+				);
+				for (const oc of offlineCustomers) {
+					if (existingNames.has(oc.name)) continue;
+					// Mirror the row shape the picker template consumes.
+					vm.customers.push({
+						name: oc.name,
+						customer_name: oc.customer_name,
+						mobile_no: oc.mobile_no,
+						tax_id: oc.tax_id,
+						email_id: oc.email_id,
+						customer_group: oc.customer_group,
+						pos_offline_id: oc.offline_id,
+					});
+				}
+			} catch (err) {
+				console.warn(
+					"[Customer] listOfflineCreated rehydrate failed (provisional customers may be missing until next sync)",
+					err,
+				);
 			}
 		},
 		new_customer() {
@@ -113,6 +172,21 @@ export default {
 		},
 		edit_customer() {
 			this.eventBus.emit("open_update_customer", this.customer_info);
+		},
+		/**
+		 * A customer is "pending sync" when its name is still the provisional
+		 * `OFFLINE-CUST-<offline_id>` form. After the outbox row syncs, the
+		 * onSynced listener swaps the name to the real server doc name and
+		 * this returns false again.
+		 *
+		 * Falls back to the `pos_offline_id` flag for the brief window where
+		 * `add_customer_to_list` ran with the offline_id but the name happens
+		 * to be a real server name (defensive — shouldn't happen in practice).
+		 */
+		isPendingSync(row) {
+			if (!row || typeof row.name !== "string") return false;
+			if (row.name.startsWith("OFFLINE-CUST-")) return true;
+			return false;
 		},
 		customFilter(itemText, queryText, itemRow) {
 			const item = itemRow.raw;
@@ -178,6 +252,56 @@ export default {
 				this.customers = [];
 				this.get_customer_names();
 			});
+
+			// Outbox sync notification: when a customer that was created
+			// offline finally syncs, the server returns its real customer
+			// name. Rename the row in the dropdown, in Dexie, and (via the
+			// `customer_renamed` event) in any cart that's still pointing at
+			// the provisional `OFFLINE-CUST-...` name.
+			this._unsubOnSynced = onSynced((event) => {
+				if (event.type !== "customer") return;
+				if (!event.provisional_name || !event.server_doc_name) return;
+				if (event.provisional_name === event.server_doc_name) return;
+
+				const entry = this.customers.find(
+					(c) => c && c.name === event.provisional_name,
+				);
+				if (entry) {
+					entry.name = event.server_doc_name;
+					// Clear pos_offline_id once the customer has a real
+					// server doc name. Otherwise the watcher below would
+					// continue emitting the (now-resolved) offline_id on
+					// every customer pick, and Payments.vue's `forceQueue`
+					// branch — which checks `customer_offline_id` — would
+					// force-queue every future invoice for this customer
+					// even when online. The outbox row's pos_offline_id
+					// is the audit anchor; the in-memory customers entry
+					// no longer needs it.
+					entry.pos_offline_id = null;
+				}
+
+				// Persist the rename to the local cache so a reload doesn't
+				// reintroduce the old name.
+				renameCustomer(event.provisional_name, event.server_doc_name).catch(
+					(err) => console.warn(
+						"[Customer] renameCustomer failed (cache will reload from server)",
+						err,
+					),
+				);
+
+				if (this.customer === event.provisional_name) {
+					// Trigger our watcher (which derives offline_id and emits
+					// update_customer / update_customer_offline_id together).
+					this.customer = event.server_doc_name;
+				}
+
+				// Notify the cart layer (Invoice.vue) so an in-flight draft
+				// invoice updates its `doc.customer` field too.
+				this.eventBus.emit("customer_renamed", {
+					old_name: event.provisional_name,
+					new_name: event.server_doc_name,
+				});
+			});
 		});
 	},
 
@@ -190,6 +314,10 @@ export default {
 		this.eventBus.off("set_customer_info_to_edit");
 		this.eventBus.off("fetch_customer_details");
 		this.eventBus.off("refresh_customers");
+		if (typeof this._unsubOnSynced === "function") {
+			this._unsubOnSynced();
+			this._unsubOnSynced = null;
+		}
 	},
 
 	watch: {

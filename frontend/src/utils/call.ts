@@ -66,6 +66,16 @@ export interface CallOptions {
 	 * it. Idempotency on `pos_offline_id` keeps duplicate POSTs safe.
 	 */
 	bypassConnectivityForReplay?: boolean;
+	/**
+	 * Force the enqueue path even when connectivity says ONLINE. Used by
+	 * components that know their args carry an offline-id reference (e.g.
+	 * `customer_offline_id` set on a still-unsynced offline-created customer)
+	 * and the live endpoint can't resolve the placeholder. The scheduler
+	 * drains immediately when online, so the user perceives ~1s extra latency
+	 * but the request goes through the offline endpoint that knows how to
+	 * resolve the offline_id reference.
+	 */
+	forceQueue?: boolean;
 }
 
 /**
@@ -98,6 +108,45 @@ export interface StaleReadResult<T = unknown> {
 }
 
 export type CallResult<T = unknown> = T | StaleReadResult<T> | OutboxEnqueueAck;
+
+/**
+ * Type guard for the stale-read wrapper. Components that don't care about the
+ * stale flag should funnel every cached-read response through `unwrapStale`
+ * to avoid the wrapper leaking into list bindings, localStorage caches, and
+ * downstream array operations.
+ */
+export function isStaleReadResult<T>(
+	value: unknown,
+): value is StaleReadResult<T> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"stale" in (value as Record<string, unknown>) &&
+		"data" in (value as Record<string, unknown>)
+	);
+}
+
+/**
+ * Strip the stale-read wrapper if present and return the underlying value.
+ * No-op when the value is already the bare type (or null/undefined).
+ *
+ * Use this in every component path that bridges `await call(...)` with a
+ * downstream consumer that expects the bare value:
+ *
+ *   const items = unwrapStale(await call({ ..., cacheKey: 'items' }));
+ *   localStorage.setItem("items", JSON.stringify(items));
+ *   eventBus.emit("set_items", items);
+ *
+ * The previous inline `r && typeof r === "object" && "stale" in r ? r.data : r`
+ * pattern was correct but easy to forget at a single call site, which had
+ * shipped wrapper objects into both localStorage and the eventBus. This
+ * helper is the canonical fix.
+ */
+export function unwrapStale<T>(value: T | StaleReadResult<T> | null | undefined): T | null {
+	if (value === null || value === undefined) return null;
+	if (isStaleReadResult<T>(value)) return value.data;
+	return value as T;
+}
 
 // ---------------------------------------------------------------------------
 // Error surfaces (09-api-boundary.md §7)
@@ -398,6 +447,23 @@ async function runWrite<T>(opts: CallOptions, config: WriteMethodConfig): Promis
 		...(opts.args ?? {}),
 		offline_id: offlineId,
 	};
+
+	// forceQueue (T10): caller knows args reference an offline-id placeholder
+	// (e.g. customer_offline_id pointing at a still-unsynced offline customer)
+	// that the live endpoint can't resolve. Skip the online live path; let the
+	// scheduler drain via the offline endpoint that handles the resolution.
+	if (opts.forceQueue && config.offline) {
+		const ack = await enqueueWrite(opts, config, argsWithKey, offlineId);
+		emit({
+			method: opts.method,
+			intent: "write",
+			offline: true,
+			durationMs: nowMs() - startedAt,
+			outcome: "enqueued",
+			attempt,
+		});
+		return ack as CallResult<T>;
+	}
 
 	if (connectivity.isOnline()) {
 		try {

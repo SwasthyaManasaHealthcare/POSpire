@@ -168,11 +168,20 @@ export default {
 				return;
 			}
 			const vm = this;
-			const r = await call("pospire.pospire.api.posapp.get_pos_coupon", {
-				coupon: new_coupon,
-				customer: vm.customer,
-				company: vm.pos_profile.company,
-			});
+			let r;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_pos_coupon", {
+					coupon: new_coupon,
+					customer: vm.customer,
+					company: vm.pos_profile.company,
+				});
+			} catch (err) {
+				if (err && err.name === "OfflineReadUnavailable") {
+					toast.error(__("Coupon lookup requires an internet connection"));
+					return;
+				}
+				throw err;
+			}
 			if (r) {
 				const res = r;
 				if (res.msg != "Apply" || !res.coupon) {
@@ -193,16 +202,28 @@ export default {
 		},
 		async setActiveGiftCoupons() {
 			if (!this.customer) return;
-			const vm = this;
-			const r = await call("pospire.pospire.api.posapp.get_active_gift_coupons", {
-				customer: vm.customer,
-				company: vm.pos_profile.company,
-			});
-			if (r) {
-				const coupons = r;
-				coupons.forEach((coupon_code) => {
-					vm.add_coupon(coupon_code);
+			// Offline-created customers don't exist server-side yet, so this lookup
+			// can never return meaningful gift-coupon data.
+			if (typeof this.customer === "string" && this.customer.startsWith("OFFLINE-CUST-")) {
+				return;
+			}
+			try {
+				const vm = this;
+				const r = await call("pospire.pospire.api.posapp.get_active_gift_coupons", {
+					customer: vm.customer,
+					company: vm.pos_profile.company,
 				});
+				if (r) {
+					const coupons = r;
+					coupons.forEach((coupon_code) => {
+						vm.add_coupon(coupon_code);
+					});
+				}
+			} catch (err) {
+				// This read is marked offline:false in the call registry.
+				// When offline, silently skip instead of throwing from update_customer flow.
+				if (err && err.name === "OfflineReadUnavailable") return;
+				throw err;
 			}
 		},
 

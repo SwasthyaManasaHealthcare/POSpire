@@ -24,11 +24,10 @@ import type { OutboxType } from "./types";
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Server-side setting we consult. */
-const KILL_SWITCH_DOCTYPE = "POSpire Offline Settings";
-const KILL_SWITCH_FIELD = "enabled";
-/** Cache key used when the switch is eventually wired through `@/utils/call`. */
+/** Cache key used when the switch is consulted through `@/utils/call`. */
 export const KILL_SWITCH_CACHE_KEY = "offline.kill_switch";
+/** Field name on the response object — kept for `parseEnabled` shape unwrap. */
+const KILL_SWITCH_FIELD = "enabled";
 /** TTL for the cached value. 60s keeps ops toggles snappy without spamming. */
 export const KILL_SWITCH_CACHE_TTL_MS = 60_000;
 /**
@@ -139,6 +138,21 @@ export async function assertOfflineEnabled(
 ): Promise<void> {
 	const enabled = await isOfflineEnabled();
 	if (!enabled) {
+		// Diagnostic log: this throw blocks the cashier's submit, so the
+		// console MUST capture enough context to root-cause "why is the
+		// switch off here?" without re-running the failing request. Cache
+		// age tells us whether we're serving a stale reading or a fresh
+		// false from the server.
+		const ageMs = cached ? Date.now() - cached.checkedAt : null;
+		console.warn(
+			"[kill-switch] assertOfflineEnabled blocking enqueue",
+			{
+				outboxType: type,
+				cachedEnabled: cached?.enabled,
+				cacheAgeMs: ageMs,
+				cacheTTLMs: KILL_SWITCH_CACHE_TTL_MS,
+			},
+		);
 		throw new OfflineDisabledError(type);
 	}
 }
@@ -153,25 +167,57 @@ export function invalidateKillSwitchCache(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Fetches the kill-switch value via the API boundary. Until the server-side
- * doctype exists (Agent 6 task 1.16), we short-circuit to DEFAULT_ENABLED.
+ * Fetches the kill-switch value via a dedicated whitelisted endpoint.
  *
- * Guarded with a try/catch: a failed read must NOT flip the switch to
- * `false` because of a transient lookup error. Ops expect "disabled" to
- * require an affirmative server response, not a network blip.
+ * Why not `frappe.client.get_single_value` directly?
+ *   The `POSpire Offline Settings` Single restricts read+write to System
+ *   Manager (intentional — cashiers must not be able to mutate it). The
+ *   generic client lookup permission-checks the doctype, so cashier
+ *   sessions hit a 403 and the catch below would silently fall back to
+ *   "enabled". That defeats the kill switch for the users it's supposed
+ *   to gate.
+ *
+ *   `pospire.pospire.api.offline.is_offline_enabled` reads the bit through
+ *   the DB layer (bypassing doctype permissions) and exposes ONLY the
+ *   boolean. Any authenticated user can call it; only System Managers can
+ *   change the underlying value through the Desk form.
+ *
+ * Cache key + TTL are honoured by call() so a poll every 60s costs at most
+ * one round-trip per device per minute.
+ *
+ * Failure semantics: a transient lookup error (network blip, server
+ * restart) must NOT flip the switch to disabled. Preserve the last-known
+ * value (or the default) on error.
  */
 async function fetchKillSwitch(): Promise<boolean> {
+	// Short-circuit when the device is offline. There is no point firing a
+	// fetch against a known-down link — but more importantly, an offline
+	// fetch can resolve in surprising ways (an SW-served fallback envelope,
+	// a captive-portal HTML page, a 200 with an empty body) that
+	// `parseEnabled` may interpret as `false` and block legitimate offline
+	// enqueues. The kill switch is a runtime *online* signal; while offline
+	// we trust the last good reading (or the default = enabled) and let the
+	// scheduler re-check the real value the moment we reconnect, before any
+	// drain.
+	try {
+		const { default: connectivity } = await import("./connectivity");
+		if (
+			!connectivity.isOnline() ||
+			(typeof navigator !== "undefined" && !navigator.onLine)
+		) {
+			return cached?.enabled ?? DEFAULT_ENABLED;
+		}
+	} catch {
+		// connectivity module not available yet (very early boot) — fall
+		// through to the network attempt with the existing error guards.
+	}
+
 	try {
 		// Lazy import to avoid a circular dependency (kill-switch is imported
 		// from call()'s offline dependency graph indirectly via outbox.ts).
 		const { call } = await import("@/utils/call");
 		const res = (await call({
-			method: "frappe.client.get_value",
-			args: {
-				doctype: KILL_SWITCH_DOCTYPE,
-				filters: {},
-				fieldname: KILL_SWITCH_FIELD,
-			},
+			method: "pospire.pospire.api.offline.is_offline_enabled",
 			intent: "read",
 			cacheKey: KILL_SWITCH_CACHE_KEY,
 			cacheTTLMs: KILL_SWITCH_CACHE_TTL_MS,
@@ -179,11 +225,11 @@ async function fetchKillSwitch(): Promise<boolean> {
 
 		const value = parseEnabled(res);
 		if (value !== null) return value;
-		// Missing doctype / malformed response — keep default.
+		// Malformed response — keep last known value or the default.
 		return cached?.enabled ?? DEFAULT_ENABLED;
 	} catch {
-		// Server unreachable or doctype missing — preserve the last known
-		// value (or the default). NEVER treat an error as "disabled".
+		// Server unreachable — preserve the last known value (or the
+		// default). NEVER treat an error as "disabled".
 		return cached?.enabled ?? DEFAULT_ENABLED;
 	}
 }

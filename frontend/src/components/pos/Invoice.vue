@@ -178,13 +178,12 @@
 						>
 							<template v-slot:item="{ props, item }">
 								<v-list-item v-bind="props">
-									<v-list-item-title
-										class="text-primary text-subtitle-1"
-										v-html="item.raw.name"
-									></v-list-item-title>
-									<v-list-item-subtitle
-										v-html="`Rate: ${item.raw.rate}`"
-									></v-list-item-subtitle>
+									<v-list-item-title class="text-primary text-subtitle-1">
+										{{ item.raw.name }}
+									</v-list-item-title>
+									<v-list-item-subtitle>
+										Rate: {{ item.raw.rate }}
+									</v-list-item-subtitle>
 								</v-list-item>
 							</template>
 						</v-autocomplete>
@@ -743,14 +742,12 @@
 									>
 										<template v-slot:item="{ props, item }">
 											<v-list-item v-bind="props">
-												<v-list-item-title
-													v-html="item.raw.batch_no"
-												></v-list-item-title>
-												<v-list-item-subtitle
-													v-html="
-														`Available QTY  '${item.raw.batch_qty}' - Expiry Date ${item.raw.expiry_date}`
-													"
-												></v-list-item-subtitle>
+												<v-list-item-title>
+													{{ item.raw.batch_no }}
+												</v-list-item-title>
+												<v-list-item-subtitle>
+													Available QTY '{{ item.raw.batch_qty }}' - Expiry Date {{ item.raw.expiry_date }}
+												</v-list-item-subtitle>
 											</v-list-item>
 										</template>
 									</v-autocomplete>
@@ -849,14 +846,14 @@
 												<v-list-item-title
 													class="text-primary text-subtitle-1"
 												>
-													<div v-html="item.raw.sales_person_name"></div>
+													<div>{{ item.raw.sales_person_name }}</div>
 												</v-list-item-title>
 												<v-list-item-subtitle
 													v-if="
 														item.raw.sales_person_name != item.raw.name
 													"
 												>
-													<div v-html="`ID: ${item.raw.name}`"></div>
+													<div>ID: {{ item.raw.name }}</div>
 												</v-list-item-subtitle>
 											</v-list-item>
 										</template>
@@ -1111,6 +1108,7 @@ import Customer from "./Customer.vue";
 import ApprovalDialog from "./ApprovalDialog.vue";
 import { toast } from "vue3-toastify";
 import { datetime } from "@/utils/datetime";
+import connectivity from "@/offline/connectivity";
 
 export default {
 	mixins: [format, hardwareUtils],
@@ -1131,6 +1129,11 @@ export default {
 			// real customer name when the customer outbox row syncs.
 			customer_offline_id: null,
 			customer_info: "",
+			// H4: true while the cashier has queued an offline closing for the
+			// current shift but it hasn't synced yet. Locks add_item +
+			// show_payment so new sales don't slip into a shift whose
+			// strict-closure parent_offline_ids list was already snapshotted.
+			shiftClosingPending: false,
 			discount_amount: 0,
 			additional_discount_percentage: 0,
 			total_tax: 0,
@@ -1332,13 +1335,17 @@ export default {
 			if (vm.pos_profile.posa_local_storage && localStorage.sales_persons_storage) {
 				vm.sales_persons = JSON.parse(localStorage.getItem("sales_persons_storage"));
 			}
-			const r = await call("pospire.pospire.api.posapp.get_sales_person_names");
-			if (r) {
-				vm.sales_persons = r;
-				if (vm.pos_profile.posa_local_storage) {
-					localStorage.setItem("sales_persons_storage", "");
-					localStorage.setItem("sales_persons_storage", JSON.stringify(r));
+			try {
+				const r = await call("pospire.pospire.api.posapp.get_sales_person_names");
+				if (r) {
+					vm.sales_persons = r;
+					if (vm.pos_profile.posa_local_storage) {
+						localStorage.setItem("sales_persons_storage", "");
+						localStorage.setItem("sales_persons_storage", JSON.stringify(r));
+					}
 				}
+			} catch {
+				/* offline or network error — local cache already loaded above */
 			}
 		},
 
@@ -1915,6 +1922,14 @@ export default {
 		},
 
 		async load_invoice(data = {}) {
+			// Offline draft: strip the provisional name so update_invoice doesn't
+			// try to PUT a doc that has never existed on the server. Remove it
+			// from the local store — it's been loaded into the cart now.
+			if (typeof data.name === "string" && data.name.startsWith("OFFLINE-DRAFT-")) {
+				this.removeLocalOfflineDraft(data.name);
+				data = { ...data, name: "" };
+			}
+
 			// clear_invoice cancels any Pending approvals from the previous cart.
 			// We pass submitted=false so orphaned Pending requests are cancelled.
 			this.clear_invoice();
@@ -1980,20 +1995,42 @@ export default {
 			}
 
 			const doc = this.get_invoice_doc();
+
+			// Offline path: persist the cart locally and clear — never call the
+			// server. update_invoice's network-error catch shows a "preparing
+			// payment" toast which is wrong here; bypassing it entirely avoids
+			// that misleading message. Drafts live in localStorage keyed by
+			// shift name and are surfaced by get_draft_invoices when offline.
+			if (!connectivity.isOnline()) {
+				this.savingDraft = true;
+				try {
+					return this.saveOfflineDraftAndClear(doc);
+				} finally {
+					this.savingDraft = false;
+				}
+			}
+
 			let old_invoice = null;
 			this.savingDraft = true;
 			try {
 				if (doc.name) {
-					old_invoice = await this.update_invoice(doc);
+					old_invoice = await this.update_invoice(doc, {
+						fallbackOnNetworkError: false,
+					});
 				} else {
 					if (doc.items.length) {
-						old_invoice = await this.update_invoice(doc);
+						old_invoice = await this.update_invoice(doc, {
+							fallbackOnNetworkError: false,
+						});
 					} else {
 						toast.error("Nothing to save");
 						return null;
 					}
 				}
 			} catch (error) {
+				if (this.isLikelyNetworkError(error)) {
+					return this.saveOfflineDraftAndClear(doc);
+				}
 				return null;
 			} finally {
 				this.savingDraft = false;
@@ -2096,10 +2133,31 @@ export default {
 			}
 			doc.items = this.get_invoice_items();
 			doc.total = this.subtotal;
+			// Offline path: server-side `update_invoice` (which normally
+			// computes net_total / grand_total / rounded_total) is bypassed
+			// when we fall back to the local snapshot. Without these fields
+			// Payments.vue line 1466 — `default_payment.amount = rounded_total
+			// || grand_total` — resolves to undefined and the cashier sees a
+			// default of 0, queueing an invoice with `payments[*].amount = 0`.
+			// Seed both from `subtotal` (which already includes discount +
+			// delivery) so the default cash row is pre-populated; the server
+			// recomputes the full chain on submit/sync.
+			doc.grand_total = this.subtotal;
+			doc.rounded_total = this.subtotal;
+			doc.net_total = this.subtotal;
 			doc.discount_amount = flt(this.discount_amount);
 			doc.additional_discount_percentage = flt(this.additional_discount_percentage);
 			doc.custom_delivery_charge_rate = this.delivery_charges_rate || 0;
 			doc.posa_pos_opening_shift = this.pos_opening_shift?.name || "";
+			// F2: when the current shift was opened offline, the `name` is the
+			// provisional `OFFLINE-OPN-...` and the real link is the offline_id.
+			// submit_invoice's adapter forwards this as `opening_entry_offline_id`
+			// to the server, which resolves to the real shift name on sync via
+			// `_resolve_opening_shift`. Without this field the server would
+			// either reject (parent_not_ready) or insert with a dangling link.
+			if (this.pos_opening_shift?.pos_offline_id) {
+				doc.pos_opening_shift_offline_id = this.pos_opening_shift.pos_offline_id;
+			}
 			doc.disable_rounded_total = this.pos_profile.disable_rounded_total ? 1 : 0;
 			doc.payments = this.get_payments();
 			doc.taxes = [];
@@ -2191,6 +2249,7 @@ export default {
 			this.items.forEach((item) => {
 				const new_item = {
 					item_code: item.item_code,
+					item_name: item.item_name,
 					posa_row_id: item.posa_row_id,
 					posa_offers: item.posa_offers,
 					posa_offer_applied: item.posa_offer_applied,
@@ -2265,15 +2324,31 @@ export default {
 			return payments;
 		},
 
-		async update_invoice(doc) {
+		async update_invoice(doc, { fallbackOnNetworkError = true } = {}) {
 			var vm = this;
-			const r = await call("pospire.pospire.api.posapp.update_invoice", {
-				data: doc,
-			});
-			if (r) {
-				vm.invoice_doc = r;
+			try {
+				const r = await call("pospire.pospire.api.posapp.update_invoice", {
+					data: doc,
+				});
+				if (r) {
+					vm.invoice_doc = r;
+				}
+				return this.invoice_doc;
+			} catch (err) {
+				if (fallbackOnNetworkError && this.isLikelyNetworkError(err)) {
+					// `update_invoice` is live-only in the registry, so when the
+					// cashier is offline we fall back to the local cart snapshot
+					// and continue into the payment step. Final submit goes through
+					// `submit_invoice`, which is offline-capable and queueable.
+					toast.info(
+						__("Offline mode: preparing payment from local cart data."),
+					);
+					const localDoc = this.get_invoice_doc();
+					this.invoice_doc = localDoc;
+					return localDoc;
+				}
+				throw err;
 			}
-			return this.invoice_doc;
 		},
 
 		async update_invoice_from_order(doc) {
@@ -2296,6 +2371,27 @@ export default {
 			}
 		},
 
+		isLikelyNetworkError(err) {
+			if (!err) return false;
+			if (typeof err === "object") {
+				const maybe = err;
+				if (
+					typeof maybe.status === "number" ||
+					typeof maybe.statusCode === "number" ||
+					typeof maybe.httpStatus === "number"
+				) {
+					return false;
+				}
+			}
+			const msg = String(err?.message || err).toLowerCase();
+			return (
+				msg.includes("failed to fetch") ||
+				msg.includes("network") ||
+				msg.includes("connection refused") ||
+				msg.includes("offline")
+			);
+		},
+
 		async process_invoice_from_order() {
 			const doc = await this.get_invoice_from_order_doc();
 			var up_invoice;
@@ -2309,6 +2405,19 @@ export default {
 
 		async show_payment() {
 			if (this.processingPayment) {
+				return;
+			}
+
+			// H4: shift is closing-pending — refuse Pay so a new invoice
+			// can't slip in under a closed shift. The cashier should open a
+			// new shift (or void the closing in reconciliation if they
+			// changed their mind).
+			if (this.shiftClosingPending) {
+				toast.error(
+					__(
+						"This shift is closing. Open a new shift before submitting another invoice.",
+					),
+				);
 				return;
 			}
 
@@ -2332,17 +2441,24 @@ export default {
 				if (this.invoice_doc.doctype == "Sales Order") {
 					invoice_doc = await this.process_invoice_from_order();
 				} else if (this.invoice_doc.doctype == "Sales Invoice") {
-					const sales_invoice_item = this.invoice_doc.items[0];
+					const sales_invoice_item = this.invoice_doc.items?.[0];
 					let sales_invoice_item_doc = {};
-					const siChildResult = await call(
-						"pospire.pospire.api.posapp.get_sales_invoice_child_table",
-						{
-							sales_invoice: this.invoice_doc.name,
-							sales_invoice_item: sales_invoice_item.name,
-						},
-					);
-					if (siChildResult) {
-						sales_invoice_item_doc = siChildResult;
+					// Only query the child table when the invoice has already been
+					// saved server-side (has a real Frappe name) AND the first item
+					// has a server-side row name. A client-side-constructed doc
+					// (offline fallback, fresh offer cart) has name=undefined, which
+					// JSON.stringify strips to {}, causing a server-side TypeError.
+					if (this.invoice_doc.name && sales_invoice_item?.name) {
+						const siChildResult = await call(
+							"pospire.pospire.api.posapp.get_sales_invoice_child_table",
+							{
+								sales_invoice: this.invoice_doc.name,
+								sales_invoice_item: sales_invoice_item.name,
+							},
+						);
+						if (siChildResult) {
+							sales_invoice_item_doc = siChildResult;
+						}
 					}
 					if (sales_invoice_item_doc.sales_order) {
 						invoice_doc = await this.process_invoice_from_order();
@@ -2529,13 +2645,109 @@ export default {
 			return value;
 		},
 
+		// ---------------------------------------------------------------------------
+		// Offline-draft localStorage helpers
+		// ---------------------------------------------------------------------------
+
+		_offlineDraftKey() {
+			const shiftKey =
+				this.pos_opening_shift?.pos_offline_id ||
+				this.pos_opening_shift?.name ||
+				"unknown";
+			return `pospire.offline_drafts.${shiftKey}`;
+		},
+
+		getLocalOfflineDrafts() {
+			try {
+				const raw = localStorage.getItem(this._offlineDraftKey());
+				const drafts = raw ? JSON.parse(raw) : [];
+				return Array.isArray(drafts) ? drafts : [];
+			} catch {
+				return [];
+			}
+		},
+
+		saveLocalOfflineDraft(doc) {
+			try {
+				const drafts = this.getLocalOfflineDrafts();
+				drafts.push(doc);
+				localStorage.setItem(this._offlineDraftKey(), JSON.stringify(drafts));
+				return true;
+			} catch {
+				return false;
+			}
+		},
+
+		removeLocalOfflineDraft(name) {
+			try {
+				const drafts = this.getLocalOfflineDrafts().filter((d) => d.name !== name);
+				localStorage.setItem(this._offlineDraftKey(), JSON.stringify(drafts));
+			} catch {
+				/* non-fatal */
+			}
+		},
+
+		saveOfflineDraftAndClear(doc) {
+			if (!doc.items?.length) {
+				toast.error(__("Nothing to save"));
+				return null;
+			}
+			const offlineId =
+				typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+					? crypto.randomUUID()
+					: this.makeid(20);
+			const draft = {
+				...doc,
+				name: `OFFLINE-DRAFT-${offlineId}`,
+				customer_name: this.invoice_doc?.customer_name || doc.customer || this.customer,
+				posting_time: new Date().toTimeString().slice(0, 8),
+			};
+			if (!this.saveLocalOfflineDraft(draft)) {
+				toast.error(
+					__(
+						"Could not save the offline draft on this device. The cart was not cleared.",
+					),
+				);
+				return null;
+			}
+			this.clear_invoice();
+			this.eventBus.emit("cart_emptied");
+			toast.info(
+				__("Draft saved offline — load it from 'Load Draft Sale' while offline."),
+				{ autoClose: 4000 },
+			);
+			return draft;
+		},
+
+		// ---------------------------------------------------------------------------
+
 		async get_draft_invoices() {
 			var vm = this;
-			const r = await call("pospire.pospire.api.posapp.get_draft_invoices", {
-				pos_opening_shift: this.pos_opening_shift.name,
-			});
-			if (r) {
-				vm.eventBus.emit("open_drafts", r);
+			try {
+				const r = await call("pospire.pospire.api.posapp.get_draft_invoices", {
+					pos_opening_shift: this.pos_opening_shift.name,
+				});
+				if (r) {
+					vm.eventBus.emit("open_drafts", r);
+				}
+			} catch (err) {
+				if (this.isLikelyNetworkError(err) || !connectivity.isOnline()) {
+					// Offline or network error: fall back to locally saved drafts.
+					const localDrafts = vm.getLocalOfflineDrafts();
+					vm.eventBus.emit("open_drafts", localDrafts);
+					if (!localDrafts.length) {
+						toast.info(
+							__(
+								"You are offline. No drafts saved on this device for this shift.",
+							),
+							{ autoClose: 4000 },
+						);
+					}
+					return;
+				}
+				toast.error(
+					err && err.message ? err.message : __("Error loading draft invoices"),
+				);
 			}
 		},
 
@@ -2571,10 +2783,18 @@ export default {
 			}
 			var vm = this;
 			if (!vm.pos_profile) return;
-			const r = await call("pospire.pospire.api.posapp.get_items_details", {
-				pos_profile: vm.pos_profile,
-				items_data: items,
-			});
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_items_details", {
+					pos_profile: vm.pos_profile,
+					items_data: items,
+				});
+			} catch {
+				// Offline: keep the cart as-is. Stock/serial/batch enrichment
+				// is deferred until reconnect — the cart still totals using
+				// the cached item prices.
+				return;
+			}
 			if (r) {
 				items.forEach((item) => {
 					const updated_item = r.find(
@@ -2686,15 +2906,27 @@ export default {
 						(item.has_batch_no = data.has_batch_no),
 						vm.calc_item_price(item));
 				}
+			}).catch(() => {
+				// Offline: skip the per-item enrichment (price/stock/batch).
+				// The cart row already has price_list_rate from the cached
+				// items list; calc_item_price will use that.
+				vm.calc_item_price(item);
 			});
 		},
 
 		async fetch_customer_details() {
 			var vm = this;
 			if (this.customer) {
-				const r = await call("pospire.pospire.api.posapp.get_customer_info", {
-					customer: vm.customer,
-				});
+				let r = null;
+				try {
+					r = await call("pospire.pospire.api.posapp.get_customer_info", {
+						customer: vm.customer,
+					});
+				} catch {
+					// Offline: skip the customer-detail enrichment but still let
+					// the price-list update fall through using whatever info we
+					// already have.
+				}
 				if (r) {
 					vm.customer_info = {
 						...r,
@@ -2762,6 +2994,9 @@ export default {
 				// Subtract discount amount from item total and update RATE
 				item.rate = flt(item.rate) - flt(value);
 				item.discount_amount = this.flt(value, this.currency_precision);
+				// Cashier entered a discount larger than the item rate — floor
+				// at 0 instead of letting ERPNext reject the whole submit.
+				this.clamp_item_rate(item);
 
 				// Mark the item as modified
 				item.modified = true;
@@ -2823,9 +3058,33 @@ export default {
 				}
 			}
 
+			// Floor at 0 in case a typed-in discount_amount > price_list_rate
+			// or discount_percentage > 100 just got converted into a negative rate.
+			this.clamp_item_rate(item);
 			item.item_total = this.flt(flt(item.qty) * flt(item.rate), this.currency_precision);
 		},
 
+		/**
+		 * Floor item rate at 0 (and cap the related discount fields so totals
+		 * stay coherent) before ERPNext sees the row. Sales Invoice submit
+		 * runs `validate_qty` which throws a ValidationError on `rate < 0`
+		 * unless `Selling Settings.allow_negative_rates_for_items` is on.
+		 * Pospire-style retail expectation: a stacked offer can take a line
+		 * down to free, never below — so we clamp here rather than flip the
+		 * global flag.
+		 */
+		clamp_item_rate(item) {
+			if (flt(item.discount_percentage) > 100) {
+				item.discount_percentage = 100;
+			}
+			const priceListRate = flt(item.price_list_rate);
+			if (priceListRate > 0 && flt(item.discount_amount) > priceListRate) {
+				item.discount_amount = this.flt(priceListRate, this.currency_precision);
+			}
+			if (flt(item.rate) < 0) {
+				item.rate = 0;
+			}
+		},
 		calc_item_price(item) {
 			if (!item.posa_offer_applied) {
 				if (item.price_list_rate) {
@@ -2846,6 +3105,7 @@ export default {
 					this.currency_precision,
 				);
 			}
+			this.clamp_item_rate(item);
 		},
 
 		calc_uom(item, value) {
@@ -3608,6 +3868,10 @@ export default {
 							item.discount_amount += offer.discount_amount;
 						}
 						item.posa_offer_applied = 1;
+						// `calc_item_price` recomputes rate from discount and clamps
+						// it at 0 (see clamp_item_rate). For "Rate" offers it also
+						// catches the rare case where offer.rate was misconfigured
+						// to a negative value.
 						this.calc_item_price(item);
 					}
 				}
@@ -3815,17 +4079,18 @@ export default {
 		this.get_sales_person_names();
 		if (this.invoice_doc && this.invoice_doc.inclusive_tax === undefined) {
 			this.invoice_doc.inclusive_tax = this.inclusive_tax;
-		}
-		//
-		this.eventBus.on("register_pos_profile", (data) => {
-			this.pos_profile = data.pos_profile;
-			this.customer = data.pos_profile.customer;
-			this.pos_opening_shift = data.pos_opening_shift;
-			this.stock_settings = data.stock_settings;
-			this.float_precision = window.sys_defaults?.float_precision || 2;
-			this.currency_precision = window.sys_defaults?.currency_precision || 2;
-			this.invoiceType = this.pos_profile.posa_default_sales_order ? "Order" : "Invoice";
-			this.load_approval_config();
+			}
+			//
+			this.eventBus.on("register_pos_profile", (data) => {
+				this.pos_profile = data.pos_profile;
+				this.customer = data.pos_profile.customer;
+				this.pos_opening_shift = data.pos_opening_shift;
+				this.shiftClosingPending = !!data.pos_opening_shift?.pospire_closing_pending;
+				this.stock_settings = data.stock_settings;
+				this.float_precision = window.sys_defaults?.float_precision || 2;
+				this.currency_precision = window.sys_defaults?.currency_precision || 2;
+				this.invoiceType = this.pos_profile.posa_default_sales_order ? "Order" : "Invoice";
+				this.load_approval_config();
 		});
 		this.eventBus.on("auto_set_delivery_charge", () => {
 			if (this.delivery_charges.length > 0 && !this.selected_delivery_charge) {
@@ -3836,7 +4101,28 @@ export default {
 			}
 		});
 		this.eventBus.on("add_item", (item) => {
+			if (this.shiftClosingPending) {
+				toast.warning(
+					__(
+						"This shift is closing — its closing entry is queued. Open a new shift before ringing up another sale.",
+					),
+					{ autoClose: 5000 },
+				);
+				return;
+			}
 			this.add_item(item);
+		});
+
+		// H4: Pos.vue emits this when the offline closing is queued. The
+		// shift is locked locally — refuse new items and refuse Pay until
+		// either the closing syncs (Pos.vue's `shift_closing_complete`
+		// fires + redirects to OpeningDialog) or the cashier voids the
+		// closing in the reconciliation workspace.
+		this.eventBus.on("shift_closing_pending", () => {
+			this.shiftClosingPending = true;
+		});
+		this.eventBus.on("shift_closing_complete", () => {
+			this.shiftClosingPending = false;
 		});
 		this.eventBus.on("update_customer", (customer) => {
 			// Customer.vue's watcher pairs `update_customer` with
@@ -3848,6 +4134,31 @@ export default {
 		});
 		this.eventBus.on("update_customer_offline_id", (offlineId) => {
 			this.customer_offline_id = offlineId;
+		});
+
+		// When an offline-created customer finally syncs, Customer.vue's
+		// onSynced listener emits `customer_renamed` with the old provisional
+		// name and the new server doc name. Swap any in-memory references so
+		// the cart shows the real name and the customer_offline_id is no
+		// longer needed (the link is now stable). Future invoices reference
+		// the real name natively; the server-side `_resolve_customer_by_offline_id`
+		// path stays correct for any invoice already queued under the old id.
+		this.eventBus.on("customer_renamed", ({ old_name, new_name } = {}) => {
+			if (!old_name || !new_name || old_name === new_name) return;
+			if (this.customer === old_name) {
+				this.customer = new_name;
+				// The offline_id link is no longer needed at the cart level —
+				// the customer is now a real server doc. Server-side resolution
+				// for already-queued invoices that captured the old offline_id
+				// continues to work unchanged.
+				this.customer_offline_id = null;
+			}
+			if (this.invoice_doc && this.invoice_doc.customer === old_name) {
+				this.invoice_doc.customer = new_name;
+				if (this.invoice_doc.customer_offline_id) {
+					this.invoice_doc.customer_offline_id = null;
+				}
+			}
 		});
 		this.eventBus.on("fetch_customer_details", () => {
 			this.fetch_customer_details();
@@ -3898,6 +4209,8 @@ export default {
 		this.eventBus.off("register_pos_profile");
 		this.eventBus.off("add_item");
 		this.eventBus.off("update_customer");
+		this.eventBus.off("update_customer_offline_id");
+		this.eventBus.off("customer_renamed");
 		this.eventBus.off("fetch_customer_details");
 		this.eventBus.off("clear_invoice");
 		this.eventBus.off("set_offers");

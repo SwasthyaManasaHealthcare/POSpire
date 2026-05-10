@@ -89,6 +89,22 @@ describe("registry adapter — submit_invoice", () => {
 		expect(parsed.owner_user.length).toBeGreaterThan(0);
 	});
 
+	it("rejects offline adaptation for sales returns (deferred to later phase)", () => {
+		expect(() =>
+			cfg.toOfflinePayload!(
+				{
+					data: {},
+					invoice: {
+						doctype: "Sales Invoice",
+						is_return: 1,
+						return_against: "SINV-0001",
+					},
+				},
+				CTX,
+			),
+		).toThrow("Sales Return offline enqueue is disabled");
+	});
+
 	it("forwards customer_offline_id into inner data AND adds it to parentOfflineIds", () => {
 		// When an invoice references a customer that was created offline in
 		// the same shift, the server-side `_resolve_customer_by_offline_id`
@@ -146,14 +162,44 @@ describe("registry adapter — submit_invoice", () => {
 	});
 });
 
-describe("registry — create_opening_voucher (live-only for now)", () => {
-	it("is intentionally NOT offline-capable (server response includes full POS Profile + items + customers + payments — not reconstructible client-side)", () => {
-		const cfg = methodRegistry["pospire.pospire.api.posapp.create_opening_voucher"];
-		expect(cfg).toBeDefined();
-		expect(cfg!.intent).toBe("write");
-		expect(cfg!.offline).toBe(false);
-		// OpeningDialog.vue blocks the offline path with a clear message.
-		// Phase 2 will pre-cache the response shape to enable offline opening.
+describe("registry adapter — create_opening_voucher (F2 — offline-capable)", () => {
+	const cfg = getWrite("pospire.pospire.api.posapp.create_opening_voucher");
+
+	it("is offline-capable and routes to offline.create_opening_entry", () => {
+		expect(cfg.offline).toBe(true);
+		expect(cfg.outboxType).toBe("opening_entry");
+	});
+
+	it("builds a POS Opening Shift doc with snapshotted balance + denominations", () => {
+		const result = cfg.toOfflinePayload!(
+			{
+				pos_profile: "Retail Store Profile 1",
+				company: "YT Company",
+				balance_details: [
+					{ mode_of_payment: "Cash", amount: 100, currency: "BND" },
+				],
+				denomination_details: JSON.stringify([
+					{ denomination: "100", quantity: 1, denomination_value: 100 },
+				]),
+			},
+			CTX,
+		);
+		expect(result.method).toBe(
+			"pospire.pospire.api.offline.create_opening_entry",
+		);
+		expect(result.payload.offline_id).toBe(CTX.offlineId);
+		expect(result.payload.device_id).toBe(CTX.deviceId);
+
+		const parsed = JSON.parse(result.payload.data as string);
+		expect(parsed.doctype).toBe("POS Opening Shift");
+		expect(parsed.pos_profile).toBe("Retail Store Profile 1");
+		expect(parsed.company).toBe("YT Company");
+		// P-5 attribution
+		expect(parsed.owner_user).toBeDefined();
+		// P-11 posting_date snapshot
+		expect(parsed.posting_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+		expect(Array.isArray(parsed.balance_details)).toBe(true);
+		expect(Array.isArray(parsed.denomination_details)).toBe(true);
 	});
 });
 
@@ -200,6 +246,75 @@ describe("registry adapter — create_customer", () => {
 		const parsed = JSON.parse(result.payload.data as string);
 		expect(parsed.posa_birthday).toBe("1990-04-25");
 		expect(parsed).not.toHaveProperty("birthday");
+	});
+});
+
+describe("registry adapter — submit_closing_shift (F3 + H1)", () => {
+	const cfg = getWrite(
+		"pospire.pospire.doctype.pos_closing_shift.pos_closing_shift.submit_closing_shift",
+	);
+
+	it("is offline-capable and routes to offline.create_closing_entry", () => {
+		expect(cfg.offline).toBe(true);
+		expect(cfg.outboxType).toBe("closing_entry");
+	});
+
+	it("H1 — sends opening_entry_ref (UUID for offline-opened shift)", () => {
+		const result = cfg.toOfflinePayload!(
+			{
+				closing_shift: {
+					pos_opening_shift: "OFFLINE-OPN-abcdefgh",
+					pos_opening_shift_offline_id: "5d31a9f4-6da6-4a99-9b3e-5c5f4a4f5c84",
+					invoice_offline_ids: [
+						"d7f2c842-1234-4abc-9def-0123456789ab",
+					],
+					pos_profile: "Retail Store Profile 1",
+					company: "YT Company",
+					payment_reconciliation: [],
+					denomination_details: [],
+					pos_transactions: [],
+				},
+			},
+			CTX,
+		);
+		expect(result.method).toBe(
+			"pospire.pospire.api.offline.create_closing_entry",
+		);
+		// H1 — single flexible param replaces opening_entry_offline_id.
+		expect(result.payload.opening_entry_ref).toBe(
+			"5d31a9f4-6da6-4a99-9b3e-5c5f4a4f5c84",
+		);
+	});
+
+	it("H1 — sends real shift name when opened online (no offline_id)", () => {
+		const result = cfg.toOfflinePayload!(
+			{
+				closing_shift: {
+					pos_opening_shift: "POSA-OS-26-0000030",
+					// No pos_opening_shift_offline_id — shift was opened online.
+					invoice_offline_ids: [],
+					pos_profile: "Retail Store Profile 1",
+					company: "YT Company",
+					payment_reconciliation: [],
+					denomination_details: [],
+					pos_transactions: [],
+				},
+			},
+			CTX,
+		);
+		// Falls back to the real shift name; server's
+		// _resolve_opening_shift_flexible disambiguates.
+		expect(result.payload.opening_entry_ref).toBe("POSA-OS-26-0000030");
+	});
+});
+
+describe("registry — kill switch", () => {
+	it("is_offline_enabled is registered for cashier-callable polling (H1 fix)", () => {
+		const cfg =
+			methodRegistry["pospire.pospire.api.offline.is_offline_enabled"];
+		expect(cfg).toBeDefined();
+		expect(cfg!.intent).toBe("read");
+		expect(cfg!.offline).toBe(false);
 	});
 });
 

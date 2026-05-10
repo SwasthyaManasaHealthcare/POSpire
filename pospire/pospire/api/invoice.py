@@ -498,7 +498,16 @@ def validate_shift(doc):
 	if doc.posa_pos_opening_shift and doc.pos_profile and doc.is_pos:
 		# check if shift is open
 		shift = frappe.get_cached_doc("POS Opening Shift", doc.posa_pos_opening_shift)
-		if shift.status != "Open":
+		# Offline-replay relaxation: a queued invoice (carries pos_offline_id)
+		# arriving via offline.submit_invoice was authored when the shift was
+		# open (P-11 snapshot). If the shift has since been closed out-of-band,
+		# refusing here would orphan the sale forever. Strict-closure on the
+		# closing entry is the natural-path safeguard.
+		is_offline_replay = bool(
+			doc.get("pos_offline_id")
+			and getattr(frappe.flags, "pospire_offline_replay", False)
+		)
+		if shift.status != "Open" and not is_offline_replay:
 			frappe.throw(_("POS Shift {0} is not open").format(shift.name))
 		# check if shift is for the same profile
 		if shift.pos_profile != doc.pos_profile:

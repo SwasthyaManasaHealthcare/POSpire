@@ -26,6 +26,17 @@ export type OutboxStatus =
 	| "retry_pending"
 	| "synced"
 	| "needs_review"
+	/**
+	 * Tombstone state. The row was handed off to the server-side
+	 * `POSpire Offline Sync Review` queue, so the cashier-side scheduler
+	 * MUST NOT retry it (`listReady` filter excludes this status). The
+	 * row is kept locally rather than deleted because dependent rows
+	 * (children referencing this `offline_id` via `parent_offline_ids`,
+	 * the shift's strict-closure check) need it for graph integrity.
+	 * When the server-side recovery row resolves (Resolved / Voided),
+	 * a periodic vacuum pass deletes this tombstone.
+	 */
+	| "handed_off"
 	| "voided";
 
 export type OutboxType =
@@ -53,6 +64,8 @@ export type LastErrorCategory =
 	| "validation_error"
 	| "permission_error"
 	| "customer_missing"
+	| "parent_not_ready"
+	| "siblings_not_ready"
 	| "batch_or_serial_conflict"
 	| "stock_shortage"
 	| "accounting_period_closed"
@@ -206,6 +219,14 @@ export interface OutboxEntry<TPayload = unknown> {
 	last_error_category: LastErrorCategory;
 	last_error_detail: string | null;
 	server_doc_name: string | null;
+	/**
+	 * Set when the row transitions to `handed_off`. Names the server-side
+	 * `POSpire Offline Sync Review` row this entry was handed off to, so
+	 * the periodic vacuum can poll the server for resolution and delete
+	 * the tombstone when the recovery row is Resolved or Voided.
+	 * `null` for any non-tombstoned status.
+	 */
+	recovery_entry_name: string | null;
 	enqueued_at: number;
 	synced_at: number | null;
 }
@@ -228,6 +249,14 @@ export interface StoredOutboxEntry {
 	last_error_category: LastErrorCategory;
 	last_error_detail: string | null;
 	server_doc_name: string | null;
+	/**
+	 * Set when the row transitions to `handed_off`. Names the server-side
+	 * `POSpire Offline Sync Review` row this entry was handed off to, so
+	 * the periodic vacuum can poll the server for resolution and delete
+	 * the tombstone when the recovery row is Resolved or Voided.
+	 * `null` for any non-tombstoned status.
+	 */
+	recovery_entry_name: string | null;
 	enqueued_at: number;
 	synced_at: number | null;
 }

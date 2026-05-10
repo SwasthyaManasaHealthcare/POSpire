@@ -29,10 +29,13 @@ import {
 	enqueue,
 	evaluateClosingReadiness,
 	evaluateParents,
+	markHandedOff,
 	markInFlight,
 	markSynced,
 	markNeedsReview,
+	markVacuumed,
 	nextReady,
+	onSynced,
 	resetForRetry,
 	scheduleRetry,
 	voidEntry,
@@ -452,5 +455,107 @@ describe("nextReady", () => {
 
 		const entry = await nextReady();
 		expect(entry).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// markVacuumed — vacuum tombstone transitions + notifySynced
+// ---------------------------------------------------------------------------
+
+describe("markVacuumed", () => {
+	it("Resolved: transitions handed_off → synced and stamps synced_at", async () => {
+		const ack = await enqueue("customer", { customer_name: "Offline Corp" });
+		await markNeedsReview(ack.offline_id, "validation_error", "bad data");
+		await markHandedOff(ack.offline_id, "RECOVERY-001");
+
+		await markVacuumed(ack.offline_id, "Resolved", "CUST-42");
+
+		const row = await db.outbox.get(ack.offline_id);
+		expect(row?.status).toBe("synced");
+		expect(row?.server_doc_name).toBe("CUST-42");
+		expect(row?.synced_at).not.toBeNull();
+	});
+
+	it("Voided: transitions handed_off → voided and leaves synced_at null", async () => {
+		const ack = await enqueue("customer", { customer_name: "Bad Corp" });
+		await markNeedsReview(ack.offline_id, "validation_error", "bad data");
+		await markHandedOff(ack.offline_id, "RECOVERY-002");
+
+		await markVacuumed(ack.offline_id, "Voided", null);
+
+		const row = await db.outbox.get(ack.offline_id);
+		expect(row?.status).toBe("voided");
+		expect(row?.synced_at).toBeNull();
+	});
+
+	it("Resolved: fires notifySynced so cart listeners rename provisional → server name", async () => {
+		const ack = await enqueue("customer", { customer_name: "Notify Corp" });
+		await markNeedsReview(ack.offline_id, "validation_error", "bad data");
+		await markHandedOff(ack.offline_id, "RECOVERY-003");
+
+		const received: Array<{ offline_id: string; server_doc_name: string }> = [];
+		const unsub = onSynced((evt) => received.push(evt));
+		try {
+			await markVacuumed(ack.offline_id, "Resolved", "CUST-99");
+		} finally {
+			unsub();
+		}
+
+		expect(received).toHaveLength(1);
+		expect(received[0].offline_id).toBe(ack.offline_id);
+		expect(received[0].server_doc_name).toBe("CUST-99");
+		expect(received[0].provisional_name).toMatch(/^OFFLINE-CUST-/);
+	});
+
+	it("Voided: does NOT fire notifySynced", async () => {
+		const ack = await enqueue("customer", { customer_name: "Silent Corp" });
+		await markNeedsReview(ack.offline_id, "validation_error", "bad data");
+		await markHandedOff(ack.offline_id, "RECOVERY-004");
+
+		const received: unknown[] = [];
+		const unsub = onSynced((evt) => received.push(evt));
+		try {
+			await markVacuumed(ack.offline_id, "Voided", null);
+		} finally {
+			unsub();
+		}
+
+		expect(received).toHaveLength(0);
+	});
+
+	it("Resolved: cascade-unblocks dependent invoice rows", async () => {
+		const customer = await enqueue("customer", { customer_name: "Parent Corp" });
+		const inv = await enqueue(
+			"invoice",
+			{ customer: "Parent Corp" },
+			{ parentOfflineIds: [customer.offline_id] },
+		);
+
+		// Park invoice as blocked on the customer.
+		const invRow = await db.outbox.get(inv.offline_id);
+		await db.outbox.put({ ...invRow!, blocked_reason: "waiting_for_parent" });
+
+		// Customer escalated to recovery.
+		await markNeedsReview(customer.offline_id, "validation_error", "bad payload");
+		await markHandedOff(customer.offline_id, "RECOVERY-005");
+
+		// Manager resolves it via recovery UI.
+		await markVacuumed(customer.offline_id, "Resolved", "CUST-77");
+
+		const after = await db.outbox.get(inv.offline_id);
+		expect(after?.blocked_reason).toBe(null);
+	});
+
+	it("Resolved: is idempotent (second call is a no-op)", async () => {
+		const ack = await enqueue("customer", { customer_name: "Idempotent Corp" });
+		await markNeedsReview(ack.offline_id, "validation_error", "bad data");
+		await markHandedOff(ack.offline_id, "RECOVERY-006");
+
+		await markVacuumed(ack.offline_id, "Resolved", "CUST-11");
+		// Second call: row is already synced; updateSchedulerFields preserves status.
+		await markVacuumed(ack.offline_id, "Resolved", "CUST-11");
+
+		const row = await db.outbox.get(ack.offline_id);
+		expect(row?.status).toBe("synced");
 	});
 });

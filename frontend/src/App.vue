@@ -1,26 +1,49 @@
 <template>
+	<!--
+		The banner sits at the top of v-main as an in-flow, position:sticky
+		strip. It self-publishes its rendered height to
+		--pospire-banner-height on <html> via a ResizeObserver in
+		OfflineBanner.vue, which page-level CSS subtracts from its
+		viewport-height calc so the cart's bottom edge stays aligned. No
+		hardcoded heights, no Vuetify layout-item registration, no inline
+		style binding here.
+	-->
 	<v-app class="pospire-app">
+		<!--
+			Navbar registers at the v-app level so Vuetify auto-pads <v-main>
+			for the navbar's actual height (writes to --v-layout-top). The
+			banner is NOT a layout item — it's an in-flow div inside v-main.
+		-->
+		<Navbar
+			@changePage="navigateTo($event)"
+			@open-reconciliation="reconciliationOpen = true"
+		></Navbar>
+
 		<v-main>
-			<Navbar
-				@changePage="navigateTo($event)"
-				@open-reconciliation="reconciliationOpen = true"
-			></Navbar>
 			<!--
-				Offline banner — anchored below the navbar per 11-ui-ux.md §2.
-				Hidden in the steady-state online path; shows automatically when
-				the connectivity detector flips to OFFLINE/DEGRADED, or when
-				there are pending / needs-review entries in the outbox.
+				OfflineBanner owns its own visibility (internal v-if on the
+				bannerState !== 'hidden' predicate) and its own height
+				publication. We unconditionally render the component; when
+				it's hidden it produces no DOM and zeroes
+				--pospire-banner-height in onBeforeUnmount.
 			-->
-			<OfflineBanner @open-reconciliation="reconciliationOpen = true"></OfflineBanner>
+			<OfflineBanner
+				class="pospire-app__banner"
+				@open-reconciliation="reconciliationOpen = true"
+			/>
 			<router-view class="mx-4 md-4"></router-view>
 
 			<!--
-				Reconciliation workspace — opens via the banner's "Review now"
-				button or the Navbar's pending-sync badge. Modal so the user
-				doesn't lose their place in the cart.
+				Read-only Offline Sync Status — opens via the banner's
+				"Review now" button or the Navbar's pending-sync badge.
+				Replaces the old cashier-side ReconciliationWorkspace
+				(which had Retry/Void/Edit-Retry actions). All recovery
+				actions now live in Desk under Sales Manager / System
+				Manager authority — this dialog only shows the cashier
+				the status of their handed-off entries.
 			-->
 			<v-dialog v-model="reconciliationOpen" max-width="900" scrollable>
-				<ReconciliationWorkspace />
+				<OfflineSyncStatus />
 			</v-dialog>
 		</v-main>
 	</v-app>
@@ -29,18 +52,22 @@
 <script>
 import Navbar from "@/components/Navbar.vue";
 import OfflineBanner from "@/components/offline/OfflineBanner.vue";
-import ReconciliationWorkspace from "@/components/offline/ReconciliationWorkspace.vue";
+import OfflineSyncStatus from "@/components/offline/OfflineSyncStatus.vue";
 import connectivity from "@/offline/connectivity";
 import { initOfflineStorage } from "@/offline/db";
 import { registerReadCache } from "@/offline/runtime";
-import { InMemoryReadCache } from "@/offline/read-cache";
-import { scheduler as syncScheduler } from "@/offline/sync";
+import { DexieMetadataReadCache } from "@/offline/read-cache";
+import {
+	scheduler as syncScheduler,
+	migrateLegacyNeedsReviewEntries,
+} from "@/offline/sync";
+import { startBeacon, stopBeacon } from "@/offline/beacon";
 
 export default {
 	components: {
 		Navbar,
 		OfflineBanner,
-		ReconciliationWorkspace,
+		OfflineSyncStatus,
 	},
 	data() {
 		return {
@@ -67,11 +94,12 @@ export default {
 			return;
 		}
 
-		// Wire the in-memory ReadCache so `call({intent:'read', cacheKey})`
-		// returns from cache instead of always falling through to live fetch
-		// or `OfflineReadUnavailable`. Phase 2 swaps this for an IndexedDB
-		// implementation that survives reload.
-		registerReadCache(new InMemoryReadCache());
+		// Wire the Dexie-backed read cache. DexieMetadataReadCache layers an
+		// in-memory Map over the existing `metadata` IndexedDB table (rows
+		// prefixed "rc:") so cached reads (customer groups, territories, genders)
+		// survive page reloads — cashiers who go offline after at least one
+		// online session still see populated dropdowns.
+		registerReadCache(new DexieMetadataReadCache());
 
 		// Start the connectivity detector so it drives the banner state.
 		connectivity.start();
@@ -83,10 +111,51 @@ export default {
 			// eslint-disable-next-line no-console
 			console.warn("[App] syncScheduler.start failed", err);
 		});
+
+		// Phase 1c: one-shot boot-time migration. Devices upgrading from
+		// a pre-recovery-doctype client may have `needs_review` rows
+		// already in their local outbox; the new code path uploads them
+		// to the server-side `POSpire Offline Sync Review` queue. The
+		// scheduler's cycle preamble would also pick these up on the
+		// next wake, but doing it explicitly at boot gives an immediate
+		// summary in the console and avoids the up-to-30s wait. Fire-
+		// and-forget — failures here aren't fatal because the cycle
+		// preamble is the safety net.
+		migrateLegacyNeedsReviewEntries()
+			.then((res) => {
+				if (res.attempted > 0) {
+					// eslint-disable-next-line no-console
+					console.info(
+						`[App] handed off ${res.attempted} legacy needs_review entr${res.attempted === 1 ? "y" : "ies"} to the server-side review queue`,
+					);
+				}
+			})
+			.catch((err) => {
+				// eslint-disable-next-line no-console
+				console.warn(
+					"[App] migrateLegacyNeedsReviewEntries failed (non-fatal — cycle preamble will retry)",
+					err,
+				);
+			});
+
+		// B5 — observability beacon. Starts a 5-min ping that includes queue
+		// depth + oldest pending age + last sync outcome. Pos.vue updates the
+		// outlet/shift/user context via setBeaconContext when a shift opens.
+		try {
+			startBeacon();
+		} catch (err) {
+			// eslint-disable-next-line no-console
+			console.warn("[App] startBeacon failed", err);
+		}
 	},
 	beforeUnmount() {
 		// Clean teardown of background timers + in-flight fetches when the
 		// SPA is being torn down (e.g. tab close / Frappe logout).
+		try {
+			stopBeacon();
+		} catch {
+			/* idempotent */
+		}
 		try {
 			syncScheduler.stop();
 		} catch {

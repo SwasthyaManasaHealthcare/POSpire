@@ -21,15 +21,31 @@ import { afterEach, beforeEach } from "vitest";
 
 // Fallback: some CI containers ship a very minimal Web Crypto. Wire up a
 // Node-backed one before the first test runs.
-if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.subtle) {
+//
+// `CryptoKey` ALSO needs to be exposed as a global. happy-dom doesn't
+// install the constructor on globalThis even when it provides `crypto`, so
+// `db.ts.bootstrapEncryptionKey()`'s `storedKey.value instanceof CryptoKey`
+// throws `ReferenceError: CryptoKey is not defined` under vitest. Pull it
+// from Node's webcrypto and bind it ourselves.
+{
 	// eslint-disable-next-line @typescript-eslint/no-var-requires
 	const { webcrypto } = require("node:crypto");
-	// happy-dom's crypto is read-only on some versions; use defineProperty.
-	Object.defineProperty(globalThis, "crypto", {
-		value: webcrypto,
-		writable: false,
-		configurable: true,
-	});
+
+	if (typeof globalThis.crypto === "undefined" || !globalThis.crypto.subtle) {
+		Object.defineProperty(globalThis, "crypto", {
+			value: webcrypto,
+			writable: false,
+			configurable: true,
+		});
+	}
+
+	if (typeof globalThis.CryptoKey === "undefined" && webcrypto.CryptoKey) {
+		Object.defineProperty(globalThis, "CryptoKey", {
+			value: webcrypto.CryptoKey,
+			writable: false,
+			configurable: true,
+		});
+	}
 }
 
 // Per-test hygiene ---------------------------------------------------------

@@ -1,44 +1,55 @@
 /**
- * In-memory ReadCache adapter for `@/utils/call`.
+ * ReadCache adapters for `@/utils/call`.
  *
- * Phase 1 ships an in-memory cache (Map) — sufficient for caching `call()`
- * read responses across navigations within a single page session. It is NOT
- * a persistence layer; reload clears it. Persistent cached reads (so the
- * cashier sees items / customers offline after a reload) belong to Phase 2:
- * components migrate from their legacy localStorage caches to either
+ * InMemoryReadCache — Phase 1 baseline. Plain Map, fast, reset on reload.
+ *   Still used directly by unit tests.
  *
- *   • `call({ method, intent: 'read', cacheKey, cacheTTLMs })`, or
- *   • Agent 1's domain repos (`getItemByCode` etc.) which already cache in
- *     IndexedDB.
+ * DexieMetadataReadCache — Phase 2 default (registered in App.vue).
+ *   Layers a raw in-memory Map over the existing `metadata` Dexie table
+ *   (rows prefixed "rc:") so certain cached reads survive page reloads.
  *
- * Until that migration lands, this in-memory adapter exists only to satisfy
- * the runtime contract: `call.ts` checks for a registered cache before
- * falling through to `OfflineReadUnavailable`. Without registration, any
- * component that DOES start using `cacheKey` in Phase 2 would silently
- * regress to live-only.
+ *   Storage boundary: only keys in DURABLE_KEYS are persisted to Dexie.
+ *   All other `offline: true` reads remain memory-only so PII-containing
+ *   payloads (customer names, mobile_no, email_id from get_customer_names,
+ *   and catalogue data from get_items) never reach the unencrypted metadata
+ *   table. DURABLE_KEYS must contain only non-PII reference data.
+ *
+ *   Other design notes:
+ *   - Original cachedAt is preserved on Dexie→memory promotion (never
+ *     reset to Date.now()) so staleness semantics stay correct.
+ *   - Dexie errors are swallowed — in-memory covers the current session.
+ *   - `clearAllTables()` in `offline-fixture.ts` deletes all non-`crypto.*`
+ *     metadata rows between tests, so rc: rows are isolated per test.
  */
 
-import type { CachedRead, ReadCache } from "./types";
+import { db } from "./db";
+import type { MetadataRow, ReadCache } from "./types";
 
-interface InMemoryEntry {
+/** Extends the minimal ReadCache return type with a staleness flag so callers
+ *  can branch without re-checking age themselves. `call.ts` ignores the stale
+ *  field (it adds its own stale:true when serving from cache), but components
+ *  that read the cache directly benefit from it. */
+type CachedRead<T> = { data: T; cachedAt: number; stale: boolean };
+
+interface CacheEntry {
 	data: unknown;
 	cachedAt: number;
 	ttlMs: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// InMemoryReadCache — Phase 1 baseline, kept for unit tests.
+// ---------------------------------------------------------------------------
+
 export class InMemoryReadCache implements ReadCache {
-	private readonly store = new Map<string, InMemoryEntry>();
+	private readonly store = new Map<string, CacheEntry>();
 
 	async read<T>(cacheKey: string): Promise<CachedRead<T> | null> {
 		const entry = this.store.get(cacheKey);
 		if (!entry) return null;
 		const age = Date.now() - entry.cachedAt;
 		const stale = entry.ttlMs !== null && age > entry.ttlMs;
-		return {
-			data: entry.data as T,
-			cachedAt: entry.cachedAt,
-			stale,
-		};
+		return { data: entry.data as T, cachedAt: entry.cachedAt, stale };
 	}
 
 	async write<T>(cacheKey: string, value: T, ttlMs?: number): Promise<void> {
@@ -52,5 +63,90 @@ export class InMemoryReadCache implements ReadCache {
 	/** Test/diagnostic: drop everything. */
 	clear(): void {
 		this.store.clear();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DexieMetadataReadCache — Phase 2 persistent cache.
+// ---------------------------------------------------------------------------
+
+const RC_PREFIX = "rc:";
+
+/**
+ * Cache keys that may be durably persisted to the Dexie `metadata` table.
+ * Every key here MUST be non-PII reference data. Customer/catalogue payloads
+ * from endpoints like `get_customer_names` or `get_items` must NOT be added
+ * — those belong in their own encrypted domain repos (Dexie `customers` /
+ * `items` tables).
+ */
+const DURABLE_KEYS: ReadonlySet<string> = new Set([
+	"offline.customer_form_options", // territory / gender / customer-group lists
+]);
+
+export class DexieMetadataReadCache implements ReadCache {
+	/** In-memory layer: fast reads within the session, original cachedAt kept. */
+	private readonly mem = new Map<string, CacheEntry>();
+
+	async read<T>(cacheKey: string): Promise<CachedRead<T> | null> {
+		// Fast path: in-memory hit (no Dexie round-trip).
+		const memEntry = this.mem.get(cacheKey);
+		if (memEntry) {
+			const stale =
+				memEntry.ttlMs !== null &&
+				Date.now() - memEntry.cachedAt > memEntry.ttlMs;
+			return { data: memEntry.data as T, cachedAt: memEntry.cachedAt, stale };
+		}
+
+		// Non-durable keys are memory-only — skip the Dexie lookup entirely.
+		if (!DURABLE_KEYS.has(cacheKey)) return null;
+
+		// Persistent fallback: Dexie metadata table (survives reload).
+		try {
+			const row = (await db.metadata.get(RC_PREFIX + cacheKey)) as
+				| MetadataRow<CacheEntry>
+				| undefined;
+			if (!row) return null;
+			const v = row.value;
+			// Promote with ORIGINAL cachedAt — setting Date.now() here would
+			// corrupt staleness semantics on subsequent in-memory reads.
+			this.mem.set(cacheKey, v);
+			const stale = v.ttlMs !== null && Date.now() - v.cachedAt > v.ttlMs;
+			return { data: v.data as T, cachedAt: v.cachedAt, stale };
+		} catch {
+			return null;
+		}
+	}
+
+	async write<T>(cacheKey: string, value: T, ttlMs?: number): Promise<void> {
+		const cachedAt = Date.now();
+		const entry: CacheEntry = { data: value, cachedAt, ttlMs: ttlMs ?? null };
+		this.mem.set(cacheKey, entry);
+		// Only persist allowlisted non-PII keys to the unencrypted metadata table.
+		if (!DURABLE_KEYS.has(cacheKey)) return;
+		try {
+			await db.metadata.put({
+				key: RC_PREFIX + cacheKey,
+				value: entry,
+				updated_at: cachedAt,
+			} as MetadataRow<CacheEntry>);
+		} catch {
+			// Non-fatal — in-memory still covers this session.
+		}
+	}
+
+	/** Diagnostic: clear in-memory layer and all rc: rows from Dexie. */
+	clear(): void {
+		this.mem.clear();
+		db.metadata
+			.toArray()
+			.then((rows) => {
+				const keys = rows
+					.filter((r) => r.key.startsWith(RC_PREFIX))
+					.map((r) => r.key);
+				return db.metadata.bulkDelete(keys);
+			})
+			.catch(() => {
+				/* non-fatal */
+			});
 	}
 }

@@ -172,6 +172,38 @@ export async function deleteCustomer(name: string): Promise<void> {
 	await db.customers.delete(name);
 }
 
+/**
+ * Rename a locally-cached customer when its offline outbox entry syncs.
+ *
+ * Called from the sync event listener wired in Customer.vue: a customer
+ * created offline lives in Dexie under its provisional `OFFLINE-CUST-...`
+ * primary key. After sync, the server returns the real customer name (e.g.
+ * `CUST-2026-001`). We delete-then-insert because:
+ *   - Dexie primary keys are immutable (a put with a new key just creates
+ *     a second row).
+ *   - The encryption AAD is bound to `name` (`aadForName`); reusing the
+ *     ciphertext under a new key would fail the auth tag on read.
+ *
+ * The whole operation runs in one rw transaction so the rename is atomic
+ * — no window where neither row exists.
+ */
+export async function renameCustomer(
+	oldName: string,
+	newName: string,
+): Promise<void> {
+	assertWritable();
+	if (oldName === newName) return;
+	await db.transaction("rw", db.customers, async () => {
+		const stored = await db.customers.get(oldName);
+		if (!stored) return;
+		const plain = await fromStored(stored);
+		await db.customers.delete(oldName);
+		const renamed = { ...plain, name: newName };
+		const fresh = await toStored(renamed);
+		await db.customers.put(fresh);
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Freshness helpers
 // ---------------------------------------------------------------------------

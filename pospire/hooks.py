@@ -184,6 +184,16 @@ scheduler_events = {
 			"pospire.pospire.api.approval.expire_stale_requests",
 		],
 	},
+	# P2-19 / P2-27: daily housekeeping for the recovery queue. The
+	# notifier runs first thing in the morning so SLA breaches surface
+	# during the working window; archival runs in the off-hours so the
+	# delete pass doesn't compete with cashier traffic.
+	"daily": [
+		"pospire.pospire.api.recovery.notify_sla_breaches",
+	],
+	"daily_long": [
+		"pospire.pospire.api.recovery.archive_old_recovery_rows",
+	],
 }
 
 # Testing

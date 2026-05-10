@@ -69,6 +69,11 @@ async function toStored<T>(row: OutboxEntry<T>): Promise<StoredOutboxEntry> {
 		last_error_category: row.last_error_category,
 		last_error_detail: row.last_error_detail,
 		server_doc_name: row.server_doc_name,
+		// New in Phase 1b. Pre-existing rows on disk won't have this property
+		// — `?? null` makes the round-trip stable instead of stamping
+		// undefined into Dexie (which IndexedDB tolerates but breaks JSON
+		// serialisation downstream).
+		recovery_entry_name: row.recovery_entry_name ?? null,
 		enqueued_at: row.enqueued_at,
 		synced_at: row.synced_at,
 	};
@@ -98,6 +103,7 @@ async function fromStored<T>(
 		last_error_category: stored.last_error_category,
 		last_error_detail: stored.last_error_detail,
 		server_doc_name: stored.server_doc_name,
+		recovery_entry_name: stored.recovery_entry_name ?? null,
 		enqueued_at: stored.enqueued_at,
 		synced_at: stored.synced_at,
 	};
@@ -160,12 +166,23 @@ export async function listReady<T = unknown>(
 ): Promise<OutboxEntry<T>[]> {
 	const readyStatuses: OutboxStatus[] = ["enqueued", "retry_pending"];
 	const collected: StoredOutboxEntry[] = [];
+	// Cap the index-level fetch at a generous multiple of `limit` so we
+	// can fully drop blocked rows in memory and still return `limit`
+	// unblocked rows. Without this, a blocked row at the head of the
+	// past-due range starves later ready rows: with `nextReady`'s
+	// `limit=1`, the index returns the single oldest match, the in-memory
+	// `blocked_reason !== null` filter drops it, and the function returns
+	// empty even though unblocked siblings exist further down the range.
+	// The range is already bounded to past-due rows, so the prefetch is
+	// O(past-due-depth) — still cheap on every realistic queue size.
+	const PREFETCH_MULTIPLIER = 50;
+	const indexFetchLimit = Math.max(limit * PREFETCH_MULTIPLIER, 200);
 	for (const status of readyStatuses) {
 		// Range: [status, -Infinity] .. [status, now]
 		const rows = await db.outbox
 			.where("[status+next_attempt_at]")
 			.between([status, -Infinity], [status, now], true, true)
-			.limit(limit)
+			.limit(indexFetchLimit)
 			.toArray();
 		for (const r of rows) {
 			if (r.blocked_reason === null) {
@@ -245,6 +262,7 @@ export async function updateSchedulerFields(
 		last_error_category: LastErrorCategory;
 		last_error_detail: string | null;
 		server_doc_name: string | null;
+		recovery_entry_name: string | null;
 		synced_at: number | null;
 	}>,
 ): Promise<void> {

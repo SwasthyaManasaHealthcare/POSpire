@@ -5,8 +5,10 @@
  * and the reconciliation workspace) from this store. The store does NOT
  * copy outbox rows into Pinia state — it subscribes to Dexie via `liveQuery`
  * and exposes derived counts + a short window of rows for the workspace
- * (ReconciliationWorkspace loads `needs_review` rows through its own query;
- * this store only surfaces the summary).
+ * (`OfflineSyncStatus.vue` reads needs_review + handed_off + pending lists
+ * through `storeToRefs(useOutboxStore())`; recovery actions are server-
+ * side only, exposed in the Desk form for the `POSpire Offline Sync
+ * Review` doctype.
  *
  * Guardrails (D-27, P-1):
  *   - No durability. All source-of-truth state lives in IndexedDB.
@@ -33,15 +35,32 @@ import type { OutboxEntry } from "@/offline/types";
 type PendingStatus = "enqueued" | "retry_pending";
 
 /**
- * Minimal projection of an outbox row for the reconciliation workspace. The
- * workspace itself may query the full row when the manager opens an entry;
- * this store only needs the identity + display metadata.
+ * Minimal projection of an outbox row for the cashier-side status view.
+ * `needs_review` rows are entries where in-line handoff failed (transient
+ * offline window) — they still need to reach the server. `handed_off`
+ * rows are tombstones: the server-side `POSpire Offline Sync Review` row
+ * exists; the local row stays for dependency-graph integrity until the
+ * vacuum upgrades it.
  */
 export interface NeedsReviewSummary {
 	offline_id: string;
 	type: OutboxEntry["type"];
 	last_error_category: OutboxEntry["last_error_category"];
+	last_error_detail: OutboxEntry["last_error_detail"];
 	enqueued_at: number;
+	posting_date: OutboxEntry["posting_date"];
+	owner_user: OutboxEntry["owner_user"];
+	shift_offline_id: OutboxEntry["shift_offline_id"];
+	parent_offline_ids: OutboxEntry["parent_offline_ids"];
+	attempt_count: number;
+	next_attempt_at: number | null;
+	server_doc_name: OutboxEntry["server_doc_name"];
+	/**
+	 * Set on `handed_off` tombstones. Names the server-side recovery row
+	 * the cashier can hand the manager when asking for help. `null` for
+	 * pre-handoff `needs_review` rows.
+	 */
+	recovery_entry_name: string | null;
 }
 
 /**
@@ -67,12 +86,35 @@ export const useOutboxStore = defineStore("outbox", () => {
 	const pendingCount = ref<number>(0);
 	const inFlightCount = ref<number>(0);
 	const needsReviewCount = ref<number>(0);
+	/**
+	 * Tombstone count: rows that have been handed off to the server-side
+	 * `POSpire Offline Sync Review` queue and are awaiting manager
+	 * resolution. The cashier can see how many of their entries are with
+	 * managers; they CAN'T act on them from this device.
+	 */
+	const handedOffCount = ref<number>(0);
+
+	/**
+	 * Count of `opening_entry` rows that have not yet synced. Drives the
+	 * F5 chained-shifts banner: warn at 2 stacked, block opening a new
+	 * shift at 3. Includes statuses {enqueued, in_flight, retry_pending,
+	 * needs_review} — anything that isn't `synced` or `voided` blocks the
+	 * cashier from chaining further shifts.
+	 */
+	const unsyncedOpeningCount = ref<number>(0);
 
 	/** Milliseconds (from `Date.now()`) — null when there are no pending rows. */
 	const oldestPendingAt = ref<number | null>(null);
 
 	/** Derived list for the workspace. Intentionally small projection. */
 	const needsReviewEntries = ref<NeedsReviewSummary[]>([]);
+
+	/**
+	 * Tombstoned rows the cashier has uploaded for manager review.
+	 * Read-only — actions (Retry / Void) live in the server-side Desk
+	 * form for managers only.
+	 */
+	const handedOffEntries = ref<NeedsReviewSummary[]>([]);
 
 	/** Derived list for the workspace's "Pending" tab — read-only. */
 	const pendingEntries = ref<PendingSummary[]>([]);
@@ -90,11 +132,12 @@ export const useOutboxStore = defineStore("outbox", () => {
 	 */
 	const countsSub = liveQuery(async () => {
 		// Status-equality queries hit the `status` index.
-		const [enqueued, retry, inflight, review] = await Promise.all([
+		const [enqueued, retry, inflight, review, handedOff] = await Promise.all([
 			db.outbox.where("status").equals("enqueued").count(),
 			db.outbox.where("status").equals("retry_pending").count(),
 			db.outbox.where("status").equals("in_flight").count(),
 			db.outbox.where("status").equals("needs_review").count(),
+			db.outbox.where("status").equals("handed_off").count(),
 		]);
 
 		// Oldest pending row by `enqueued_at`. We walk only rows in pending
@@ -116,19 +159,44 @@ export const useOutboxStore = defineStore("outbox", () => {
 			}
 		}
 
+		// Count opening_entry rows that haven't synced (chained-shifts gate).
+		// Walk through the unsynced statuses once and count by type — the
+		// queue depth stays small so this is O(N) over a bounded N.
+		let unsyncedOpenings = 0;
+		const blockingStatuses = [
+			"enqueued",
+			"retry_pending",
+			"in_flight",
+			"needs_review",
+		] as const;
+		for (const s of blockingStatuses) {
+			const rows = await db.outbox
+				.where("status")
+				.equals(s)
+				.limit(1000)
+				.toArray();
+			for (const r of rows) {
+				if (r.type === "opening_entry") unsyncedOpenings += 1;
+			}
+		}
+
 		return {
 			enqueued,
 			retry,
 			inflight,
 			review,
+			handedOff,
 			oldest,
+			unsyncedOpenings,
 		};
 	}).subscribe({
 		next: (snap) => {
 			pendingCount.value = snap.enqueued + snap.retry;
 			inFlightCount.value = snap.inflight;
 			needsReviewCount.value = snap.review;
+			handedOffCount.value = snap.handedOff;
 			oldestPendingAt.value = snap.oldest;
+			unsyncedOpeningCount.value = snap.unsyncedOpenings;
 		},
 		error: (err) => {
 			// Never mutate durability on failure; log and keep the last-known
@@ -149,11 +217,26 @@ export const useOutboxStore = defineStore("outbox", () => {
 			.where("status")
 			.equals("needs_review")
 			.toArray();
+		// Project all the fields the workspace's expanded detail panel
+		// renders (M1 fix). The list of needs_review rows is bounded —
+		// thousands of stuck rows would mean the queue is wedged anyway —
+		// so the extra projection cost is negligible vs. the previous
+		// minimal projection that left half the detail panel blank.
+		// Encrypted payload stays on disk; we never project that here.
 		return rows.map<NeedsReviewSummary>((r) => ({
 			offline_id: r.offline_id,
 			type: r.type,
 			last_error_category: r.last_error_category,
+			last_error_detail: r.last_error_detail,
 			enqueued_at: r.enqueued_at,
+			posting_date: r.posting_date,
+			owner_user: r.owner_user,
+			shift_offline_id: r.shift_offline_id,
+			parent_offline_ids: r.parent_offline_ids,
+			attempt_count: r.attempt_count,
+			next_attempt_at: r.next_attempt_at,
+			server_doc_name: r.server_doc_name,
+			recovery_entry_name: r.recovery_entry_name ?? null,
 		}));
 	}).subscribe({
 		next: (rows) => {
@@ -164,6 +247,44 @@ export const useOutboxStore = defineStore("outbox", () => {
 		},
 	});
 	subscriptions.push(reviewSub);
+
+	/**
+	 * liveQuery for the cashier-side handed-off tracker. These are
+	 * tombstoned rows whose server-side recovery row is still in
+	 * Pending Review / In Review / Retrying. The cashier sees them so
+	 * they know which transactions are with managers; the local row
+	 * stays for dependency-graph integrity until the vacuum upgrades it.
+	 */
+	const handedOffSub = liveQuery(async () => {
+		const rows = await db.outbox
+			.where("status")
+			.equals("handed_off")
+			.toArray();
+		rows.sort((a, b) => a.enqueued_at - b.enqueued_at);
+		return rows.map<NeedsReviewSummary>((r) => ({
+			offline_id: r.offline_id,
+			type: r.type,
+			last_error_category: r.last_error_category,
+			last_error_detail: r.last_error_detail,
+			enqueued_at: r.enqueued_at,
+			posting_date: r.posting_date,
+			owner_user: r.owner_user,
+			shift_offline_id: r.shift_offline_id,
+			parent_offline_ids: r.parent_offline_ids,
+			attempt_count: r.attempt_count,
+			next_attempt_at: r.next_attempt_at,
+			server_doc_name: r.server_doc_name,
+			recovery_entry_name: r.recovery_entry_name ?? null,
+		}));
+	}).subscribe({
+		next: (rows) => {
+			handedOffEntries.value = rows;
+		},
+		error: (err) => {
+			console.error("[stores/outbox] handed-off liveQuery error", err);
+		},
+	});
+	subscriptions.push(handedOffSub);
 
 	/**
 	 * liveQuery for the workspace's "Pending" tab. Surfaces rows the scheduler
@@ -292,8 +413,11 @@ export const useOutboxStore = defineStore("outbox", () => {
 		pendingCount,
 		inFlightCount,
 		needsReviewCount,
+		handedOffCount,
+		unsyncedOpeningCount,
 		oldestPendingAt,
 		needsReviewEntries,
+		handedOffEntries,
 		pendingEntries,
 		schedulerPhase,
 		// derived

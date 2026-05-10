@@ -31,6 +31,7 @@ import {
 	OFFLINE_PREFIX_RETURN,
 	buildProvisionalName,
 } from "./constants";
+import { currentCashier } from "./cashier";
 import { canonicalIntegrityHash, IntegrityMismatchError } from "./crypto";
 import { db, assertWritable, uuidV4 } from "./db";
 import {
@@ -80,6 +81,8 @@ const NEEDS_REVIEW_CATEGORIES = new Set<NonNullable<LastErrorCategory>>([
 	"validation_error",
 	"permission_error",
 	"customer_missing",
+	"parent_not_ready",
+	"siblings_not_ready",
 	"batch_or_serial_conflict",
 	"stock_shortage",
 	"accounting_period_closed",
@@ -113,6 +116,48 @@ function notifyEnqueued(entry: OutboxEntry<unknown>): void {
 			fn(entry);
 		} catch (err) {
 			console.error("[outbox] enqueue listener threw", err);
+		}
+	}
+}
+
+/**
+ * Sync-event payload. Fires once per row that transitions enqueued/in_flight
+ * → synced. Consumers (Customer.vue, Invoice.vue) use this to swap any
+ * in-memory references to the old offline name for the freshly-assigned
+ * server doc name. The event does NOT fire for entries that voided mid-sync
+ * (status stays voided in markSynced — see CAS branch).
+ */
+export interface SyncEvent {
+	offline_id: string;
+	type: OutboxType;
+	server_doc_name: string;
+	provisional_name: string | null;
+}
+
+type SyncListener = (event: SyncEvent) => void;
+const syncListeners = new Set<SyncListener>();
+
+/**
+ * Subscribe to sync notifications. Returns an unsubscribe.
+ *
+ * The primary consumer is the Vue layer: when a customer that was created
+ * offline finally syncs, the cart's in-memory `customer` may still hold the
+ * provisional `OFFLINE-CUST-...` name. Subscribers receive
+ * `{ offline_id, server_doc_name, provisional_name }` and rename the
+ * reference. The fan-in is small (Customer.vue + Invoice.vue), so a simple
+ * Set is enough — no need for a typed event bus.
+ */
+export function onSynced(fn: SyncListener): () => void {
+	syncListeners.add(fn);
+	return () => syncListeners.delete(fn);
+}
+
+function notifySynced(event: SyncEvent): void {
+	for (const fn of syncListeners) {
+		try {
+			fn(event);
+		} catch (err) {
+			console.error("[outbox] sync listener threw", err);
 		}
 	}
 }
@@ -224,6 +269,11 @@ export async function enqueue<T>(
 		last_error_category: null,
 		last_error_detail: null,
 		server_doc_name: null,
+		// Populated only when the scheduler hands off this row to the
+		// server-side `POSpire Offline Sync Review` queue (status
+		// transitions to `handed_off` at the same time). null on every
+		// fresh enqueue.
+		recovery_entry_name: null,
 		enqueued_at: now,
 		synced_at: null,
 	};
@@ -384,6 +434,7 @@ export async function markSynced(
 	// without inserting a duplicate. The local audit trail (status=voided)
 	// stays truthful.
 	let cascade = false;
+	let syncedEvent: SyncEvent | null = null;
 	await db.transaction("rw", db.outbox, async () => {
 		const row = await db.outbox.get(offlineId);
 		if (!row) return;
@@ -407,12 +458,24 @@ export async function markSynced(
 			next_attempt_at: null,
 		});
 		cascade = true;
+		syncedEvent = {
+			offline_id: offlineId,
+			type: row.type,
+			server_doc_name: serverDocName,
+			provisional_name: provisionalNameFor(row.type, offlineId),
+		};
 	});
 	// Cascade-unblock any rows that were waiting on this parent (T7). Done
 	// outside the synced row's transaction because we want a fresh `rw` txn
 	// for the dependent puts and we don't need atomicity across the boundary.
 	if (cascade) {
 		await clearDependentsBlockedOn(offlineId);
+	}
+	// Fire after the transaction settles so listeners read durable state.
+	// Voided-mid-sync rows (CAS branch above) intentionally do NOT fire —
+	// the cart should not switch a voided customer's name to the server doc.
+	if (syncedEvent) {
+		notifySynced(syncedEvent);
 	}
 }
 
@@ -434,6 +497,111 @@ export async function markNeedsReview(
 		last_error_category: errorCategory,
 		last_error_detail: errorDetail,
 		// Freeze retries — manager must act.
+		next_attempt_at: null,
+	});
+}
+
+/**
+ * Vacuum transition: the server-side `POSpire Offline Sync Review` row
+ * for this tombstone has reached a terminal state (Resolved or Voided)
+ * and we can upgrade the local row accordingly. The tombstone has done
+ * its job — children that referenced this offline_id can now resolve
+ * their dependency check (Resolved → server doc exists, name returned;
+ * Voided → blocked forever, but at least no longer ambiguous).
+ *
+ * Cascade behaviour:
+ *   Resolved → cascade-unblock dependents (mirrors `markSynced`'s
+ *     behavior for the natural-success path). Without this, children
+ *     blocked on this parent stay `blocked_reason: waiting_for_parent`
+ *     forever, because `evaluateParents` only runs from `nextReady` and
+ *     `listReady` excludes blocked rows. Cascading clears the block
+ *     flag so the next drain cycle picks them up; if other parents
+ *     are still pending, evaluateParents re-blocks the child then.
+ *     Also fires `notifySynced` (mirrors `markSynced`) so the cart
+ *     swaps a provisional customer name for the real server name when
+ *     the manager resolves the customer via the recovery UI.
+ *   Voided → do NOT cascade. The parent never produced a server doc,
+ *     so the child's offline_id reference is unresolvable. Per the
+ *     runbook (§2.3), managers void descendants explicitly. Cascading
+ *     here would just thrash: clear → re-evaluate → re-block as
+ *     `waiting_for_parent` → noisy audit + wasted cycles.
+ *
+ * Idempotent. Calling twice with the same target is a no-op the second
+ * time because the source state will no longer be `handed_off`.
+ */
+export async function markVacuumed(
+	offlineId: string,
+	resolution: "Resolved" | "Voided",
+	serverDocName: string | null = null,
+): Promise<void> {
+	assertWritable();
+	// Read the row type before updating so we can build a SyncEvent below.
+	// Only needed for the Resolved + serverDocName path, so conditional.
+	const rowForNotify =
+		resolution === "Resolved" && serverDocName ? await db.outbox.get(offlineId) : null;
+	const target: OutboxStatus = resolution === "Resolved" ? "synced" : "voided";
+	await outboxRepo.updateSchedulerFields(offlineId, {
+		status: target,
+		server_doc_name: serverDocName,
+		next_attempt_at: null,
+		// On Resolved, stamp synced_at so the row's chronology is correct.
+		// On Voided, leave it null — the row was never synced in the
+		// "we got a successful submit" sense.
+		synced_at: resolution === "Resolved" ? Date.now() : null,
+	});
+	if (resolution === "Resolved") {
+		// Cascade-unblock dependents (children that listed this offline_id
+		// in `parent_offline_ids` and were marked `waiting_for_parent`).
+		// Same call markSynced uses — keeps the two paths' semantics aligned.
+		await clearDependentsBlockedOn(offlineId);
+		// Mirror markSynced: fire the rename event so listeners (Invoice.vue,
+		// Customer.vue) swap the provisional name for the real server name.
+		// Resolved rows from the recovery pipeline always carry a server doc
+		// name; skip only if somehow absent (defensive guard).
+		if (rowForNotify && serverDocName) {
+			notifySynced({
+				offline_id: offlineId,
+				type: rowForNotify.type,
+				server_doc_name: serverDocName,
+				provisional_name: provisionalNameFor(rowForNotify.type, offlineId),
+			});
+		}
+	}
+}
+
+/**
+ * Tombstone transition: the row was successfully handed off to the
+ * server-side `POSpire Offline Sync Review` queue. The local row stays
+ * in IndexedDB so dependent rows (children referencing this offline_id
+ * via `parent_offline_ids`, the shift's strict-closure check) can still
+ * see it — but `listReady` excludes it, so the scheduler never picks it
+ * up again. The `recovery_entry_name` field links to the server row so
+ * the local vacuum pass can poll for resolution and eventually flip
+ * this tombstone to `synced` (when the manager retries successfully) or
+ * `voided` (when the manager voids).
+ *
+ * Idempotent: callers may invoke this multiple times with the same
+ * recovery_entry_name (network retry on the handoff response). The CAS
+ * pattern is unnecessary here because handoff itself is idempotent
+ * server-side; if the scheduler hands off twice, both calls return the
+ * same recovery row name and this transition writes the same value.
+ */
+export async function markHandedOff(
+	offlineId: string,
+	recoveryEntryName: string,
+): Promise<void> {
+	assertWritable();
+	if (!recoveryEntryName) {
+		throw new Error(
+			`markHandedOff called with empty recoveryEntryName for ${offlineId}`,
+		);
+	}
+	await outboxRepo.updateSchedulerFields(offlineId, {
+		status: "handed_off",
+		recovery_entry_name: recoveryEntryName,
+		// Tombstones never re-enter the scheduler. Clearing this is a
+		// belt-and-braces against a bug in `listReady` ever picking up a
+		// `handed_off` row by mistake.
 		next_attempt_at: null,
 	});
 }
@@ -612,7 +780,17 @@ export async function evaluateParents(
 			continue;
 		}
 		if (parent.status === "synced") continue;
-		if (parent.status === "needs_review" || parent.status === "voided") {
+		if (
+			parent.status === "needs_review" ||
+			parent.status === "voided" ||
+			// Tombstone for a row handed off to the server-side review queue.
+			// The work isn't done on the server yet (recovery row is Pending
+			// Review / Retrying), so this child cannot ship — its references
+			// to parent_offline_id won't resolve. The local vacuum pass
+			// flips the tombstone to `synced` once the server-side recovery
+			// row reaches Resolved, at which point the child unblocks.
+			parent.status === "handed_off"
+		) {
 			blockedByParent = true;
 			continue;
 		}
@@ -626,17 +804,50 @@ export async function evaluateParents(
  * Strict closure (P-8): a `closing_entry` may only ship once every invoice
  * belonging to the same shift has `status=synced`. Returns the same tri-state
  * as `evaluateParents`.
+ *
+ * Two scan modes:
+ *   - Offline-opened shift: index seek on `shift_offline_id` (fast, uses
+ *     the existing Dexie index).
+ *   - Online-opened shift: `entry.shift_offline_id` is null, so the index
+ *     seek would miss every sibling. Fall back to decrypting the closing's
+ *     inner doc to learn the real shift name, then scan invoice rows by
+ *     inner `posa_pos_opening_shift`. Cost is O(N invoice rows) with one
+ *     JSON.parse per row — bounded by outbox depth, runs only when an
+ *     online-opened shift's closing is in flight.
+ *
+ * Without the second branch a closing for an online-opened shift would
+ * always report "ready" here, the scheduler would fire it immediately,
+ * and the server's strict-closure orphan check would reject it as
+ * siblings_not_ready. Manager would then have to void+retry manually.
  */
 export async function evaluateClosingReadiness(
 	entry: OutboxEntry<unknown>,
 ): Promise<DependencyGate> {
-	if (entry.type !== "closing_entry" || !entry.shift_offline_id) {
-		return "ready";
+	if (entry.type !== "closing_entry") return "ready";
+
+	let siblings: typeof entry[] = [];
+	if (entry.shift_offline_id) {
+		// Fast path — index seek.
+		siblings = (await db.outbox
+			.where("shift_offline_id")
+			.equals(entry.shift_offline_id)
+			.toArray()) as unknown as typeof entry[];
+	} else {
+		// Slow path — derive the shift's real name from the closing's own
+		// inner doc, then scan invoice rows by their inner shift reference.
+		const closingShiftName = readInnerShiftName(entry.payload);
+		if (!closingShiftName) return "ready"; // can't gate without an anchor
+		const allInvoices = (await db.outbox
+			.where("type")
+			.equals("invoice")
+			.toArray()) as unknown as typeof entry[];
+		siblings = allInvoices.filter((row) => {
+			if (row.shift_offline_id) return false; // different (offline) shift
+			const inner = readInnerShiftName(row.payload);
+			return inner === closingShiftName;
+		});
 	}
-	const siblings = await db.outbox
-		.where("shift_offline_id")
-		.equals(entry.shift_offline_id)
-		.toArray();
+
 	let blockedBySibling = false;
 	for (const s of siblings) {
 		// Closing entry itself, voided entries, and non-invoice types do not
@@ -645,7 +856,13 @@ export async function evaluateClosingReadiness(
 		if (s.status === "voided") continue;
 		if (s.type !== "invoice") continue;
 		if (s.status === "synced") continue;
-		if (s.status === "needs_review") {
+		if (s.status === "needs_review" || s.status === "handed_off") {
+			// `handed_off` mirrors `needs_review` for closure-readiness:
+			// the sibling's work hasn't completed server-side, so the
+			// strict-closure invariant ("every invoice on this shift is
+			// submitted") doesn't hold. Block the closing until the
+			// recovery row resolves and the local vacuum upgrades this
+			// sibling's tombstone to `synced`.
 			blockedBySibling = true;
 			continue;
 		}
@@ -654,52 +871,76 @@ export async function evaluateClosingReadiness(
 	return blockedBySibling ? "blocked" : "ready";
 }
 
+/**
+ * Best-effort extraction of the inner doc's `posa_pos_opening_shift` from
+ * an outbox payload. Outbox payloads for offline-capable writes use the
+ * wrapper shape `{ data: "<JSON inner doc>", … }`; for non-wrapper shapes
+ * (legacy entries) we read the field directly. Returns `null` if neither
+ * shape produces a string.
+ */
+function readInnerShiftName(payload: unknown): string | null {
+	if (!payload || typeof payload !== "object") return null;
+	const p = payload as Record<string, unknown>;
+	if (typeof p.data === "string") {
+		try {
+			const inner = JSON.parse(p.data) as Record<string, unknown>;
+			const name =
+				(inner.posa_pos_opening_shift as string | undefined) ??
+				(inner.pos_opening_shift as string | undefined);
+			return typeof name === "string" && name.length > 0 ? name : null;
+		} catch {
+			return null;
+		}
+	}
+	const direct =
+		(p.posa_pos_opening_shift as string | undefined) ??
+		(p.pos_opening_shift as string | undefined);
+	return typeof direct === "string" && direct.length > 0 ? direct : null;
+}
+
 // ---------------------------------------------------------------------------
 // Payload resolution (offline_id → server_doc_name)
 // ---------------------------------------------------------------------------
 
 /**
- * Walk `payload` and replace any value matching a known parent `offline_id`
- * with that parent's `server_doc_name`. Non-recursive by structure — we do
- * a full deep-clone walk but only rewrite scalar string matches; objects
- * are cloned so the stored payload is not mutated.
+ * Defensively pass payload through unchanged for the wrapper-shaped writes
+ * the offline pipeline produces today.
  *
- * If a parent is not yet `synced` (or missing), the original offline_id is
- * preserved. The scheduler's `evaluateParents` prevents us from reaching
- * this branch in practice, but we stay defensive rather than panicking.
+ * **Why this used to rewrite, and why it can't.**
+ * The original intent was: if a parent has synced and we know its real
+ * server doc name, replace the parent's offline UUID with that name in the
+ * payload before sending. That sounds fine until you remember the wrapper
+ * shape every offline-capable adapter produces:
+ *
+ *   { data: "<JSON inner doc>",            // string (NOT walked)
+ *     offline_id: "<this row's UUID>",
+ *     device_id: "<UUID>",
+ *     opening_entry_offline_id: "<UUID>",  // PROTOCOL field — server
+ *     material_receipt_offline_ids: [...]  //   resolves these to names
+ *   }
+ *
+ * The wrapper's `opening_entry_offline_id` and `material_receipt_offline_ids`
+ * elements ARE the parent UUIDs. A string-match deep-rewrite would replace
+ * them with server doc names, after which the server's `_validate_uuid` /
+ * `_resolve_opening_shift` / `_resolve_material_receipts` reject the
+ * payload as "Invalid uuid". The server is already the authoritative
+ * resolver — front-end pre-resolution is a no-op at best (inner doc lives
+ * inside a JSON STRING the walker doesn't recurse into) and an active
+ * sabotage at worst (wrapper protocol fields get rewritten).
+ *
+ * The function is kept as an explicit pass-through (not deleted) because
+ * `sync.ts` calls it on every send. If a future non-wrapper outbox shape
+ * needs front-end resolution, restore a *scoped* rewrite — never one that
+ * walks protocol fields.
+ *
+ * P-7's gating still happens via `evaluateParents` + `evaluateClosingReadiness`
+ * (we don't ship until parents are synced/voided). Server-side
+ * `_resolve_*` then maps UUIDs to real doc names at submit time.
  */
 export async function resolvePayload<T>(
 	entry: OutboxEntry<T>,
 ): Promise<T> {
-	if (entry.parent_offline_ids.length === 0) return entry.payload;
-
-	const map = new Map<string, string>();
-	for (const parentId of entry.parent_offline_ids) {
-		const parent = await db.outbox.get(parentId);
-		if (parent?.server_doc_name) {
-			map.set(parentId, parent.server_doc_name);
-		}
-	}
-	if (map.size === 0) return entry.payload;
-
-	return deepRewrite(entry.payload, map) as T;
-}
-
-function deepRewrite(value: unknown, map: Map<string, string>): unknown {
-	if (typeof value === "string") {
-		return map.get(value) ?? value;
-	}
-	if (Array.isArray(value)) {
-		return value.map((v) => deepRewrite(v, map));
-	}
-	if (value && typeof value === "object") {
-		const out: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(value)) {
-			out[k] = deepRewrite(v, map);
-		}
-		return out;
-	}
-	return value;
+	return entry.payload;
 }
 
 // ---------------------------------------------------------------------------
@@ -789,23 +1030,110 @@ export async function countPending(): Promise<number> {
 	return outboxRepo.countPending();
 }
 
-/** Manager "Retry" action — clears needs_review/blocked and re-queues. */
-export async function resetForRetry(offlineId: string): Promise<void> {
+/**
+ * F7 — Edit & Retry. Mutates the queued payload, re-encrypts, and re-queues
+ * for the scheduler.
+ *
+ * Used by the per-category fix flows in the reconciliation workspace
+ * (date-retry, serial-swap, detach-parent, detach-sibling). The caller
+ * decrypts via `getEntry`, computes the desired payload, and hands the
+ * mutated value back here. We:
+ *   1. Re-encrypt under the same AAD (offline_id) so the audit hash chain
+ *      stays bound to the original row identity.
+ *   2. Recompute `payload_integrity_hash` so `verifyIntegrity` agrees.
+ *   3. Update the indexed sibling columns `posting_date` / `parent_offline_ids`
+ *      when the caller patches them (otherwise the scheduler's parent
+ *      evaluator and the accounting-period check still see the old values).
+ *   4. Reset status to `enqueued`, clear error fields, attempt_count=0.
+ *   5. Notify enqueue listeners so the scheduler wakes immediately.
+ *
+ * Refuses on `voided` or `synced` rows — those are terminal. A synced row
+ * already has a real server doc; the right tool is a reversal, not an edit.
+ */
+export async function patchPayloadAndReset(
+	offlineId: string,
+	patchedPayload: unknown,
+	indexedOverrides: {
+		posting_date?: string;
+		parent_offline_ids?: string[];
+	} = {},
+): Promise<void> {
 	assertWritable();
 	const stored = await db.outbox.get(offlineId);
 	if (!stored) throw new Error(`outbox ${offlineId} not found`);
-	if (stored.status === "voided") return; // terminal — refuse to revive
-	await db.outbox.put({
-		...stored,
+	if (stored.status === "voided") {
+		throw new Error(
+			`Cannot edit ${offlineId}: row is voided. Re-create the entry instead.`,
+		);
+	}
+	if (stored.status === "synced") {
+		throw new Error(
+			`Cannot edit ${offlineId}: already synced as ${stored.server_doc_name}. Use a reversal, not an edit.`,
+		);
+	}
+
+	// Re-encrypt + re-hash the patched payload. Keep the existing top-level
+	// fields the caller didn't override (device_id, owner_user, type, etc.) —
+	// those are bound to the original write context and changing them would
+	// change attribution.
+	const integrityHash = await canonicalIntegrityHash(patchedPayload);
+	const newEntry: OutboxEntry<unknown> = {
+		// Decrypt the existing entry so we have the full plain shape, then
+		// override the mutable bits. Avoids the caller having to re-supply
+		// fields they don't intend to touch.
+		...(await outboxRepoInternal.fromStored(stored)),
+		payload: patchedPayload,
+		payload_integrity_hash: integrityHash,
+		// Reset the lifecycle so the scheduler picks it back up.
 		status: "enqueued",
 		blocked_reason: null,
 		attempt_count: 0,
 		next_attempt_at: Date.now(),
 		last_error_category: null,
 		last_error_detail: null,
-	});
-	// Wake the scheduler.
-	notifyEnqueued(await outboxRepoInternal.fromStored(stored));
+	};
+	if (indexedOverrides.posting_date !== undefined) {
+		newEntry.posting_date = indexedOverrides.posting_date;
+	}
+	if (indexedOverrides.parent_offline_ids !== undefined) {
+		newEntry.parent_offline_ids = indexedOverrides.parent_offline_ids;
+	}
+
+	const newStored = await outboxRepoInternal.toStored(newEntry);
+	await db.outbox.put(newStored);
+
+	// Wake the scheduler. Pass the in-memory entry so listeners don't need
+	// to decrypt again.
+	notifyEnqueued(newEntry);
+
+	// Cascade-unblock dependents (mirrors resetForRetry — same reason).
+	await clearDependentsBlockedOn(offlineId);
+}
+
+/** Manager "Retry" action — clears needs_review/blocked and re-queues. */
+export async function resetForRetry(offlineId: string): Promise<void> {
+	assertWritable();
+	const stored = await db.outbox.get(offlineId);
+	if (!stored) throw new Error(`outbox ${offlineId} not found`);
+	if (stored.status === "voided") return; // terminal — refuse to revive
+
+	// Build the post-update on-disk row, then persist it. Notify listeners
+	// with the SAME post-update shape (decrypted) — the prior version
+	// notified with the pre-update row, so subscribers (Pinia store, sync
+	// scheduler, telemetry) saw stale `status` / `last_error_category` /
+	// `attempt_count` immediately after a Retry click.
+	const updatedStored = {
+		...stored,
+		status: "enqueued" as const,
+		blocked_reason: null,
+		attempt_count: 0,
+		next_attempt_at: Date.now(),
+		last_error_category: null,
+		last_error_detail: null,
+	};
+	await db.outbox.put(updatedStored);
+	// Wake the scheduler with the fresh state, not the stale snapshot.
+	notifyEnqueued(await outboxRepoInternal.fromStored(updatedStored));
 	// Cascade-unblock dependents that were parked on this parent (T7).
 	// They'll re-evaluate parents on the next drain — if this one is now
 	// in retry_pending/in_flight, they'll move to "waiting" not "blocked",
@@ -828,24 +1156,11 @@ function readDeviceId(): string {
 	return "unknown-device";
 }
 
-/**
- * Best-effort cashier lookup. Frappe sets `frappe.session.user` on the
- * global; in the Vite bundle `frappe` is explicitly forbidden (see
- * CLAUDE.md), but at runtime the Desk host injects it. We probe for the
- * global without importing it statically so the no-restricted-imports rule
- * stays happy.
- */
-function currentCashier(): string {
-	try {
-		const g = globalThis as unknown as {
-			frappe?: { session?: { user?: string } };
-		};
-		if (g.frappe?.session?.user) return g.frappe.session.user;
-	} catch {
-		/* ignore */
-	}
-	return "Guest";
-}
+// `currentCashier` is sourced from the shared module at @/offline/cashier
+// so call-registry.ts adapters and outbox.ts agree on one implementation
+// (and one fallback ladder). The earlier two-copy state silently bypassed
+// the cookie fallback whenever an adapter pre-stamped owner_user via
+// `options.ownerUser`, since adapters used a less-safe local helper.
 
 function todayIsoDate(): string {
 	const d = new Date();
