@@ -563,10 +563,14 @@ def _acting_as_user(owner_user: str | None) -> Iterator[None]:
 		return
 
 	try:
-		frappe.set_user(owner_user)
+		# Owner impersonation for offline replay (P-5). `owner_user` is
+		# validated above (existence + enabled); session is restored in
+		# the finally block. Audited pattern, not a privilege-escalation
+		# path.
+		frappe.set_user(owner_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 		yield
 	finally:
-		frappe.set_user(original)
+		frappe.set_user(original)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 
 @contextlib.contextmanager
@@ -1378,7 +1382,7 @@ def _to_stock_entry_doc(data: dict[str, Any]) -> dict[str, Any]:
 		except Exception as exc:
 			_throw(
 				ERROR_BATCH_OR_SERIAL_CONFLICT,
-				_("Batch {0} could not be created: {1}").format(batch_no, exc),
+				_("Batch {0} could not be created: {1}").format(batch_no, str(exc)),
 				{"batch_no": batch_no},
 			)
 
@@ -1400,7 +1404,7 @@ def _to_stock_entry_doc(data: dict[str, Any]) -> dict[str, Any]:
 		except Exception as exc:
 			_throw(
 				ERROR_BATCH_OR_SERIAL_CONFLICT,
-				_("Serial No {0} could not be created: {1}").format(serial_no, exc),
+				_("Serial No {0} could not be created: {1}").format(serial_no, str(exc)),
 				{"serial_no": serial_no},
 			)
 

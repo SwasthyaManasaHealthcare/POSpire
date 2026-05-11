@@ -366,9 +366,9 @@ def retry(name: str) -> dict[str, Any]:
 					frappe.utils.get_datetime(frappe.utils.now()) - frappe.utils.get_datetime(held_since)
 				).total_seconds()
 				if delta < 60:
-					held_for_msg = _(" (started {0}s ago)").format(int(delta))
+					held_for_msg = " " + _("(started {0}s ago)").format(int(delta))
 				else:
-					held_for_msg = _(" (started {0} min ago)").format(int(delta // 60))
+					held_for_msg = " " + _("(started {0} min ago)").format(int(delta // 60))
 			except Exception:
 				pass
 		frappe.throw(
@@ -413,7 +413,7 @@ def retry(name: str) -> dict[str, Any]:
 			detail=(f"refused: schema_version mismatch (row={row_schema}, server={SCHEMA_VERSION})"),
 		)
 		row.save(ignore_permissions=True)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- terminal-state save must persist before returning; caller polls via separate request.
 		return {
 			"name": row.name,
 			"status": row.status,
@@ -434,7 +434,7 @@ def retry(name: str) -> dict[str, Any]:
 		detail=f"retry started by {manager_user}",
 	)
 	row.save(ignore_permissions=True)
-	frappe.db.commit()  # Make the Retrying transition visible to other tabs immediately.
+	frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Make the Retrying transition visible to other tabs immediately (CAS-conflict messaging in this function relies on the reviewer_user/held_since being readable cross-session).
 
 	# --- Replay -----------------------------------------------------------
 	#
@@ -606,7 +606,7 @@ def retry(name: str) -> dict[str, Any]:
 		),
 	)
 	row.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Resolved state must be durable before returning to the manager UI; subsequent retry-poll relies on this row being readable from another session.
 	return {
 		"name": row.name,
 		"status": row.status,
@@ -1099,8 +1099,7 @@ def lookup_resolution(
 	)
 	id_or_name = None
 	if ids:
-		clause = osr.offline_id.isin(ids)
-		id_or_name = clause if id_or_name is None else (id_or_name | clause)
+		id_or_name = osr.offline_id.isin(ids)
 	if names:
 		clause = osr.name.isin(names)
 		id_or_name = clause if id_or_name is None else (id_or_name | clause)
@@ -1208,7 +1207,7 @@ def void_entry(name: str, reason: str) -> dict[str, Any]:
 		detail=f"void reason: {reason[:300]}",
 	)
 	row.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Voided is a terminal state; commit before returning so other tabs (and the legal-hold audit) see the row out of Pending Review.
 	return {"name": row.name, "status": row.status, "outcome": "ok"}
 
 
@@ -1275,7 +1274,7 @@ def _validate_accounting_period_edit(
 		new_date = frappe.utils.getdate(new_date_raw)
 	except Exception as exc:  # broad — getdate raises various
 		frappe.throw(
-			_("Invalid posting_date {0}: {1}").format(new_date_raw, exc),
+			_("Invalid posting_date {0}: {1}").format(new_date_raw, str(exc)),
 			frappe.ValidationError,
 		)
 	new_date_str = str(new_date)
@@ -1673,7 +1672,7 @@ def edit_payload(
 	if row.status == "Pending Review":
 		row.status = "In Review"
 	row.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Edited payload + In Review CAS marker must be visible to other reviewers before the manager sees the success response.
 
 	return {
 		"name": row.name,
@@ -1734,7 +1733,7 @@ def revert_to_original(name: str, reason: str) -> dict[str, Any]:
 			detail=f"revert no-op (already at original) by {frappe.session.user}",
 		)
 		row.save(ignore_permissions=True)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- noop revert still appends an audit-trail activity row; commit so the chain stays observable cross-session.
 		return {"name": row.name, "outcome": "noop"}
 
 	# Record one edit row capturing the whole-payload revert. before is
@@ -1760,7 +1759,7 @@ def revert_to_original(name: str, reason: str) -> dict[str, Any]:
 		detail=f"reverted to original by {frappe.session.user} — {reason[:200]}",
 	)
 	row.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Revert mutates payload + appends an audit edit; both must be durable before returning so dry_run_replay sees the reverted state.
 	return {"name": row.name, "outcome": "ok"}
 
 
@@ -2108,7 +2107,11 @@ def export_activity(
 		activity_filters += " AND a.at <= %s"
 		values.append(to_date)
 
-	rows = frappe.db.sql(
+	# parent_filter_sql / activity_filters are server-built fragments
+	# composed only of literal " AND col = %s" clauses (see above); the
+	# actual values go through `tuple(values)` placeholder substitution.
+	# No user input flows into the f-string.
+	rows = frappe.db.sql(  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-sql-format-injection
 		f"""
 		SELECT
 		    r.name AS recovery_name,
@@ -2169,17 +2172,17 @@ def export_activity(
 		actual_row_counts: dict[str, int] = {}
 		actual_min_idx: dict[str, int] = {}
 		if groups:
+			# `placeholders` is a "%s, %s, ..." string built from len(groups),
+			# not user input; the actual parent names go through `tuple(groups.keys())`.
 			placeholders = ", ".join(["%s"] * len(groups))
-			count_rows = frappe.db.sql(
-				f"""
+			# nosemgrep: frappe-semgrep-rules.rules.security.frappe-sql-format-injection
+			count_sql = f"""
 				SELECT parent, COUNT(*) AS n, MIN(idx) AS min_idx
 				FROM `tabPOSpire Offline Sync Review Activity`
 				WHERE parent IN ({placeholders})
 				GROUP BY parent
-				""",
-				tuple(groups.keys()),
-				as_dict=True,
-			)
+			"""
+			count_rows = frappe.db.sql(count_sql, tuple(groups.keys()), as_dict=True)
 			for r in count_rows:
 				actual_row_counts[r.parent] = cint(r.n)
 				actual_min_idx[r.parent] = cint(r.min_idx)
@@ -2363,12 +2366,12 @@ def notify_sla_breaches() -> dict[str, Any]:
 		return {"breaches": len(breaches), "sent": False, "reason": "no recipients"}
 
 	rows_html = "".join(
-		f"<tr>"
-		f"<td><a href='/app/pospire-offline-sync-review/{frappe.utils.escape_html(b.name)}'>{frappe.utils.escape_html(b.name)}</a></td>"
-		f"<td>{frappe.utils.escape_html(b.error_category or '')}</td>"
-		f"<td>{frappe.utils.escape_html(b.cashier_user or '')}</td>"
-		f"<td>{cint(b.age_minutes)} min</td>"
-		f"</tr>"
+		"<tr>"
+		+ f"<td><a href='/app/pospire-offline-sync-review/{frappe.utils.escape_html(b.name)}'>{frappe.utils.escape_html(b.name)}</a></td>"
+		+ f"<td>{frappe.utils.escape_html(b.error_category or '')}</td>"
+		+ f"<td>{frappe.utils.escape_html(b.cashier_user or '')}</td>"
+		+ f"<td>{cint(b.age_minutes)} min</td>"
+		+ "</tr>"
 		for b in breaches
 	)
 	subject = _("[POSpire] {0} offline-sync recovery entries past SLA").format(len(breaches))
@@ -2504,15 +2507,15 @@ def archive_old_recovery_rows() -> dict[str, Any]:
 				# decide whether to add the column or accept the gap.
 				skipped_columns.append(doctype)
 				continue
-			# `frappe.db.escape_table_name` style isn't exposed; doctype
-			# names are admin-controlled (not user input), so f-string
-			# interpolation is safe here. The IN-list parameters use
-			# placeholder substitution as before.
+			# `frappe.db.escape_table_name` style isn't exposed; `doctype`
+			# is iterated over the hardcoded `scan_targets` list above
+			# (not user input). `placeholders` is "%s, %s, ..." built
+			# from len(chunk). Values go through tuple substitution.
 			tab = f"`tab{doctype}`"
 			for i in range(0, len(candidate_offline_ids), chunk_size):
 				chunk = candidate_offline_ids[i : i + chunk_size]
 				placeholders = ", ".join(["%s"] * len(chunk))
-				refs = frappe.db.sql(
+				refs = frappe.db.sql(  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-sql-format-injection
 					f"""
 					SELECT DISTINCT pos_offline_id
 					FROM {tab}
@@ -2554,7 +2557,7 @@ def archive_old_recovery_rows() -> dict[str, Any]:
 				title=f"archive_old_recovery_rows: delete {name} failed",
 				message=frappe.get_traceback(),
 			)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit -- Scheduled archive batch can run for minutes; commit so deletions survive a worker restart mid-loop.
 	return {
 		"archived": archived,
 		"skipped_legal_hold": skipped_legal_hold,
