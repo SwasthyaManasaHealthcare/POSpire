@@ -78,11 +78,15 @@ function setupPresence(frm) {
 		const $existing = frm.dashboard.wrapper.find(".osr-presence-chip");
 		$existing.remove();
 		if (others.length === 0) return;
-		const text = others.length === 1
-			? __("{0} is viewing this entry", [others[0]])
-			: __("{0} viewing this entry", [others.length]);
+		const text =
+			others.length === 1
+				? __("{0} is viewing this entry", [others[0]])
+				: __("{0} viewing this entry", [others.length]);
 		const tooltip = others.join(", ");
-		frm.dashboard.add_indicator(text, "blue").addClass("osr-presence-chip").attr("title", tooltip);
+		frm.dashboard
+			.add_indicator(text, "blue")
+			.addClass("osr-presence-chip")
+			.attr("title", tooltip);
 	}
 
 	function onMessage(payload) {
@@ -184,17 +188,11 @@ frappe.ui.form.on("POSpire Offline Sync Review", {
 		const status = frm.doc.status;
 		const category = frm.doc.error_category;
 		const isTerminal = status === "Resolved" || status === "Voided";
-		const isOpenForActions =
-			status === "Pending Review" || status === "In Review";
+		const isOpenForActions = status === "Pending Review" || status === "In Review";
 
 		// ============ Retry ============
 		if (isOpenForActions) {
-			frm.add_custom_button(
-				__("Retry"),
-				() => onRetry(frm),
-				null,
-				"primary"
-			);
+			frm.add_custom_button(__("Retry"), () => onRetry(frm), null, "primary");
 		}
 
 		// ============ Edit (Phase 2-A) ============
@@ -215,10 +213,7 @@ frappe.ui.form.on("POSpire Offline Sync Review", {
 		}
 
 		// ============ Revert (Phase 2-B) ============
-		if (
-			isOpenForActions &&
-			frm.doc.payload_hash !== frm.doc.original_payload_hash
-		) {
+		if (isOpenForActions && frm.doc.payload_hash !== frm.doc.original_payload_hash) {
 			frm.add_custom_button(__("Revert"), () => {
 				openRevertDialog(frm);
 			});
@@ -419,12 +414,7 @@ function openAccountingPeriodEditDialog(frm) {
 		],
 		primary_action_label: __("Apply"),
 		primary_action(values) {
-			submitEdit(
-				frm,
-				{ posting_date: values.posting_date },
-				values.reason,
-				d
-			);
+			submitEdit(frm, { posting_date: values.posting_date }, values.reason, d);
 		},
 	});
 	d.show();
@@ -468,12 +458,7 @@ function openCustomerEditDialog(frm) {
 		],
 		primary_action_label: __("Apply"),
 		primary_action(values) {
-			submitEdit(
-				frm,
-				{ customer: values.customer },
-				values.reason,
-				d
-			);
+			submitEdit(frm, { customer: values.customer }, values.reason, d);
 		},
 	});
 	d.show();
@@ -518,9 +503,7 @@ function openStockEditDialog(frm) {
 				label: __("New Top-Level Warehouse (optional)"),
 				options: "Warehouse",
 				default: currentSetWarehouse,
-				description: __(
-					"Leave blank to keep the queued set_warehouse unchanged."
-				),
+				description: __("Leave blank to keep the queued set_warehouse unchanged."),
 			},
 			{
 				fieldtype: "Section Break",
@@ -613,10 +596,7 @@ function openStockEditDialog(frm) {
 					ip.qty = Number(row.new_qty);
 					included = true;
 				}
-				if (
-					row.new_warehouse &&
-					row.new_warehouse !== (orig.warehouse || "")
-				) {
+				if (row.new_warehouse && row.new_warehouse !== (orig.warehouse || "")) {
 					ip.warehouse = row.new_warehouse;
 					included = true;
 				}
@@ -664,7 +644,7 @@ function openFieldEditDialog(frm) {
 				label: __("New Value (JSON)"),
 				reqd: 1,
 				description: __(
-					"JSON-encoded new value. e.g. \"some-string\" / 42 / true / null / {\"k\": \"v\"}."
+					'JSON-encoded new value. e.g. "some-string" / 42 / true / null / {"k": "v"}.'
 				),
 			},
 			{
@@ -689,12 +669,7 @@ function openFieldEditDialog(frm) {
 				});
 				return;
 			}
-			submitEdit(
-				frm,
-				{ field_path: values.field_path, value: parsed },
-				values.reason,
-				d
-			);
+			submitEdit(frm, { field_path: values.field_path, value: parsed }, values.reason, d);
 		},
 	});
 	d.show();

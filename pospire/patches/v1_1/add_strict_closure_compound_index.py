@@ -35,9 +35,7 @@ def execute() -> None:
 	# fields exist).
 	columns = {c.lower() for c in frappe.db.get_table_columns("Sales Invoice")}
 	if "pos_opening_shift_offline_id" not in columns:
-		frappe.logger().info(
-			"[B1] skipping strict-closure index: pos_opening_shift_offline_id missing"
-		)
+		frappe.logger().info("[B1] skipping strict-closure index: pos_opening_shift_offline_id missing")
 		return
 
 	if _index_exists(TABLE, INDEX_NAME):

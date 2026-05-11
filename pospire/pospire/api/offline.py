@@ -1092,7 +1092,7 @@ def submit_invoice(
 			)
 		if existing_status == 1:
 			return {
-			"name": existing_doc.name,
+				"name": existing_doc.name,
 				"was_already_submitted": True,
 				"docstatus": 1,
 			}

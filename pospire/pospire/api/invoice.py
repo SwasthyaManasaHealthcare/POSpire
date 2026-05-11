@@ -504,8 +504,7 @@ def validate_shift(doc):
 		# refusing here would orphan the sale forever. Strict-closure on the
 		# closing entry is the natural-path safeguard.
 		is_offline_replay = bool(
-			doc.get("pos_offline_id")
-			and getattr(frappe.flags, "pospire_offline_replay", False)
+			doc.get("pos_offline_id") and getattr(frappe.flags, "pospire_offline_replay", False)
 		)
 		if shift.status != "Open" and not is_offline_replay:
 			frappe.throw(_("POS Shift {0} is not open").format(shift.name))

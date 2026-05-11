@@ -148,8 +148,7 @@ def handoff(
 	if requested_cashier != frappe.session.user and "System Manager" not in frappe.get_roles():
 		frappe.throw(
 			_(
-				"cashier_user override requires System Manager. Caller {0} cannot "
-				"hand off on behalf of {1}."
+				"cashier_user override requires System Manager. Caller {0} cannot hand off on behalf of {1}."
 			).format(frappe.session.user, requested_cashier),
 			frappe.PermissionError,
 		)
@@ -164,9 +163,7 @@ def handoff(
 		# we want hash equality to round-trip verbatim.
 		payload_str = payload
 	else:
-		frappe.throw(
-			_("payload must be a JSON string or dict"), frappe.ValidationError
-		)
+		frappe.throw(_("payload must be a JSON string or dict"), frappe.ValidationError)
 
 	# Identity-coherence guard: if the wrapper payload carries its own
 	# `offline_id` (every offline-endpoint shape does — see
@@ -207,24 +204,19 @@ def handoff(
 	parent_ids_str = _coerce_parent_ids(parent_offline_ids)
 
 	# --- Idempotency: existing row wins ----------------------------------
-	existing_name = frappe.db.exists(
-		"POSpire Offline Sync Review", {"offline_id": offline_id}
-	)
+	existing_name = frappe.db.exists("POSpire Offline Sync Review", {"offline_id": offline_id})
 	if existing_name:
 		# Refuse to leak other cashiers' rows back to the caller. The
 		# cashier-side migration runs as the cashier whose user_id cookie
 		# is set; admins running the bench migration patch use
 		# `frappe.set_user` to impersonate, which makes this check pass.
-		existing_cashier = frappe.db.get_value(
-			"POSpire Offline Sync Review", existing_name, "cashier_user"
-		)
+		existing_cashier = frappe.db.get_value("POSpire Offline Sync Review", existing_name, "cashier_user")
 		is_admin = "System Manager" in frappe.get_roles() or "Sales Manager" in frappe.get_roles()
 		if existing_cashier != frappe.session.user and not is_admin:
 			frappe.throw(
-				_(
-					"Recovery entry for offline_id {0} exists but belongs to a "
-					"different cashier."
-				).format(offline_id),
+				_("Recovery entry for offline_id {0} exists but belongs to a different cashier.").format(
+					offline_id
+				),
 				frappe.PermissionError,
 			)
 		row = frappe.get_doc("POSpire Offline Sync Review", existing_name)
@@ -357,9 +349,7 @@ def retry(name: str) -> dict[str, Any]:
 		for_update=True,
 	)
 	if not current:
-		frappe.throw(
-			_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError
-		)
+		frappe.throw(_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError)
 	# P2-25: friendlier CAS conflict messaging. When the loser of a
 	# concurrent retry attempt arrives here, we know exactly who's
 	# holding the row (`reviewer_user` was stamped at the start of their
@@ -373,8 +363,7 @@ def retry(name: str) -> dict[str, Any]:
 		if held_since:
 			try:
 				delta = (
-					frappe.utils.get_datetime(frappe.utils.now())
-					- frappe.utils.get_datetime(held_since)
+					frappe.utils.get_datetime(frappe.utils.now()) - frappe.utils.get_datetime(held_since)
 				).total_seconds()
 				if delta < 60:
 					held_for_msg = _(" (started {0}s ago)").format(int(delta))
@@ -421,10 +410,7 @@ def retry(name: str) -> dict[str, Any]:
 			action="retry",
 			outcome="error",
 			actor=manager_user,
-			detail=(
-				f"refused: schema_version mismatch "
-				f"(row={row_schema}, server={SCHEMA_VERSION})"
-			),
+			detail=(f"refused: schema_version mismatch (row={row_schema}, server={SCHEMA_VERSION})"),
 		)
 		row.save(ignore_permissions=True)
 		frappe.db.commit()
@@ -522,11 +508,8 @@ def retry(name: str) -> dict[str, Any]:
 				data=replay_args["data"],
 				offline_id=replay_args["offline_id"],
 				device_id=replay_args["device_id"],
-				opening_entry_offline_id=row.shift_offline_id
-				or replay_args.get("opening_entry_offline_id"),
-				material_receipt_offline_ids=replay_args.get(
-					"material_receipt_offline_ids"
-				),
+				opening_entry_offline_id=row.shift_offline_id or replay_args.get("opening_entry_offline_id"),
+				material_receipt_offline_ids=replay_args.get("material_receipt_offline_ids"),
 			)
 		elif current.entry_type == "customer":
 			result = offline_api.create_customer(
@@ -569,11 +552,8 @@ def retry(name: str) -> dict[str, Any]:
 				data=replay_args["data"],
 				offline_id=replay_args["offline_id"],
 				device_id=replay_args["device_id"],
-				opening_entry_offline_id=row.shift_offline_id
-				or replay_args.get("opening_entry_offline_id"),
-				material_receipt_offline_ids=replay_args.get(
-					"material_receipt_offline_ids"
-				),
+				opening_entry_offline_id=row.shift_offline_id or replay_args.get("opening_entry_offline_id"),
+				material_receipt_offline_ids=replay_args.get("material_receipt_offline_ids"),
 			)
 		else:
 			frappe.throw(
@@ -648,7 +628,7 @@ def dashboard_summary(window_days: int = 7) -> dict[str, Any]:
 	                    with age-bucket counts (<5m, <1h, <8h, <24h, ≥24h)
 	                    and a flag for non-editable categories.
 	  oldest_pending  : top-10 oldest entries currently in Pending Review.
-	  by_outlet       : SLA rollup per outlet — entries × oldest age in
+	  by_outlet       : SLA rollup per outlet — entries x oldest age in
 	                    minutes (joined to POS Offline Beacon for the
 	                    cashier→outlet mapping).
 	  by_cashier      : per-cashier rollup of Pending Review counts.
@@ -749,9 +729,7 @@ def dashboard_summary(window_days: int = 7) -> dict[str, Any]:
 		)
 		entry["total"] += 1
 		entry["buckets"][bucket] += 1
-		entry["oldest_age_minutes"] = max(
-			entry["oldest_age_minutes"], cint(r.age_minutes)
-		)
+		entry["oldest_age_minutes"] = max(entry["oldest_age_minutes"], cint(r.age_minutes))
 
 	# --- Oldest pending top-N ----------------------------------------
 	# Already sorted ascending by creation above; top 10 is good for the
@@ -877,9 +855,7 @@ def dashboard_summary(window_days: int = 7) -> dict[str, Any]:
 		# only surface categories that have BOTH a policy entry and a
 		# registered validator — policy-only categories would cause the
 		# API to refuse with "no structured editor".
-		"editable_categories": sorted(
-			set(EDIT_POLICY.keys()) & set(CATEGORY_VALIDATORS.keys())
-		),
+		"editable_categories": sorted(set(EDIT_POLICY.keys()) & set(CATEGORY_VALIDATORS.keys())),
 	}
 
 
@@ -906,9 +882,7 @@ def bulk_retry(names: list | str) -> dict[str, Any]:
 		try:
 			names = json.loads(names)
 		except json.JSONDecodeError:
-			frappe.throw(
-				_("names must be a JSON array string"), frappe.ValidationError
-			)
+			frappe.throw(_("names must be a JSON array string"), frappe.ValidationError)
 	if not isinstance(names, list):
 		frappe.throw(_("names must be a list"), frappe.ValidationError)
 	if not names:
@@ -989,18 +963,14 @@ def bulk_void(names: list | str, reason: str) -> dict[str, Any]:
 		try:
 			names = json.loads(names)
 		except json.JSONDecodeError:
-			frappe.throw(
-				_("names must be a JSON array string"), frappe.ValidationError
-			)
+			frappe.throw(_("names must be a JSON array string"), frappe.ValidationError)
 	if not isinstance(names, list):
 		frappe.throw(_("names must be a list"), frappe.ValidationError)
 	if not names:
 		return {"results": [], "summary": {"ok": 0, "error": 0, "total": 0}}
 	if len(names) > 100:
 		frappe.throw(
-			_("Bulk void cap exceeded ({0} entries). Cap is 100 per call.").format(
-				len(names)
-			),
+			_("Bulk void cap exceeded ({0} entries). Cap is 100 per call.").format(len(names)),
 			frappe.ValidationError,
 		)
 	if not (reason or "").strip():
@@ -1124,9 +1094,8 @@ def lookup_resolution(
 	# rather than frappe.get_all because get_all can't OR two clauses on
 	# different fields without falling back to query expressions.
 	osr = frappe.qb.DocType("POSpire Offline Sync Review")
-	q = (
-		frappe.qb.from_(osr)
-		.select(osr.name, osr.offline_id, osr.status, osr.resolved_doctype, osr.resolved_doc_name)
+	q = frappe.qb.from_(osr).select(
+		osr.name, osr.offline_id, osr.status, osr.resolved_doctype, osr.resolved_doc_name
 	)
 	id_or_name = None
 	if ids:
@@ -1198,13 +1167,9 @@ def void_entry(name: str, reason: str) -> dict[str, Any]:
 		)
 	manager_user = frappe.session.user
 
-	current_status = frappe.db.get_value(
-		"POSpire Offline Sync Review", name, "status", for_update=True
-	)
+	current_status = frappe.db.get_value("POSpire Offline Sync Review", name, "status", for_update=True)
 	if not current_status:
-		frappe.throw(
-			_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError
-		)
+		frappe.throw(_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError)
 	if current_status in ("Resolved", "Voided"):
 		frappe.throw(
 			_("Cannot void from terminal status {0}.").format(current_status),
@@ -1440,9 +1405,7 @@ def _validate_stock_edit(
 		idx = ip.get("index")
 		if not isinstance(idx, int) or idx < 0 or idx >= len(cart_items):
 			frappe.throw(
-				_("items[].index {0} is out of range (cart has {1} items)").format(
-					idx, len(cart_items)
-				),
+				_("items[].index {0} is out of range (cart has {1} items)").format(idx, len(cart_items)),
 				frappe.ValidationError,
 			)
 		row_payload = cart_items[idx]
@@ -1523,11 +1486,7 @@ def _validate_targeted_field_edit(
 	new_value = patch.get("value")
 	# Type-match guard. None on either side is permissive (queued field
 	# may legitimately be null; manager may legitimately null it out).
-	if (
-		old_value is not None
-		and new_value is not None
-		and type(old_value) is not type(new_value)
-	):
+	if old_value is not None and new_value is not None and type(old_value) is not type(new_value):
 		frappe.throw(
 			_(
 				"Type mismatch on {0}: queued value is {1}, new value is {2}. "
@@ -1623,14 +1582,11 @@ def edit_payload(
 		for_update=True,
 	)
 	if not current:
-		frappe.throw(
-			_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError
-		)
+		frappe.throw(_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError)
 	if current.status not in ("Pending Review", "In Review"):
 		frappe.throw(
 			_(
-				"Cannot edit from status {0}. Only Pending Review / In Review "
-				"rows accept payload edits."
+				"Cannot edit from status {0}. Only Pending Review / In Review rows accept payload edits."
 			).format(current.status),
 			frappe.ValidationError,
 		)
@@ -1649,10 +1605,7 @@ def edit_payload(
 	caller_roles = set(frappe.get_roles())
 	if not (caller_roles & allowed_roles):
 		frappe.throw(
-			_(
-				"Your role does not allow editing {0} entries. Required: any of "
-				"{1}. Caller has: {2}."
-			).format(
+			_("Your role does not allow editing {0} entries. Required: any of {1}. Caller has: {2}.").format(
 				current.error_category,
 				", ".join(sorted(allowed_roles)),
 				", ".join(sorted(caller_roles)) or "(none)",
@@ -1725,9 +1678,7 @@ def edit_payload(
 	return {
 		"name": row.name,
 		"status": row.status,
-		"changes": [
-			{"field": f, "before": b, "after": a} for (f, b, a) in changes
-		],
+		"changes": [{"field": f, "before": b, "after": a} for (f, b, a) in changes],
 		"outcome": "ok" if changes else "noop",
 	}
 
@@ -1759,9 +1710,7 @@ def revert_to_original(name: str, reason: str) -> dict[str, Any]:
 		for_update=True,
 	)
 	if not current:
-		frappe.throw(
-			_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError
-		)
+		frappe.throw(_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError)
 	if current.status not in ("Pending Review", "In Review"):
 		frappe.throw(
 			_("Cannot revert from status {0}.").format(current.status),
@@ -1867,18 +1816,13 @@ def dry_run_replay(name: str) -> dict[str, Any]:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(
-			_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError
-		)
+		frappe.throw(_("Recovery entry {0} not found").format(name), frappe.DoesNotExistError)
 	if row.status in ("Resolved", "Voided"):
 		frappe.throw(
 			_("Cannot dry-run a {0} entry.").format(row.status),
 			frappe.ValidationError,
 		)
-	if (
-		row.get("schema_version")
-		and cint(row.get("schema_version")) != SCHEMA_VERSION
-	):
+	if row.get("schema_version") and cint(row.get("schema_version")) != SCHEMA_VERSION:
 		return {
 			"outcome": "error",
 			"error_category": "schema_mismatch",
@@ -1961,8 +1905,7 @@ def dry_run_replay(name: str) -> dict[str, Any]:
 				data=payload,
 				offline_id=dry_offline_id,
 				device_id=device_id,
-				opening_entry_ref=row.shift_offline_id
-				or payload.get("opening_entry_offline_id"),
+				opening_entry_ref=row.shift_offline_id or payload.get("opening_entry_offline_id"),
 			)
 		elif row.entry_type == "return":
 			result = offline_api.create_return(
@@ -2013,7 +1956,7 @@ def dry_run_replay(name: str) -> dict[str, Any]:
 
 @frappe.whitelist()
 def get_metrics(window_hours: int = 24) -> dict[str, Any]:
-	"""24h × category × cashier/outlet aggregates for monitoring.
+	"""24h x category x cashier/outlet aggregates for monitoring.
 
 	Distinct from `dashboard_summary` (which is the manager-facing
 	cards): this endpoint is shaped for monitoring / alerting consumers
@@ -2076,9 +2019,7 @@ def get_metrics(window_hours: int = 24) -> dict[str, Any]:
 	)
 	terminal_row = (terminal[0] if terminal else {}) or {}
 
-	legal_hold_count = cint(
-		frappe.db.count("POSpire Offline Sync Review", {"legal_hold": 1})
-	)
+	legal_hold_count = cint(frappe.db.count("POSpire Offline Sync Review", {"legal_hold": 1}))
 
 	return {
 		"window_hours": window_hours,
@@ -2089,9 +2030,7 @@ def get_metrics(window_hours: int = 24) -> dict[str, Any]:
 				"retry_error": cint(r.retry_error),
 				"retry_total": cint(r.retry_total),
 				"success_rate": (
-					round(cint(r.retry_ok) / cint(r.retry_total), 3)
-					if cint(r.retry_total) > 0
-					else None
+					round(cint(r.retry_ok) / cint(r.retry_total), 3) if cint(r.retry_total) > 0 else None
 				),
 			}
 			for r in retry_metrics
@@ -2254,9 +2193,7 @@ def export_activity(
 			parent_total = actual_row_counts.get(recovery_name, len(group))
 			earliest_idx = cint(group[0].row_idx) if group else None
 			anchor_in_scope = (
-				earliest_idx is not None
-				and parent_min is not None
-				and earliest_idx == parent_min
+				earliest_idx is not None and parent_min is not None and earliest_idx == parent_min
 			)
 			complete_chain = anchor_in_scope and len(group) == parent_total
 			if not complete_chain:
@@ -2295,9 +2232,7 @@ def export_activity(
 					outcome=row.outcome or "",
 					detail=row.detail or "",
 				)
-				if (row.prev_hash or "") != expected_prev or (
-					row.entry_hash or ""
-				) != recomputed:
+				if (row.prev_hash or "") != expected_prev or (row.entry_hash or "") != recomputed:
 					ok = False
 					break_idx = i
 					break
@@ -2321,14 +2256,8 @@ def export_activity(
 	# safety conditions (truncation + completeness + per-row ok) must
 	# hold for the True branch.
 	if include_chain_verify:
-		all_chains_ok = all(
-			(cv or {}).get("ok") is True for cv in chain_verifications.values()
-		)
-		audit_grade_clean = (
-			(not truncated)
-			and verification_complete
-			and all_chains_ok
-		)
+		all_chains_ok = all((cv or {}).get("ok") is True for cv in chain_verifications.values())
+		audit_grade_clean = (not truncated) and verification_complete and all_chains_ok
 	else:
 		audit_grade_clean = False
 
@@ -2442,9 +2371,7 @@ def notify_sla_breaches() -> dict[str, Any]:
 		f"</tr>"
 		for b in breaches
 	)
-	subject = _("[POSpire] {0} offline-sync recovery entries past SLA").format(
-		len(breaches)
-	)
+	subject = _("[POSpire] {0} offline-sync recovery entries past SLA").format(len(breaches))
 	body = (
 		f"<p>{_('These entries have been Pending Review or In Review longer than the {0} min SLA threshold:').format(SLA_BREACH_MINUTES)}</p>"
 		f"<table border='1' cellspacing='0' cellpadding='6'>"
@@ -2491,10 +2418,7 @@ def archive_old_recovery_rows() -> dict[str, Any]:
 	     non-archive scope.
 	"""
 	retention_days = cint(
-		frappe.db.get_single_value(
-			"POSpire Offline Settings", "recovery_archive_after_days"
-		)
-		or 0
+		frappe.db.get_single_value("POSpire Offline Settings", "recovery_archive_after_days") or 0
 	)
 	if retention_days <= 0:
 		return {
@@ -2532,9 +2456,7 @@ def archive_old_recovery_rows() -> dict[str, Any]:
 		(retention_days,),
 		as_dict=True,
 	)
-	skipped_legal_hold = cint(
-		(skipped_legal_hold_row[0] if skipped_legal_hold_row else {}).get("n") or 0
-	)
+	skipped_legal_hold = cint((skipped_legal_hold_row[0] if skipped_legal_hold_row else {}).get("n") or 0)
 	if not candidates:
 		return {
 			"archived": 0,
@@ -2805,9 +2727,7 @@ def _coerce_parent_ids(value: list | str | None) -> str:
 			)
 		if not isinstance(parsed, list):
 			frappe.throw(
-				_("parent_offline_ids must be a JSON array, got {0}").format(
-					type(parsed).__name__
-				),
+				_("parent_offline_ids must be a JSON array, got {0}").format(type(parsed).__name__),
 				frappe.ValidationError,
 			)
 		return value

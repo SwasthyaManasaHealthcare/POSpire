@@ -21,7 +21,6 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint, now_datetime
 
-
 # Status transitions allowed by the state machine. Keys are the OLD state;
 # values are the SET of states the row may move to from there. Any other
 # transition raises a ValidationError on save. Manual edits via Desk that
@@ -115,8 +114,7 @@ class POSpireOfflineSyncReview(Document):
 				if "System Manager" not in frappe.get_roles():
 					frappe.throw(
 						_(
-							"Only System Manager can change the Legal Hold flag. "
-							"Caller {0} has roles: {1}."
+							"Only System Manager can change the Legal Hold flag. Caller {0} has roles: {1}."
 						).format(
 							frappe.session.user,
 							", ".join(sorted(frappe.get_roles())),
@@ -176,9 +174,9 @@ class POSpireOfflineSyncReview(Document):
 				allowed = ALLOWED_TRANSITIONS.get(old_status, set())
 				if self.status not in allowed:
 					frappe.throw(
-						_(
-							"Invalid status transition from {0} to {1}. Allowed: {2}."
-						).format(old_status, self.status, ", ".join(sorted(allowed)))
+						_("Invalid status transition from {0} to {1}. Allowed: {2}.").format(
+							old_status, self.status, ", ".join(sorted(allowed))
+						)
 					)
 
 	def record_edit(

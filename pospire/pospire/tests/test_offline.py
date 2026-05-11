@@ -82,7 +82,7 @@ class TestResolvers(FrappeTestCase):
 
 	def test_resolve_opening_shift_strict_throws_when_uuid_unknown(self):
 		"""Strict resolver throws `parent_not_ready` for an unknown UUID."""
-		with self.assertRaises(OfflineSubmitError) as ctx:
+		with self.assertRaises(OfflineSubmitError):
 			_resolve_opening_shift(_UUID_VALID)
 		self.assertEqual(frappe.local.response.get("error_code"), ERROR_PARENT_NOT_READY)
 
@@ -430,10 +430,10 @@ class TestPosappLiveIdempotency(FrappeTestCase):
 		"""Smoke test: passing offline_id to posapp.submit_invoice doesn't
 		blow up at the import / signature level. (Full submit-then-retry
 		integration covered by the frontend E2E plan.)"""
-		from pospire.pospire.api.posapp import submit_invoice as posapp_submit_invoice
-
 		# Inspect the function signature to ensure offline_id kwarg exists.
 		import inspect
+
+		from pospire.pospire.api.posapp import submit_invoice as posapp_submit_invoice
 
 		sig = inspect.signature(posapp_submit_invoice)
 		self.assertIn("offline_id", sig.parameters)
@@ -470,7 +470,9 @@ class TestRecoveryReplay(FrappeTestCase):
 				"doctype": "Customer",
 				"customer_name": customer_name,
 				"customer_type": "Individual",
-				"customer_group": "All Customer Groups",
+				# "Individual" is a leaf group seeded by ERPNext install;
+				# "All Customer Groups" is the is_group=1 root and is refused.
+				"customer_group": "Individual",
 				"territory": "All Territories",
 				"owner_user": "Administrator",
 				"owner": "Administrator",

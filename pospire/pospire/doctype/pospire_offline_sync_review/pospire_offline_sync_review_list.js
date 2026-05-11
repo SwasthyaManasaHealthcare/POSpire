@@ -47,9 +47,7 @@ const PRESETS = [
 	{
 		label: __("Permission errors only"),
 		filters: { status: "Pending Review", error_category: "permission_error" },
-		description: __(
-			"Cashier role config issues. Not editable — fix the role, then retry."
-		),
+		description: __("Cashier role config issues. Not editable — fix the role, then retry."),
 	},
 	{
 		label: __("Accounting period closed"),
@@ -95,19 +93,9 @@ frappe.listview_settings["POSpire Offline Sync Review"] = {
 					listview.filter_area.clear();
 					Object.entries(preset.filters).forEach(([field, value]) => {
 						if (Array.isArray(value)) {
-							listview.filter_area.add(
-								listview.doctype,
-								field,
-								value[0],
-								value[1]
-							);
+							listview.filter_area.add(listview.doctype, field, value[0], value[1]);
 						} else {
-							listview.filter_area.add(
-								listview.doctype,
-								field,
-								"=",
-								value
-							);
+							listview.filter_area.add(listview.doctype, field, "=", value);
 						}
 					});
 					listview.refresh();
@@ -297,15 +285,15 @@ frappe.listview_settings["POSpire Offline Sync Review"] = {
 								oldest
 									? frappe.utils.escape_html(
 											oldest.category + " · " + (oldest.cashier || "?")
-										)
+									  )
 									: __("queue empty")
 							}</div>
 						</div>
 						<div class="osr-card osr-card--ok">
 							<div class="osr-card__label">${__("Today's retries")}</div>
 							<div class="osr-card__value">${lastDay.ok || 0}<span class="text-muted small">/${
-								(lastDay.ok || 0) + (lastDay.error || 0)
-							}</span></div>
+						(lastDay.ok || 0) + (lastDay.error || 0)
+					}</span></div>
 							<div class="osr-card__sub">${__("ok / total · last 7d window")}</div>
 							${renderTrendSparkline(trend)}
 						</div>
@@ -355,10 +343,7 @@ function renderTrendSparkline(trend) {
 	const W = 120;
 	const H = 32;
 	const barWidth = Math.max(2, Math.floor((W - trend.length) / trend.length));
-	const maxTotal = Math.max(
-		1,
-		...trend.map((t) => (t.ok || 0) + (t.error || 0))
-	);
+	const maxTotal = Math.max(1, ...trend.map((t) => (t.ok || 0) + (t.error || 0)));
 	const bars = trend
 		.map((t, i) => {
 			const x = i * (barWidth + 1);
@@ -368,7 +353,9 @@ function renderTrendSparkline(trend) {
 			const errY = H - okH - errH;
 			const baseTick =
 				okH + errH < 1
-					? `<rect x="${x}" y="${H - 1}" width="${barWidth}" height="1" fill="#9ca3af" />`
+					? `<rect x="${x}" y="${
+							H - 1
+					  }" width="${barWidth}" height="1" fill="#9ca3af" />`
 					: "";
 			return `
 				${baseTick}
@@ -378,7 +365,9 @@ function renderTrendSparkline(trend) {
 		})
 		.join("");
 	return `
-		<svg viewBox="0 0 ${trend.length * (barWidth + 1)} ${H}" width="100%" height="32" preserveAspectRatio="none" style="margin-top: 6px; display:block;">
+		<svg viewBox="0 0 ${
+			trend.length * (barWidth + 1)
+		} ${H}" width="100%" height="32" preserveAspectRatio="none" style="margin-top: 6px; display:block;">
 			${bars}
 		</svg>
 	`;
