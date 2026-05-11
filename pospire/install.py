@@ -60,5 +60,3 @@ def seed_default_denomination_data():
 						}
 					)
 					doc.insert(ignore_permissions=True)
-
-	frappe.db.commit()
