@@ -46,7 +46,7 @@ from erpnext.stock.get_item_details import get_item_details
 from frappe import _
 from frappe.query_builder import Field
 from frappe.query_builder.functions import IfNull
-from frappe.utils import cstr, flt, getdate, nowdate
+from frappe.utils import cint, cstr, flt, getdate, nowdate
 from frappe.utils.background_jobs import enqueue
 
 from pospire.pospire.doctype.delivery_charges.delivery_charges import (
@@ -153,6 +153,14 @@ def create_opening_voucher(
 		denomination_details = _load(denomination_details)
 		new_pos_opening.set("denomination_details", denomination_details)
 		_validate_denomination_total(new_pos_opening)
+
+	# P-12 / Q-2: snapshot the POS Profile offline flags onto the opening
+	# shift so submit-time handlers read them from the shift, never from the
+	# live profile. See docs/offline/12-server-side-changes.md §3 and the
+	# `snapshot_profile_flags_onto_opening_shift` helper.
+	from pospire.pospire.api.offline import snapshot_profile_flags_onto_opening_shift
+
+	snapshot_profile_flags_onto_opening_shift(new_pos_opening)
 
 	new_pos_opening.insert(ignore_permissions=True)
 
@@ -854,11 +862,65 @@ def update_invoice(data: str | dict):
 
 
 @frappe.whitelist()
-def submit_invoice(invoice: str | dict, data: str | dict) -> dict:
+def submit_invoice(invoice: str | dict, data: str | dict, offline_id: str | None = None) -> dict:
+	# C1 — cross-path idempotency. Frontend's `call()` wrapper stamps an
+	# `offline_id` UUID on EVERY offline-capable write before sending live.
+	# If the live POST commits server-side but the cashier's network drops
+	# before the response arrives, `call()` enqueues a retry under the same
+	# offline_id. Without this guard, the retry would insert a SECOND doc,
+	# duplicating the receipt. Mirroring the offline endpoint's idempotency
+	# check here closes that race.
+	if offline_id:
+		from pospire.pospire.api.offline import _existing_by_offline_id
+
+		existing = _existing_by_offline_id("Sales Invoice", offline_id)
+		if existing:
+			doc = frappe.get_doc("Sales Invoice", existing)
+			if cint(doc.docstatus) == 1:
+				return {
+					"name": doc.name,
+					"status": doc.docstatus,
+					"was_already_submitted": True,
+				}
+			# docstatus=0 / draft from a prior partial submit — fall through
+			# and re-run the posapp logic against this existing doc instead
+			# of the one named in `invoice`. The idempotent draft case is
+			# rare (live partial replays) but symmetric with offline.py's
+			# resume-from-draft branch.
+			invoice = _load(invoice) if isinstance(invoice, str | dict) else invoice
+			if isinstance(invoice, dict):
+				invoice["name"] = doc.name
+
 	data = _load(data)
 	invoice = _load(invoice)
 	invoice_doc = frappe.get_doc("Sales Invoice", invoice.get("name"))
+	# Stamp the offline_id onto the doc so the offline replay endpoint's
+	# `_existing_by_offline_id` lookup finds this row on a network-error
+	# retry. Live writes that didn't get an offline_id (legacy callers) are
+	# unaffected.
+	if offline_id and not invoice_doc.get("pos_offline_id"):
+		invoice_doc.pos_offline_id = offline_id
 	invoice_doc.update(invoice)
+	# Belt-and-braces floor on item rate. The client clamps before sending
+	# (see Invoice.vue::clamp_item_rate), but a stale tab, replayed offline
+	# row, or third-party caller could still hand us a row where a stacked
+	# offer's discount drove `rate` below 0. ERPNext's `validate_qty` (in
+	# erpnext/controllers/status_updater.py) refuses to submit such a doc
+	# unless `Selling Settings.allow_negative_rates_for_items` is on. The
+	# Pospire policy is "an offer can take a line down to free, never below"
+	# — so we clamp here rather than flip a global flag that would let any
+	# line go negative without further guardrails.
+	for item in invoice_doc.items:
+		if flt(item.discount_percentage) > 100:
+			item.discount_percentage = 100
+		price_list_rate = flt(item.price_list_rate)
+		if price_list_rate > 0 and flt(item.discount_amount) > price_list_rate:
+			item.discount_amount = price_list_rate
+		if flt(item.rate) < 0:
+			item.rate = 0
+			# Recompute amount so rounded totals stay coherent — leaving
+			# the old (negative) amount would skew grand_total downstream.
+			item.amount = flt(item.qty) * flt(item.rate)
 	if invoice.get("posa_delivery_date"):
 		invoice_doc.update_stock = 0
 	mop_cash_list = [
@@ -1344,7 +1406,19 @@ def create_customer(
 	customer_type: str | None = None,
 	gender: str | None = None,
 	method: str = "create",
+	offline_id: str | None = None,
 ) -> dict | None:
+	# C1 — cross-path idempotency. Live + queued retries share the same
+	# `offline_id` so a network-failure replay must not insert a second
+	# Customer.
+	if offline_id and method == "create":
+		from pospire.pospire.api.offline import _existing_by_offline_id
+
+		existing = _existing_by_offline_id("Customer", offline_id)
+		if existing:
+			doc = frappe.get_doc("Customer", existing)
+			return {"name": doc.name, "customer_name": doc.customer_name}
+
 	pos_profile = _load(pos_profile_doc)
 	if method == "create":
 		is_exist = frappe.db.exists("Customer", {"customer_name": customer_name})
@@ -1371,6 +1445,11 @@ def create_customer(
 				customer.territory = territory
 			else:
 				customer.territory = "All Territories"
+			# Stamp offline_id so a network-failure replay (or the offline
+			# endpoint's own dedup) finds this row instead of inserting a
+			# duplicate.
+			if offline_id:
+				customer.pos_offline_id = offline_id
 			customer.save()
 			return {"name": customer.name}
 		else:

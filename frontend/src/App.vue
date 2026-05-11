@@ -1,18 +1,171 @@
 <template>
+	<!--
+		The banner sits at the top of v-main as an in-flow, position:sticky
+		strip. It self-publishes its rendered height to
+		--pospire-banner-height on <html> via a ResizeObserver in
+		OfflineBanner.vue, which page-level CSS subtracts from its
+		viewport-height calc so the cart's bottom edge stays aligned. No
+		hardcoded heights, no Vuetify layout-item registration, no inline
+		style binding here.
+	-->
 	<v-app class="pospire-app">
+		<!--
+			Navbar registers at the v-app level so Vuetify auto-pads <v-main>
+			for the navbar's actual height (writes to --v-layout-top). The
+			banner is NOT a layout item — it's an in-flow div inside v-main.
+		-->
+		<Navbar
+			@changePage="navigateTo($event)"
+			@open-reconciliation="reconciliationOpen = true"
+		></Navbar>
+
 		<v-main>
-			<Navbar @changePage="navigateTo($event)"></Navbar>
+			<!--
+				OfflineBanner owns its own visibility (internal v-if on the
+				bannerState !== 'hidden' predicate) and its own height
+				publication. We unconditionally render the component; when
+				it's hidden it produces no DOM and zeroes
+				--pospire-banner-height in onBeforeUnmount.
+			-->
+			<OfflineBanner
+				class="pospire-app__banner"
+				@open-reconciliation="reconciliationOpen = true"
+			/>
 			<router-view class="mx-4 md-4"></router-view>
+
+			<!--
+				Read-only Offline Sync Status — opens via the banner's
+				"Review now" button or the Navbar's pending-sync badge.
+				Replaces the old cashier-side ReconciliationWorkspace
+				(which had Retry/Void/Edit-Retry actions). All recovery
+				actions now live in Desk under Sales Manager / System
+				Manager authority — this dialog only shows the cashier
+				the status of their handed-off entries.
+			-->
+			<v-dialog v-model="reconciliationOpen" max-width="900" scrollable>
+				<OfflineSyncStatus />
+			</v-dialog>
 		</v-main>
 	</v-app>
 </template>
 
 <script>
 import Navbar from "@/components/Navbar.vue";
+import OfflineBanner from "@/components/offline/OfflineBanner.vue";
+import OfflineSyncStatus from "@/components/offline/OfflineSyncStatus.vue";
+import connectivity from "@/offline/connectivity";
+import { initOfflineStorage } from "@/offline/db";
+import { registerReadCache } from "@/offline/runtime";
+import { DexieMetadataReadCache } from "@/offline/read-cache";
+import {
+	scheduler as syncScheduler,
+	migrateLegacyNeedsReviewEntries,
+} from "@/offline/sync";
+import { startBeacon, stopBeacon } from "@/offline/beacon";
 
 export default {
 	components: {
 		Navbar,
+		OfflineBanner,
+		OfflineSyncStatus,
+	},
+	data() {
+		return {
+			reconciliationOpen: false,
+			offlineDisabled: false,
+		};
+	},
+	async mounted() {
+		// Bootstrap the offline storage layer: opens Dexie, seeds device_id,
+		// generates the encryption key (D-24), starts the health probe.
+		// On failure (e.g. crypto.subtle unavailable, IndexedDB blocked) we
+		// boot in offline-disabled mode rather than crashing the SPA.
+		try {
+			await initOfflineStorage();
+		} catch (err) {
+			this.offlineDisabled = true;
+			// eslint-disable-next-line no-console
+			console.error(
+				"[App] initOfflineStorage failed; running in offline-disabled mode",
+				err,
+			);
+			// Skip the rest — without storage, scheduler / connectivity have
+			// nothing to do.
+			return;
+		}
+
+		// Wire the Dexie-backed read cache. DexieMetadataReadCache layers an
+		// in-memory Map over the existing `metadata` IndexedDB table (rows
+		// prefixed "rc:") so cached reads (customer groups, territories, genders)
+		// survive page reloads — cashiers who go offline after at least one
+		// online session still see populated dropdowns.
+		registerReadCache(new DexieMetadataReadCache());
+
+		// Start the connectivity detector so it drives the banner state.
+		connectivity.start();
+
+		// Start the outbox sync scheduler. Acquires the Web Locks API leader
+		// lock; only the leader tab drains. Other tabs read state passively
+		// via BroadcastChannel("pospire-offline").
+		syncScheduler.start().catch((err) => {
+			// eslint-disable-next-line no-console
+			console.warn("[App] syncScheduler.start failed", err);
+		});
+
+		// Phase 1c: one-shot boot-time migration. Devices upgrading from
+		// a pre-recovery-doctype client may have `needs_review` rows
+		// already in their local outbox; the new code path uploads them
+		// to the server-side `POSpire Offline Sync Review` queue. The
+		// scheduler's cycle preamble would also pick these up on the
+		// next wake, but doing it explicitly at boot gives an immediate
+		// summary in the console and avoids the up-to-30s wait. Fire-
+		// and-forget — failures here aren't fatal because the cycle
+		// preamble is the safety net.
+		migrateLegacyNeedsReviewEntries()
+			.then((res) => {
+				if (res.attempted > 0) {
+					// eslint-disable-next-line no-console
+					console.info(
+						`[App] handed off ${res.attempted} legacy needs_review entr${res.attempted === 1 ? "y" : "ies"} to the server-side review queue`,
+					);
+				}
+			})
+			.catch((err) => {
+				// eslint-disable-next-line no-console
+				console.warn(
+					"[App] migrateLegacyNeedsReviewEntries failed (non-fatal — cycle preamble will retry)",
+					err,
+				);
+			});
+
+		// B5 — observability beacon. Starts a 5-min ping that includes queue
+		// depth + oldest pending age + last sync outcome. Pos.vue updates the
+		// outlet/shift/user context via setBeaconContext when a shift opens.
+		try {
+			startBeacon();
+		} catch (err) {
+			// eslint-disable-next-line no-console
+			console.warn("[App] startBeacon failed", err);
+		}
+	},
+	beforeUnmount() {
+		// Clean teardown of background timers + in-flight fetches when the
+		// SPA is being torn down (e.g. tab close / Frappe logout).
+		try {
+			stopBeacon();
+		} catch {
+			/* idempotent */
+		}
+		try {
+			syncScheduler.stop();
+		} catch {
+			/* idempotent */
+		}
+		try {
+			connectivity.stop();
+		} catch {
+			/* idempotent */
+		}
 	},
 	methods: {
 		navigateTo(page) {

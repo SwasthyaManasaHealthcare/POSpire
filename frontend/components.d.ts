@@ -20,6 +20,8 @@ declare module 'vue' {
     Navbar: typeof import('./src/components/Navbar.vue')['default']
     NewAddress: typeof import('./src/components/pos/NewAddress.vue')['default']
     OffersModal: typeof import('./src/components/pos/OffersModal.vue')['default']
+    OfflineBanner: typeof import('./src/components/offline/OfflineBanner.vue')['default']
+    OfflineSyncStatus: typeof import('./src/components/offline/OfflineSyncStatus.vue')['default']
     OpeningDialog: typeof import('./src/components/pos/OpeningDialog.vue')['default']
     PaidInvoice: typeof import('./src/components/pos/PaidInvoice.vue')['default']
     Pay: typeof import('./src/components/payments/Pay.vue')['default']

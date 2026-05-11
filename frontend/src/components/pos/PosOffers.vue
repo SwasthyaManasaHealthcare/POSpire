@@ -38,10 +38,14 @@
 						<td :colspan="headers.length">
 							<v-row class="mt-2">
 								<v-col v-if="item.description">
+									<!-- `white-space: pre-line` preserves cashier-visible
+									     newlines in the offer description without rendering
+									     stored HTML (XSS guard — the description is set in
+									     Desk; we don't trust it as HTML at render time). -->
 									<div
 										class="text-primary"
-										v-html="handleNewLine(item.description)"
-									></div>
+										style="white-space: pre-line"
+									>{{ item.description }}</div>
 								</v-col>
 								<v-col v-if="item.offer == 'Give Product'">
 									<v-autocomplete

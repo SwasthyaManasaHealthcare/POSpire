@@ -80,10 +80,13 @@
 												>
 													Description:
 												</div>
+												<!-- See PosOffers.vue note: `pre-line` preserves
+												     cashier-visible newlines without rendering
+												     stored HTML (XSS guard at render time). -->
 												<div
 													class="text-body-2"
-													v-html="handleNewLine(item.description)"
-												></div>
+													style="white-space: pre-line"
+												>{{ item.description }}</div>
 											</v-col>
 											<v-col
 												v-if="item.offer == 'Give Product'"

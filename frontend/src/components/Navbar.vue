@@ -45,6 +45,66 @@
       </v-toolbar-title>
 
       <v-spacer></v-spacer>
+      <!--
+        Offline pending-sync badge. Hidden when queuedCount === 0. Reads
+        from @/stores/outbox (Pinia reactive facade over Dexie liveQuery).
+        Clickable: emits `open-reconciliation` so the parent can route to the
+        OfflineSyncStatus dialog. That dialog is fully read-only — it
+        shows handed-off entries (with their server OSR-... IDs so the
+        cashier can give one to a manager), local rows still awaiting
+        handoff, and rows currently in flight. Recovery actions
+        (Retry / Void) live in Desk for Sales Manager / System Manager.
+      -->
+      <div v-if="queuedCount > 0" class="sync-badge-wrapper">
+        <v-chip class="sync-badge" variant="tonal" color="warning" size="small" clickable
+          :title="__('Tap to view pending and review queue')" @click="$emit('open-reconciliation')">
+          <v-icon start size="small">mdi-cloud-sync-outline</v-icon>
+          {{ queuedCount }} {{ __('pending') }}
+        </v-chip>
+      </div>
+      <!--
+        Compact inline connectivity pill. Sits next to the profile chip so the
+        cashier has an always-visible status indicator even when the wide
+        OfflineBanner subtitle is clipped on narrow viewports. Online state is
+        rendered as a quiet green dot (no text); offline / degraded states get
+        labels so they read at a glance. Click is wired to the same
+        reconciliation workspace the badge below uses.
+      -->
+      <div class="connectivity-pill-wrapper">
+        <v-chip
+          v-if="connectionQuality === 'offline'"
+          class="connectivity-pill"
+          variant="tonal"
+          color="error"
+          size="small"
+          :title="__('You are offline — sales continue locally')"
+        >
+          <v-icon start size="small">mdi-cloud-off-outline</v-icon>
+          {{ __('Offline') }}
+        </v-chip>
+        <v-chip
+          v-else-if="connectionQuality === 'degraded'"
+          class="connectivity-pill"
+          variant="tonal"
+          color="warning"
+          size="small"
+          :title="__('Connectivity unstable — saving locally')"
+        >
+          <v-icon start size="small">mdi-access-point-network-off</v-icon>
+          {{ __('Unstable') }}
+        </v-chip>
+        <v-chip
+          v-else
+          class="connectivity-pill connectivity-pill--online"
+          variant="tonal"
+          color="success"
+          size="small"
+          :title="__('Online')"
+        >
+          <v-icon start size="small">mdi-check-circle-outline</v-icon>
+          {{ __('Online') }}
+        </v-chip>
+      </div>
       <div class="user-info">
         <v-chip class="user-chip pospire-chip-neutral" variant="tonal" color="grey-darken-2">
           <v-icon start size="small">mdi-account-circle</v-icon>
@@ -106,6 +166,14 @@
           </v-card>
         </v-menu>
       </div>
+      <!--
+        OfflineBanner used to live in v-app-bar's `extension` slot, but
+        Vuetify auto-reserves the default extension height even when the
+        banner v-if'd itself out (online state) — leaving a phantom gap
+        above the page content. The banner now mounts at the v-app level
+        in App.vue as its own layout item, which collapses cleanly when
+        hidden.
+      -->
     </v-app-bar>
     <v-navigation-drawer v-model="drawer" v-model:mini-variant="mini" class="modern-sidebar" width="280" temporary>
       <!-- Company Header Section -->
@@ -155,11 +223,28 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { storeToRefs } from "pinia";
+import { call } from "@/utils/call";
 import hardwareUtils from "@/utils/hardwareUtils";
+import { useOutboxStore } from "@/stores/outbox";
+import { useConnectivityStore } from "@/stores/connectivity";
+
 export default {
-  // components: {MyPopup},
   mixins: [hardwareUtils],
+  emits: ["changePage", "open-reconciliation"],
+  setup() {
+    // Surfaces the outbox depth on the navbar (pending + in-flight). Hidden
+    // in the template when queuedCount is 0 so the navbar is unchanged in
+    // the steady-state online path.
+    const outbox = useOutboxStore();
+    const { queuedCount } = storeToRefs(outbox);
+    // Compact inline status pill — separate from the full-width OfflineBanner
+    // so cashiers always have an at-a-glance indicator in the navbar even on
+    // narrow viewports where the banner subtitle gets ellipsised.
+    const connectivity = useConnectivityStore();
+    const { connectionQuality } = storeToRefs(connectivity);
+    return { queuedCount, connectionQuality };
+  },
   data() {
     return {
       drawer: false,
@@ -613,6 +698,42 @@ export default {
 
 .user-info {
   margin-right: 8px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.sync-badge-wrapper {
+  margin-right: 10px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.sync-badge {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.connectivity-pill-wrapper {
+  margin-right: 10px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+.connectivity-pill {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+/*
+ * Online pill is intentionally low-key: same chip shape as offline/degraded
+ * for layout stability (no jumping when the network flaps), but muted so it
+ * doesn't distract during the steady-state happy path.
+ */
+.connectivity-pill--online {
+  opacity: 0.7;
 }
 
 .user-chip {
@@ -627,6 +748,12 @@ export default {
   height: 40px;
   border-radius: 8px;
   transition: all 0.2s ease;
+}
+
+.text-center {
+  height: 100%;
+  display: flex;
+  align-items: center;
 }
 
 .menu-button:hover {

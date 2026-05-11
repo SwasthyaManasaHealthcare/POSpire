@@ -261,22 +261,45 @@ export default {
 	});
 
 	this.eventBus.on("register_pos_profile", (data) => {
-	this.pos_profile = data.pos_profile;
-	this.denominations_enabled = this.pos_profile.custom_enable_cash_denominations || false;
-	if (!this.pos_profile.hide_expected_amount) {
-		this.headers.push({
-			title: __("Expected Amount"),
-			value: "expected_amount",
-			align: "end",
-			sortable: false,
-		});
-		this.headers.push({
-			title: __("Difference"),
-			value: "difference",
-			align: "end",
-			sortable: false,
-		});
-	}
+		this.pos_profile = data.pos_profile;
+		this.denominations_enabled = this.pos_profile.custom_enable_cash_denominations || false;
+		// Reset to base columns each time — this event fires multiple times
+		// (snapshot hydration + opening dialog), and push()ing without a guard
+		// duplicates the optional columns on every firing.
+		this.headers = [
+			{
+				title: __("Mode of Payment"),
+				value: "mode_of_payment",
+				align: "start",
+				sortable: true,
+			},
+			{
+				title: __("Opening Amount"),
+				align: "center",
+				sortable: true,
+				value: "opening_amount",
+			},
+			{
+				title: __("Closing Amount"),
+				value: "closing_amount",
+				align: "center",
+				sortable: true,
+			},
+		];
+		if (!this.pos_profile.hide_expected_amount) {
+			this.headers.push({
+				title: __("Expected Amount"),
+				value: "expected_amount",
+				align: "end",
+				sortable: false,
+			});
+			this.headers.push({
+				title: __("Difference"),
+				value: "difference",
+				align: "end",
+				sortable: false,
+			});
+		}
 	});
 	},
 };

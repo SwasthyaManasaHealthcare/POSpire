@@ -34,7 +34,12 @@ app_include_js = ["/assets/pospire/js/pos_approval_desk.js"]
 # include js in page
 # page_js = {"page" : "public/js/file.js"}
 
-# SPA routing — serves pospire.html for all /pospire/* paths
+# SPA routing — serves pospire.html for all /pospire/* paths.
+# Service Worker assets (sw.js, offline.html) are served at root scope via
+# their own www/ page modules — see pospire/www/sw.{js,py} and
+# pospire/www/offline.{html,py}. No website_route_rules entry needed for
+# them because Frappe's TemplatePage resolver matches the URL filename
+# against pospire/www/<filename> directly.
 website_route_rules = [
 	{"from_route": "/pospire/<path:app_path>", "to_route": "pospire"},
 ]
@@ -143,6 +148,13 @@ doc_events = {
 		"on_update": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 		"on_trash": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 	},
+	# POS Offline Recovery Log is immutable post-insert (audit record).
+	# Immutability of captured fields is enforced by the class-level before_save
+	# hook in pos_offline_recovery_log.POSOfflineRecoveryLog; hook-level on_update
+	# would fire post-save where get_doc_before_save() is unreliable.
+	"POS Offline Recovery Log": {
+		"on_trash": "pospire.pospire.doctype.pos_offline_recovery_log.pos_offline_recovery_log.prevent_delete",
+	},
 }
 
 # Scheduled Tasks
@@ -172,6 +184,16 @@ scheduler_events = {
 			"pospire.pospire.api.approval.expire_stale_requests",
 		],
 	},
+	# P2-19 / P2-27: daily housekeeping for the recovery queue. The
+	# notifier runs first thing in the morning so SLA breaches surface
+	# during the working window; archival runs in the off-hours so the
+	# delete pass doesn't compete with cashier traffic.
+	"daily": [
+		"pospire.pospire.api.recovery.notify_sla_breaches",
+	],
+	"daily_long": [
+		"pospire.pospire.api.recovery.archive_old_recovery_rows",
+	],
 }
 
 # Testing
@@ -324,6 +346,21 @@ fixtures = [
 					"Sales Invoice-custom_deleted_pos_items",
 					"POS Profile-custom_assortment",
 					"POS Profile-custom_denomination",
+					"Sales Invoice-pos_offline_id",
+					"Sales Invoice-pos_device_id",
+					"Sales Invoice-pos_opening_shift_offline_id",
+					"Sales Invoice-pos_material_receipt_offline_ids",
+					"POS Opening Shift-pos_offline_id",
+					"POS Opening Shift-pos_device_id",
+					"POS Opening Shift-pos_profile_snapshot_allow_negative_stock",
+					"POS Opening Shift-pos_profile_snapshot_allow_add_to_stock_at_pos",
+					"POS Closing Shift-pos_offline_id",
+					"POS Closing Shift-pos_device_id",
+					"POS Closing Shift-variance_at_close",
+					"POS Closing Shift-variance_at_sync",
+					"Stock Entry-pos_offline_id",
+					"Stock Entry-pos_device_id",
+					"Customer-pos_offline_id",
 				),
 			]
 		],

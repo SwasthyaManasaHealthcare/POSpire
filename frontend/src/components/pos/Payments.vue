@@ -414,27 +414,27 @@
 							<template v-slot:item="{ props, item }">
 								<v-list-item v-bind="props">
 									<v-list-item-title class="text-primary text-subtitle-1">
-										<div v-html="item.raw.address_title"></div>
+										<div>{{ item.raw.address_title }}</div>
 									</v-list-item-title>
 									<v-list-item-title>
-										<div v-html="item.raw.address_line1"></div>
+										<div>{{ item.raw.address_line1 }}</div>
 									</v-list-item-title>
 									<v-list-item-subtitle
 										v-if="item.raw.custoaddress_line2mer_name"
 									>
-										<div v-html="item.raw.address_line2"></div>
+										<div>{{ item.raw.address_line2 }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.city">
-										<div v-html="item.raw.city"></div>
+										<div>{{ item.raw.city }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.state">
-										<div v-html="item.raw.state"></div>
+										<div>{{ item.raw.state }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.country">
-										<div v-html="item.raw.mobile_no"></div>
+										<div>{{ item.raw.mobile_no }}</div>
 									</v-list-item-subtitle>
 									<v-list-item-subtitle v-if="item.raw.address_type">
-										<div v-html="item.raw.address_type"></div>
+										<div>{{ item.raw.address_type }}</div>
 									</v-list-item-subtitle>
 								</v-list-item>
 							</template>
@@ -721,7 +721,8 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
+import { OfflineReturnDeferredError } from "@/utils/call-registry";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { toast } from "vue3-toastify"; // <-- make sure this is imported
@@ -886,14 +887,72 @@ export default {
 			data["is_cashback"] = this.is_cashback;
 
 			const vm = this;
-			const r = await call("pospire.pospire.api.posapp.submit_invoice", {
-				data: data,
-				invoice: this.invoice_doc,
-			});
+			// forceQueue (T10): if the cart's customer was offline-created,
+			// the live posapp.submit_invoice can't resolve "OFFLINE-CUST-..."
+			// to a real customer link. Route through the offline endpoint
+			// instead — it pops customer_offline_id, looks up the synced
+			// customer, and substitutes the real name. forceQueue is a no-op
+			// when the registry entry isn't offline-capable.
+			const hasOfflineCustomer = !!this.invoice_doc?.customer_offline_id;
+			let r = null;
+			try {
+				r = await call({
+					method: "pospire.pospire.api.posapp.submit_invoice",
+					args: {
+						data: data,
+						invoice: this.invoice_doc,
+					},
+					intent: "write",
+					forceQueue: hasOfflineCustomer,
+				});
+			} catch (err) {
+				if (err instanceof OfflineReturnDeferredError) {
+					toast.warning(
+						__("Sales Return requires an online connection in this phase."),
+					);
+					return;
+				}
+				toast.error(err && err.message ? err.message : "Error submitting invoice");
+				return;
+			}
 			if (!r) {
 				toast.error("Error submitting invoice");
 				return;
 			}
+
+			// Offline-enqueue ack (see @/offline/types: OutboxEnqueueAck).
+			// Shape: { offline: true, offline_id, provisional_name, status: 'enqueued' }.
+			// This is NOT a failure — the server is unreachable and the outbox
+			// took custody of the write. We print a provisional receipt with the
+			// PENDING SYNC watermark and clear the cart so the cashier can ring
+			// the next sale.
+			if (r && r.offline === true && r.status === "enqueued") {
+				const provisionalName = r.provisional_name;
+				// Tag the invoice object in-memory so any consumer that fires
+				// off `set_last_invoice` / print paths can render the pending
+				// sync state. The server-side `name` is null until sync.
+				vm.invoice_doc.name = provisionalName;
+				vm.invoice_doc.pospire_pending_sync = true;
+				vm.invoice_doc.pospire_offline_id = r.offline_id;
+
+				if (print) {
+					vm.handleProvisionalPrint(vm.invoice_doc);
+				}
+				vm.customer_credit_dict = [];
+				vm.redeem_customer_credit = false;
+				vm.is_cashback =
+					vm.pos_profile && vm.pos_profile.use_cashback == 1 ? true : false;
+				vm.sales_person = "";
+				vm.eventBus.emit("set_last_invoice", provisionalName);
+				toast.info(`Queued ${provisionalName} — will sync when online`);
+				playSound("submit");
+				vm.addresses = [];
+				vm.invoice_doc = "";
+				vm.eventBus.emit("clear_invoice", { submitted: true });
+				vm.back_to_invoice();
+				return;
+			}
+
 			if (print) {
 				vm.handlePrint(vm.invoice_doc.name);
 			}
@@ -938,6 +997,81 @@ export default {
 			} catch (err) {
 				console.error("Hardware config check failed:", err);
 				this.load_print_page(invoice_name); // fallback
+			}
+		},
+		/**
+		 * Provisional-receipt printer for offline-enqueued sales. The server
+		 * has not assigned a real invoice name yet, so printing via the
+		 * printview URL (which does a server lookup) would 404. Instead we
+		 * open a minimal HTML document rendered from the in-memory invoice
+		 * payload with an OFFLINE-<short_id> header and a "PENDING SYNC"
+		 * watermark. On reconnect, the reprint action in the receipt history
+		 * will print the final server-named receipt.
+		 *
+		 * See docs/offline/11-ui-ux.md §6 for the design contract.
+		 */
+		handleProvisionalPrint(invoice) {
+			try {
+				const win = window.open("", "ProvisionalReceipt");
+				if (!win) {
+					toast.warning("Pop-up blocked; provisional receipt not printed.");
+					return;
+				}
+				const lines = (invoice.items || [])
+					.map((it) => {
+						const name = it.item_name || it.item_code || "";
+						const qty = it.qty || 0;
+						const rate = it.rate || 0;
+						const amount = it.amount || qty * rate;
+						return (
+							'<tr>' +
+							'<td>' + String(name).replace(/</g, "&lt;") + '</td>' +
+							'<td style="text-align:right">' + qty + '</td>' +
+							'<td style="text-align:right">' + Number(rate).toFixed(2) + '</td>' +
+							'<td style="text-align:right">' + Number(amount).toFixed(2) + '</td>' +
+							'</tr>'
+						);
+					})
+					.join("");
+				const total = invoice.rounded_total || invoice.grand_total || 0;
+				const header = invoice.name || "OFFLINE-PENDING";
+				const html =
+					'<!doctype html><html><head><meta charset="utf-8">' +
+					'<title>' + header + '</title>' +
+					'<style>' +
+					'body{font-family:monospace;padding:12px;position:relative;}' +
+					'.wm{position:fixed;top:40%;left:0;right:0;text-align:center;font-size:48px;color:rgba(200,0,0,0.15);transform:rotate(-25deg);pointer-events:none;font-weight:700;letter-spacing:4px;}' +
+					'.hdr{font-weight:700;font-size:14px;border-bottom:2px dashed #333;padding-bottom:6px;margin-bottom:8px;}' +
+					'table{width:100%;border-collapse:collapse;font-size:12px;}' +
+					'th,td{padding:2px 4px;}' +
+					'.tot{border-top:1px dashed #333;margin-top:6px;padding-top:6px;font-weight:700;font-size:13px;display:flex;justify-content:space-between;}' +
+					'.note{margin-top:12px;font-size:10px;color:#666;}' +
+					'</style></head><body>' +
+					'<div class="wm">PENDING SYNC</div>' +
+					'<div class="hdr">' + header + '</div>' +
+					'<table><thead><tr><th style="text-align:left">Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>' +
+					'<tbody>' + lines + '</tbody></table>' +
+					'<div class="tot"><span>Total</span><span>' + Number(total).toFixed(2) + '</span></div>' +
+					'<div class="note">This receipt will be replaced by the final receipt once synced.</div>' +
+					'</body></html>';
+				win.document.open();
+				win.document.write(html);
+				win.document.close();
+				// Give the browser a moment to lay out before triggering print.
+				win.addEventListener(
+					"load",
+					() => {
+						try {
+							win.print();
+						} catch (e) {
+							console.error("Provisional print trigger failed:", e);
+						}
+					},
+					true,
+				);
+			} catch (err) {
+				console.error("Provisional print failed:", err);
+				toast.error("Could not print provisional receipt.");
 			}
 		},
 		set_full_amount(idx) {
@@ -1058,9 +1192,16 @@ export default {
 			if (!vm.invoice_doc) {
 				return;
 			}
-			const r = await call("pospire.pospire.api.posapp.get_customer_addresses", {
-				customer: vm.invoice_doc.customer,
-			});
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_customer_addresses", {
+					customer: vm.invoice_doc.customer,
+				});
+			} catch {
+				// Offline: leave previously-loaded addresses in place; new
+				// address fetches resume on reconnect.
+				return;
+			}
 			if (r) {
 				vm.addresses = r;
 			} else {
@@ -1090,7 +1231,14 @@ export default {
 			if (vm.pos_profile.posa_local_storage && localStorage.sales_persons_storage) {
 				vm.sales_persons = JSON.parse(localStorage.getItem("sales_persons_storage"));
 			}
-			const r = await call("pospire.pospire.api.posapp.get_sales_person_names");
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_sales_person_names");
+			} catch {
+				// Offline: localStorage hydration above (if enabled) leaves a
+				// usable list. Otherwise the dropdown is empty until reconnect.
+				return;
+			}
 			if (r) {
 				vm.sales_persons = r;
 				if (vm.pos_profile.posa_local_storage) {

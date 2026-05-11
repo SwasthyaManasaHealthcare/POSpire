@@ -137,7 +137,8 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
+import connectivity from "@/offline/connectivity";
 import format from "@/utils/format";
 import { toast } from "vue3-toastify";
 import { amountRules, isAmountValid } from "@/utils/validation";
@@ -259,16 +260,99 @@ export default {
 			this.eventBus.emit("close_opening_dialog");
 		},
 		async get_opening_dialog_data() {
+			// `get_opening_dialog_data` is registered as offline:false, so a
+			// cold-start with no connectivity throws here and the dialog
+			// stays empty (companies/pos_profiles/payments_methods all
+			// blank). submit_dialog then immediately bails on the empty
+			// payments check, leaving the cashier stuck.
+			//
+			// Two-level offline fallback:
+			//   1. Cache the live response under `pospire.opening_dialog_data_cache`
+			//      on success. Reuse it directly when the live call fails.
+			//   2. If even the cache is missing, synthesise a minimal payload
+			//      from the broader `pospire.opening_shift_snapshot` (which
+			//      Pos.vue caches from the last `check_opening_shift`). It
+			//      contains the full POS Profile doc — enough to derive the
+			//      single-company / single-profile / payments shape.
+			const DIALOG_CACHE_KEY = "pospire.opening_dialog_data_cache";
+			const SHIFT_SNAPSHOT_KEY = "pospire.opening_shift_snapshot";
 			const vm = this;
-			const r = await call("pospire.pospire.api.posapp.get_opening_dialog_data", {});
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_opening_dialog_data", {});
+				if (r) {
+					try {
+						localStorage.setItem(DIALOG_CACHE_KEY, JSON.stringify(r));
+					} catch {
+						/* quota / privacy mode — non-fatal */
+					}
+				}
+			} catch (err) {
+				console.warn(
+					"[OpeningDialog] get_opening_dialog_data failed; trying offline fallbacks",
+					err,
+				);
+				try {
+					const cached = localStorage.getItem(DIALOG_CACHE_KEY);
+					if (cached) r = JSON.parse(cached);
+				} catch {
+					/* corrupt cache */
+				}
+				if (!r) {
+					r = this.synthesizeDialogDataFromShiftSnapshot(SHIFT_SNAPSHOT_KEY);
+				}
+			}
+
 			if (r) {
-				r.companies.forEach((element) => {
+				(r.companies || []).forEach((element) => {
 					vm.companies.push(element.name);
 				});
 				vm.company = vm.companies[0];
-				vm.pos_profiles_data = r.pos_profiles_data;
-				vm.payments_method_data = r.payments_method;
+				vm.pos_profiles_data = r.pos_profiles_data || [];
+				vm.payments_method_data = r.payments_method || [];
 				vm.denomination_config = r.denomination_config || {};
+			}
+		},
+
+		/**
+		 * Build a minimal `get_opening_dialog_data` shape from the cached
+		 * opening-shift snapshot. The shape mirrors what the live endpoint
+		 * returns so the watchers in this component (which key off
+		 * `pos_profiles_data` company match and `payments_method_data` parent
+		 * match) can do their thing without code changes.
+		 *
+		 * Only used when both the live call AND the dialog cache are missing —
+		 * i.e. the device booted cold offline. The snapshot's pos_profile
+		 * carries the full payments[] child table with mode_of_payment +
+		 * default flag, which is enough to populate the dialog's payment-
+		 * method rows.
+		 */
+		synthesizeDialogDataFromShiftSnapshot(snapshotKey) {
+			try {
+				const raw = localStorage.getItem(snapshotKey);
+				if (!raw) return null;
+				const snap = JSON.parse(raw);
+				if (!snap?.pos_profile) return null;
+				const profile = snap.pos_profile;
+				const companyName = profile.company || snap.company?.name;
+				if (!companyName) return null;
+				return {
+					companies: [{ name: companyName }],
+					pos_profiles_data: [{ name: profile.name, company: companyName }],
+					payments_method: (profile.payments || []).map((p) => ({
+						parent: profile.name,
+						mode_of_payment: p.mode_of_payment,
+						currency: profile.currency,
+						default: p.default,
+					})),
+					// Denomination config isn't on the shift snapshot — leaving
+					// it empty disables the denomination grid offline. The
+					// cashier enters straight cash amounts; reconciliation at
+					// online sync verifies totals.
+					denomination_config: {},
+				};
+			} catch {
+				return null;
 			}
 		},
 		async submit_dialog() {
@@ -326,6 +410,60 @@ export default {
 				denomination_details = JSON.stringify(rows);
 			}
 
+			// F2: offline shift open. The previous online session left a
+			// snapshot under `pospire.opening_shift_snapshot` (Pos.vue) that
+			// holds the full POS Profile + Company.
+			//
+			// M2 fix: load the snapshot UNCONDITIONALLY before the call().
+			// `connectivity.isOnline()` is the pre-call snapshot of state —
+			// but call() can decide to enqueue mid-flight (e.g. forceQueue,
+			// or a network blip after the connectivity probe). If the
+			// snapshot was only read in the `offline` branch, the
+			// offline-ack handler downstream would dereference a null
+			// snapshot when running through an "online but enqueued" path.
+			let snapshot = null;
+			try {
+				const raw = localStorage.getItem("pospire.opening_shift_snapshot");
+				if (raw) snapshot = JSON.parse(raw);
+			} catch {
+				snapshot = null;
+			}
+
+			const offline = !connectivity.isOnline();
+			if (offline) {
+				// F5: chained-shifts hard block. Once 3 opening_entries are
+				// stacked unsynced, refuse to enqueue a 4th (we keep the cap
+				// at 3 = "warn at 2, block at 3"). Forces the cashier to
+				// reconnect before further opens.
+				try {
+					const { useOutboxStore } = await import("@/stores/outbox");
+					const outbox = useOutboxStore();
+					if ((outbox.unsyncedOpeningCount ?? 0) >= 3) {
+						this.is_loading = false;
+						toast.error(
+							__("Cannot open another shift offline — 3 shifts are already waiting to sync. Reconnect to clear them first."),
+							{ autoClose: 7000 },
+						);
+						return;
+					}
+				} catch (err) {
+					// Store unavailable (e.g. SSR / pre-init). Fail open: better
+					// to allow a fourth than to block legitimate opens because
+					// of an init race. The reconciliation workspace would catch
+					// any actual oversync.
+					console.warn("[OpeningDialog] chained-shifts gate skipped", err);
+				}
+
+				if (!snapshot || !snapshot.pos_profile || !snapshot.company) {
+					this.is_loading = false;
+					toast.warning(
+						__("Opening a shift offline needs a recent online session on this device. Reconnect and open one shift online first."),
+						{ autoClose: 6000 },
+					);
+					return;
+				}
+			}
+
 			try {
 				const r = await call("pospire.pospire.api.posapp.create_opening_voucher", {
 					pos_profile: this.pos_profile,
@@ -333,6 +471,70 @@ export default {
 					balance_details,
 					denomination_details,
 				});
+
+				// Offline-enqueue ack — synthesise the data shape from the cached
+				// snapshot + the provisional shift. The cashier can start selling
+				// immediately; subsequent invoices stamp pos_opening_shift_offline_id
+				// so the server resolves to the real shift name on sync.
+				if (r && r.offline === true && r.status === "enqueued") {
+					// M2 — defensive null guard. We pre-loaded the snapshot
+					// unconditionally before the call() (so this path covers
+					// both "offline → enqueued" and "online classified →
+					// enqueued via forceQueue / mid-flight network blip"),
+					// but pre-load may have failed (private mode, quota,
+					// corrupt JSON, malformed shape). An offline-ack arriving
+					// without a USABLE snapshot means we can't fire
+					// register_pos_data with the rich shape downstream
+					// components expect (pos_profile.payments, company doc
+					// fields). Surface a clear error instead of crashing on
+					// `snapshot.pos_profile.name`.
+					const okSnapshot =
+						snapshot &&
+						snapshot.pos_profile &&
+						typeof snapshot.pos_profile === "object" &&
+						snapshot.pos_profile.name &&
+						snapshot.company &&
+						(typeof snapshot.company === "object"
+							? snapshot.company.name
+							: snapshot.company);
+					if (!okSnapshot) {
+						this.is_loading = false;
+						toast.error(
+							__("Shift queued offline but the cached profile is missing. Reload while online to refresh the snapshot before opening another shift."),
+							{ autoClose: 8000 },
+						);
+						return;
+					}
+					const provisionalShift = {
+						name: r.provisional_name,
+						pos_offline_id: r.offline_id,
+						pos_profile: this.pos_profile,
+						company: this.company,
+						posting_date: new Date().toISOString().slice(0, 10),
+						period_start_date: new Date().toISOString().replace("T", " ").slice(0, 19),
+						user: snapshot.pos_opening_shift?.user || "",
+						balance_details,
+						denomination_details: denomination_details
+							? JSON.parse(denomination_details)
+							: [],
+						pospire_pending_sync: true,
+					};
+					const data = {
+						pos_opening_shift: provisionalShift,
+						pos_profile: snapshot.pos_profile,
+						company: snapshot.company,
+						stock_settings: snapshot.stock_settings || { allow_negative_stock: 0 },
+					};
+					this.eventBus.emit("register_pos_data", data);
+					this.eventBus.emit("set_company", data.company);
+					toast.info(
+						__("Shift opened offline — will sync when online."),
+						{ autoClose: 4000 },
+					);
+					this.close_opening_dialog();
+					return;
+				}
+
 				if (r) {
 					this.eventBus.emit("register_pos_data", r);
 					this.eventBus.emit("set_company", r.company);

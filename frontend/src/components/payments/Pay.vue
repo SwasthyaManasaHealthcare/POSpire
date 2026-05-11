@@ -4,7 +4,12 @@
 			<v-col md="8" cols="12" class="pb-2 pr-0">
 				<v-card
 					class="modern-payments-card mx-auto mt-3 overflow-y-auto"
-					style="max-height: 94vh; height: 94vh"
+					:style="{
+					height:
+						'calc(100dvh - var(--v-layout-top, 48px) - var(--pospire-banner-height, 0px) - 24px)',
+					'max-height':
+						'calc(100dvh - var(--v-layout-top, 48px) - var(--pospire-banner-height, 0px) - 24px)',
+				}"
 				>
 					<!-- PaidInvoice dialog has no visible DOM footprint; placed outside layout divs -->
 					<PaidInvoice></PaidInvoice>
@@ -350,7 +355,12 @@
 			<v-col md="4" cols="12" class="pb-3">
 				<v-card
 					class="modern-totals-card mx-auto mt-3"
-					style="max-height: 94vh; height: 94vh"
+					:style="{
+					height:
+						'calc(100dvh - var(--v-layout-top, 48px) - var(--pospire-banner-height, 0px) - 24px)',
+					'max-height':
+						'calc(100dvh - var(--v-layout-top, 48px) - var(--pospire-banner-height, 0px) - 24px)',
+				}"
 				>
 					<div class="totals-header mb-4">
 						<v-card class="modern-section-card" variant="flat">
@@ -506,7 +516,7 @@
 </template>
 
 <script>
-import { call } from "frappe-ui";
+import { call } from "@/utils/call";
 import { toast } from "vue3-toastify";
 
 import format from "@/utils/format";
