@@ -227,7 +227,9 @@ export function drainLog(): ConnectivityLogEntry[] {
  *   - On success: bypasses the THRESHOLD_ONLINE 3-success rule and transitions
  *     directly to ONLINE if currently OFFLINE/DEGRADED. Rationale — the user
  *     made an affirmative request; if a single ping succeeds we trust it,
- *     and auto-detection takes over from there.
+ *     and auto-detection takes over from there. Also bypasses the D-31
+ *     debounce so the banner clears immediately — the debounce guards against
+ *     automated polling flap; it should not delay explicit cashier recovery.
  *   - On failure: increments consecutiveFailures normally (no special
  *     treatment). May or may not push to OFFLINE depending on threshold.
  *
@@ -266,6 +268,11 @@ export async function forcePingNow(): Promise<boolean> {
 		state.consecutiveSuccesses = THRESHOLD_ONLINE;
 		if (!isStateOnline(state.status)) {
 			transition("online", "force_ping_success");
+			// Notify immediately — the D-31 debounce inside transition() guards
+			// against automated polling flap and must not delay an explicit
+			// cashier tap. The debounced setTimeout fires later but is a no-op
+			// (Vue ref equality prevents a re-render on unchanged state).
+			notify();
 		}
 		return true;
 	} catch {
