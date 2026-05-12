@@ -302,6 +302,12 @@ function nextCadence(): number {
 	const multiplier = hidden ? BACKGROUND_MULTIPLIER : 1;
 
 	if (isStateOnline(state.status)) {
+		// Pending-offline fast path: first failure recorded but threshold not
+		// yet reached. Use the offline start cadence (5s) so the confirmation
+		// ping arrives quickly instead of waiting the full 30s online interval.
+		if (state.consecutiveFailures > 0) {
+			return CADENCE_OFFLINE_START_MS * multiplier;
+		}
 		const elapsed = Date.now() - lastRealSuccessAt;
 		if (elapsed < RECENT_SUCCESS_SKIP_MS) {
 			return Math.max(CADENCE_ONLINE_MS - elapsed, 1000) * multiplier;
