@@ -574,14 +574,18 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				: [];
 
 			// Build the POS Closing Shift doc the offline endpoint will insert.
-			const nowIso = new Date().toISOString();
-			const todayIsoDate = nowIso.slice(0, 10);
+			// Use local time, NOT toISOString() (UTC). Frappe datetimes are
+			// site-local; mixing UTC here produces period_end_date < period_start_date
+			// on UTC-behind-local timezones (e.g. IST = UTC+5:30).
+			const _d = new Date();
+			const _p = (n: number) => String(n).padStart(2, "0");
+			const nowLocal = `${_d.getFullYear()}-${_p(_d.getMonth() + 1)}-${_p(_d.getDate())} ${_p(_d.getHours())}:${_p(_d.getMinutes())}:${_p(_d.getSeconds())}`;
+			const todayLocal = nowLocal.slice(0, 10);
 			const doc: Record<string, unknown> = {
 				doctype: "POS Closing Shift",
-				period_start_date:
-					cs.period_start_date ?? nowIso.replace("T", " ").slice(0, 19),
-				period_end_date: nowIso.replace("T", " ").slice(0, 19),
-				posting_date: cs.posting_date ?? todayIsoDate,
+				period_start_date: cs.period_start_date ?? nowLocal,
+				period_end_date: nowLocal,
+				posting_date: cs.posting_date ?? todayLocal,
 				user: cs.user ?? user,
 				pos_profile: cs.pos_profile,
 				company: cs.company,
@@ -624,6 +628,14 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				ownerUser: user,
 			};
 		},
+	},
+
+	// -----------------------------------------------------------------------
+	// Shift helpers — live only (server is authoritative for submitted invoices)
+	// -----------------------------------------------------------------------
+	"pospire.pospire.api.offline.get_shift_invoice_offline_ids": {
+		intent: "read",
+		offline: false,
 	},
 
 	// -----------------------------------------------------------------------

@@ -1,26 +1,9 @@
 /**
- * B5 — Multi-outlet observability beacon.
+ * Multi-outlet observability beacon.
  *
- * Every BEACON_INTERVAL_MS the device snapshots its offline-pipeline health
- * and POSTs to `pospire.pospire.api.offline.record_beacon`. The server
- * inserts a `POS Offline Beacon` row; B6's central dashboard queries those.
- *
- * Why a dedicated beacon (not piggy-backing on `log_batch`):
- *   - log_batch writes to Error Log — text-only, hard to aggregate.
- *   - The dashboard wants typed fields (queue_depth, online flag, outlet
- *     name) that an Error Log row can't expose to a Frappe Report Builder
- *     view. Cost is a tiny doctype.
- *
- * Behaviour rules:
- *   - We DON'T fire while offline — the call would just bounce off the
- *     connectivity gate. Instead, we capture the next online tick and fire
- *     a single immediate beacon so the server sees the "I just came back"
- *     signal without a 5-minute lag.
- *   - We send a beacon on visibility change (tab refocused) so dashboards
- *     don't have to wait the full interval to see a manager opening the
- *     POS after a coffee break.
- *   - We back off on persistent failures: 3 consecutive failures pauses
- *     beaconing for 30 minutes (still respecting connectivity changes).
+ * Every BEACON_INTERVAL_MS, snapshots offline-pipeline health and POSTs to
+ * `record_beacon`. Fires immediately on reconnect and on tab visibility change.
+ * Backs off 30 min after 3 consecutive failures.
  */
 
 import { call } from "@/utils/call";
@@ -121,11 +104,7 @@ export function startBeacon(hints: BeaconContextHints = {}): void {
 		document.addEventListener("visibilitychange", onVisibilityChange);
 	}
 
-	// Connectivity transition: when we come back online from a long-offline
-	// window, fire one beacon immediately so the dashboard's "last seen"
-	// timestamp catches up. The connectivity module's onChange fires on
-	// state transitions (online | offline | degraded), so we filter to
-	// online-arrivals only.
+	// Fire immediately on reconnect so "last seen" catches up without waiting the full interval.
 	state.connectivityUnsub = connectivity.onChange((cs) => {
 		if (cs && cs.status === "online") {
 			void fireBeacon();
@@ -231,27 +210,18 @@ async function assembleBeacon(): Promise<Record<string, unknown>> {
 		.where("status")
 		.equals("needs_review")
 		.count();
-	// Tombstone count — handed off to the server review queue, awaiting
-	// manager retry / void. Phase 1g — surfaces the size of the manager
-	// backlog per device on the observability dashboard.
+	// Count handed-off tombstones awaiting manager retry/void.
 	const handedOff = await db.outbox
 		.where("status")
 		.equals("handed_off")
 		.count();
 
-	// Oldest pending — actual MIN(enqueued_at) across rows in pending
-	// statuses. Note: Dexie's `.where(...).first()` returns the first
-	// match in primary-key (offline_id) order, NOT the smallest
-	// enqueued_at — that produced incorrect staleness numbers. Bounded
-	// scan + in-memory min mirrors the pattern in stores/outbox.ts.
+	// Actual MIN(enqueued_at) — Dexie .first() uses primary-key order, not time.
 	const oldest = await minEnqueuedAtForStatuses(["enqueued", "retry_pending"]);
 	const oldestMinutes =
 		oldest === null ? null : Math.max(0, Math.floor((Date.now() - oldest) / 60_000));
 
-	// Oldest handed-off tombstone (by enqueued_at — the original moment
-	// the cashier created the queued write). Captures the WORST-case
-	// staleness from the cashier's perspective: how long has my oldest
-	// stuck transaction been sitting? Operational SLA signal.
+	// Oldest stuck tombstone by original enqueue time — worst-case staleness signal.
 	const oldestHandedOff = await minEnqueuedAtForStatuses(["handed_off"]);
 	const oldestHandedOffMinutes =
 		oldestHandedOff === null
@@ -281,17 +251,7 @@ async function assembleBeacon(): Promise<Record<string, unknown>> {
 	};
 }
 
-/**
- * True MIN(enqueued_at) across rows in any of the given statuses, or
- * null if there are no matching rows. Bounded scan in JS rather than
- * relying on Dexie's `.first()`, which walks the index in primary-key
- * order (offline_id is a UUID — order is effectively random) instead
- * of by enqueued_at. With queue depths in the low thousands at most
- * the scan cost is negligible vs. the wrong-answer risk.
- *
- * Bounded at 5000 rows per status to defend against pathological depths.
- * In healthy operation queue depth stays well under that.
- */
+/** True MIN(enqueued_at) across rows in any given status. Bounded scan — Dexie .first() uses primary-key order, not time. */
 async function minEnqueuedAtForStatuses(
 	statuses: string[],
 	cap = 5000,

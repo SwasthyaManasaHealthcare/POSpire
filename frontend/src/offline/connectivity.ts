@@ -1,22 +1,10 @@
 /**
- * Connectivity detector — single source of truth for "is the server
- * reachable right now." Feeds `@/utils/call`, the outbox sync scheduler, and
- * the UI banner (04-connectivity-detection.md).
+ * Connectivity detector — single source of truth for "is the server reachable."
+ * Feeds call(), the sync scheduler, and the UI banner.
  *
- * Design:
- *   - Three signals feed one state machine: `navigator.onLine`, heartbeat
- *     ping (pospire.pospire.api.offline.ping), observed fetch outcomes.
- *   - Asymmetric thresholds: 2 consecutive ping failures → OFFLINE;
- *     3 consecutive ping successes → ONLINE. Going online is riskier.
- *   - No recursive setTimeout that outlives the component; `stop()` is
- *     called on `Pos.vue` unmount.
- *   - DEGRADED is observable in the type union but is NOT currently emitted
- *     by `reportRequestOutcome` — Phase 1 ships binary online/offline only.
- *     Wiring DEGRADED is a Phase 2 task: introduce an RTT band (e.g. > 500ms
- *     for N consecutive pings → DEGRADED) and a corresponding transition.
- *     The OfflineBanner already has the amber DEGRADED state styled and
- *     copy-ready. See docs/offline/04-connectivity-detection.md §3 and the
- *     Phase 2 plan in docs/offline/16-phase-plan.md.
+ * Three signals drive one state machine: navigator.onLine, heartbeat ping, and
+ * observed fetch outcomes. Asymmetric thresholds: 2 failures → OFFLINE,
+ * 3 successes → ONLINE. stop() must be called on Pos.vue unmount.
  */
 
 import { frappeRequest } from "frappe-ui";
@@ -61,10 +49,10 @@ const CADENCE_OFFLINE_MAX_MS = 120_000;
 const BACKGROUND_MULTIPLIER = 2; // document.hidden → 2× cadence
 const RECENT_SUCCESS_SKIP_MS = 30_000; // skip ping if real call succeeded within
 
-const DEBOUNCE_DEFAULT_MS = 10_000; // D-31
-const DEBOUNCE_ESCALATED_MS = 30_000; // D-31
-const FLAP_WINDOW_MS = 5 * 60 * 1000; // D-31
-const FLAP_THRESHOLD_COUNT = 3; // D-31
+const DEBOUNCE_DEFAULT_MS = 10_000;
+const DEBOUNCE_ESCALATED_MS = 30_000;
+const FLAP_WINDOW_MS = 5 * 60 * 1000;
+const FLAP_THRESHOLD_COUNT = 3;
 
 const CONNECTIVITY_LOG_CAP = 500; // metadata.connectivity_log cap
 
@@ -113,7 +101,7 @@ export function getState(): ConnectivityState {
 	return { ...state };
 }
 
-/** Alias matching the spec (04-connectivity-detection.md §8). */
+/** Alias for getState(). */
 export function snapshot(): ConnectivityState {
 	return getState();
 }
@@ -135,11 +123,7 @@ export function onChange(fn: ConnectivityListener): () => void {
 	return () => listeners.delete(fn);
 }
 
-/**
- * Report the outcome of a real request issued by `@/utils/call`. This is
- * how real traffic drives transitions faster than pings alone
- * (04-connectivity-detection.md §6).
- */
+/** Report outcome of a real request; drives transitions faster than pings alone. */
 export function reportRequestOutcome(outcome: RequestOutcome): void {
 	switch (outcome) {
 		case "success":
@@ -174,11 +158,7 @@ export function clearManualOverride(): void {
 	notify();
 }
 
-/**
- * Start the detector. Idempotent. Should be called from `Pos.vue`'s
- * `onMounted` (or equivalent) so the lifecycle is owned by a single
- * component (P-6).
- */
+/** Start the detector. Idempotent. Called from Pos.vue onMounted. */
 export function start(): void {
 	if (started) return;
 	started = true;
@@ -219,22 +199,9 @@ export function drainLog(): ConnectivityLogEntry[] {
 }
 
 /**
- * User-initiated immediate ping. Bypasses the polling cadence so a cashier
- * who knows the network is back can recover faster than waiting for the next
- * scheduled ping.
- *
- * Semantics differ from auto-detection:
- *   - On success: bypasses the THRESHOLD_ONLINE 3-success rule and transitions
- *     directly to ONLINE if currently OFFLINE/DEGRADED. Rationale — the user
- *     made an affirmative request; if a single ping succeeds we trust it,
- *     and auto-detection takes over from there. Also bypasses the D-31
- *     debounce so the banner clears immediately — the debounce guards against
- *     automated polling flap; it should not delay explicit cashier recovery.
- *   - On failure: increments consecutiveFailures normally (no special
- *     treatment). May or may not push to OFFLINE depending on threshold.
- *
- * Returns whether the ping itself succeeded (not whether the state changed).
- * The banner uses this to drive a "still offline" toast on failure.
+ * User-initiated ping. Bypasses the 3-success threshold and debounce on success
+ * so the banner clears immediately. On failure, increments consecutiveFailures normally.
+ * Returns whether the ping succeeded (not whether state changed).
  */
 export async function forcePingNow(): Promise<boolean> {
 	const startedAt = Date.now();
@@ -263,15 +230,11 @@ export async function forcePingNow(): Promise<boolean> {
 			lastKnownServerVersion = res.server_version;
 		}
 
-		// User-initiated success: jump the threshold so a single tap recovers.
 		state.consecutiveFailures = 0;
 		state.consecutiveSuccesses = THRESHOLD_ONLINE;
 		if (!isStateOnline(state.status)) {
 			transition("online", "force_ping_success");
-			// Notify immediately — the D-31 debounce inside transition() guards
-			// against automated polling flap and must not delay an explicit
-			// cashier tap. The debounced setTimeout fires later but is a no-op
-			// (Vue ref equality prevents a re-render on unchanged state).
+			// Bypass the debounce — explicit cashier tap should clear the banner immediately.
 			notify();
 		}
 		return true;
@@ -466,7 +429,7 @@ function logConnectivity(
 }
 
 // ---------------------------------------------------------------------------
-// Spec-matching named export (04-connectivity-detection.md §8)
+// Named export
 // ---------------------------------------------------------------------------
 
 export const connectivity = {

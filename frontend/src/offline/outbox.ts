@@ -1,24 +1,12 @@
 /**
- * Outbox state machine (Agent 3).
+ * Outbox state machine.
  *
- * Sits on top of `repos/outbox.ts` (which owns Dexie CRUD) and implements the
- * write-ahead log's semantics: enqueue, ready-pickup, retry/backoff, error
- * classification, dependency resolution, void. The sync scheduler
- * (`sync.ts`) consumes this module; no component talks to it directly.
+ * Implements the write-ahead log semantics on top of `repos/outbox.ts`: enqueue,
+ * ready-pickup, retry/backoff, error classification, dependency resolution, void.
+ * Consumed by sync.ts; no component talks to it directly.
  *
- * Principles honoured (see 01-architecture-principles.md):
- *   P-5:  every queued write carries an immutable `offline_id`.
- *   P-7:  dependency order is mandatory — parents must be `synced` before a
- *         child ships.
- *   P-8:  strict closure — `closing_entry` waits for every invoice in its
- *         shift.
- *   P-11: `posting_date` and `owner_user` are snapshotted at enqueue time.
- *   P-14: persistence failures propagate; we never swallow.
- *
- * The enqueue path is atomic — a single Dexie transaction that writes the
- * outbox row and, for `closing_entry`, updates the owning `shifts` row. If
- * the transaction fails, the caller gets an error and surfaces it to the UI;
- * we do NOT retry the write silently (P-14).
+ * Enqueue is atomic — a single Dexie transaction. Persistence failures propagate;
+ * never swallowed silently.
  */
 
 import {
@@ -70,13 +58,7 @@ const VALID_TYPES = new Set<OutboxType>([
 	"closing_entry",
 ]);
 
-/**
- * Terminal error categories — the scheduler may call `markNeedsReview` with
- * any of these. `network_error` / `server_5xx` / `timeout` /
- * `idempotent_duplicate` are transient and must not land here. NOTE:
- * `integrity_mismatch` is a `blocked_reason`, not a `last_error_category`
- * (see `markIntegrityMismatch`).
- */
+/** Terminal error categories. Transient ones (network_error, server_5xx, timeout) must not land here. */
 const NEEDS_REVIEW_CATEGORIES = new Set<NonNullable<LastErrorCategory>>([
 	"validation_error",
 	"permission_error",
@@ -137,16 +119,7 @@ export interface SyncEvent {
 type SyncListener = (event: SyncEvent) => void;
 const syncListeners = new Set<SyncListener>();
 
-/**
- * Subscribe to sync notifications. Returns an unsubscribe.
- *
- * The primary consumer is the Vue layer: when a customer that was created
- * offline finally syncs, the cart's in-memory `customer` may still hold the
- * provisional `OFFLINE-CUST-...` name. Subscribers receive
- * `{ offline_id, server_doc_name, provisional_name }` and rename the
- * reference. The fan-in is small (Customer.vue + Invoice.vue), so a simple
- * Set is enough — no need for a typed event bus.
- */
+/** Subscribe to sync notifications. Returns an unsubscribe. */
 export function onSynced(fn: SyncListener): () => void {
 	syncListeners.add(fn);
 	return () => syncListeners.delete(fn);
@@ -502,32 +475,10 @@ export async function markNeedsReview(
 }
 
 /**
- * Vacuum transition: the server-side `POSpire Offline Sync Review` row
- * for this tombstone has reached a terminal state (Resolved or Voided)
- * and we can upgrade the local row accordingly. The tombstone has done
- * its job — children that referenced this offline_id can now resolve
- * their dependency check (Resolved → server doc exists, name returned;
- * Voided → blocked forever, but at least no longer ambiguous).
- *
- * Cascade behaviour:
- *   Resolved → cascade-unblock dependents (mirrors `markSynced`'s
- *     behavior for the natural-success path). Without this, children
- *     blocked on this parent stay `blocked_reason: waiting_for_parent`
- *     forever, because `evaluateParents` only runs from `nextReady` and
- *     `listReady` excludes blocked rows. Cascading clears the block
- *     flag so the next drain cycle picks them up; if other parents
- *     are still pending, evaluateParents re-blocks the child then.
- *     Also fires `notifySynced` (mirrors `markSynced`) so the cart
- *     swaps a provisional customer name for the real server name when
- *     the manager resolves the customer via the recovery UI.
- *   Voided → do NOT cascade. The parent never produced a server doc,
- *     so the child's offline_id reference is unresolvable. Per the
- *     runbook (§2.3), managers void descendants explicitly. Cascading
- *     here would just thrash: clear → re-evaluate → re-block as
- *     `waiting_for_parent` → noisy audit + wasted cycles.
- *
- * Idempotent. Calling twice with the same target is a no-op the second
- * time because the source state will no longer be `handed_off`.
+ * Upgrade a `handed_off` tombstone after the server-side review row reaches a terminal state.
+ * Resolved → synced (cascade-unblocks dependents + fires notifySynced).
+ * Voided → voided (no cascade — descendants must be voided explicitly).
+ * Idempotent.
  */
 export async function markVacuumed(
 	offlineId: string,
@@ -570,21 +521,8 @@ export async function markVacuumed(
 }
 
 /**
- * Tombstone transition: the row was successfully handed off to the
- * server-side `POSpire Offline Sync Review` queue. The local row stays
- * in IndexedDB so dependent rows (children referencing this offline_id
- * via `parent_offline_ids`, the shift's strict-closure check) can still
- * see it — but `listReady` excludes it, so the scheduler never picks it
- * up again. The `recovery_entry_name` field links to the server row so
- * the local vacuum pass can poll for resolution and eventually flip
- * this tombstone to `synced` (when the manager retries successfully) or
- * `voided` (when the manager voids).
- *
- * Idempotent: callers may invoke this multiple times with the same
- * recovery_entry_name (network retry on the handoff response). The CAS
- * pattern is unnecessary here because handoff itself is idempotent
- * server-side; if the scheduler hands off twice, both calls return the
- * same recovery row name and this transition writes the same value.
+ * Transition to `handed_off` tombstone. Row stays in IndexedDB for dependency resolution
+ * but is excluded from the drain queue. Idempotent — safe to call multiple times.
  */
 export async function markHandedOff(
 	offlineId: string,
@@ -721,17 +659,7 @@ export async function clearBlocked(offlineId: string): Promise<void> {
 	});
 }
 
-/**
- * Find all outbox rows that list `parentOfflineId` in their
- * `parent_offline_ids`, and clear their `blocked_reason` so they re-enter
- * the drain queue. Called from `markSynced` and `resetForRetry` to cascade-
- * unblock dependents when their parent transitions to a syncable state.
- *
- * `evaluateParents` re-runs at drain time, so if OTHER parents are still
- * in needs_review the row will be re-blocked then. Optimistic clearing
- * keeps the state machine moving without coupling the dependency graph
- * traversal into this helper.
- */
+/** Clear blocked_reason on rows that listed parentOfflineId as a parent. Optimistically unblocks; evaluateParents re-gates at drain time. */
 export async function clearDependentsBlockedOn(
 	parentOfflineId: string,
 ): Promise<void> {
@@ -783,12 +711,7 @@ export async function evaluateParents(
 		if (
 			parent.status === "needs_review" ||
 			parent.status === "voided" ||
-			// Tombstone for a row handed off to the server-side review queue.
-			// The work isn't done on the server yet (recovery row is Pending
-			// Review / Retrying), so this child cannot ship — its references
-			// to parent_offline_id won't resolve. The local vacuum pass
-			// flips the tombstone to `synced` once the server-side recovery
-			// row reaches Resolved, at which point the child unblocks.
+			// handed_off means the server-side recovery row is still pending; child must wait.
 			parent.status === "handed_off"
 		) {
 			blockedByParent = true;
@@ -801,24 +724,9 @@ export async function evaluateParents(
 }
 
 /**
- * Strict closure (P-8): a `closing_entry` may only ship once every invoice
- * belonging to the same shift has `status=synced`. Returns the same tri-state
- * as `evaluateParents`.
- *
- * Two scan modes:
- *   - Offline-opened shift: index seek on `shift_offline_id` (fast, uses
- *     the existing Dexie index).
- *   - Online-opened shift: `entry.shift_offline_id` is null, so the index
- *     seek would miss every sibling. Fall back to decrypting the closing's
- *     inner doc to learn the real shift name, then scan invoice rows by
- *     inner `posa_pos_opening_shift`. Cost is O(N invoice rows) with one
- *     JSON.parse per row — bounded by outbox depth, runs only when an
- *     online-opened shift's closing is in flight.
- *
- * Without the second branch a closing for an online-opened shift would
- * always report "ready" here, the scheduler would fire it immediately,
- * and the server's strict-closure orphan check would reject it as
- * siblings_not_ready. Manager would then have to void+retry manually.
+ * Gate a `closing_entry` until every invoice in the same shift is synced.
+ * Uses `shift_offline_id` index for offline-opened shifts; falls back to
+ * scanning invoice inner docs when the shift was opened online (shift_offline_id is null).
  */
 export async function evaluateClosingReadiness(
 	entry: OutboxEntry<unknown>,
@@ -903,39 +811,10 @@ function readInnerShiftName(payload: unknown): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Defensively pass payload through unchanged for the wrapper-shaped writes
- * the offline pipeline produces today.
- *
- * **Why this used to rewrite, and why it can't.**
- * The original intent was: if a parent has synced and we know its real
- * server doc name, replace the parent's offline UUID with that name in the
- * payload before sending. That sounds fine until you remember the wrapper
- * shape every offline-capable adapter produces:
- *
- *   { data: "<JSON inner doc>",            // string (NOT walked)
- *     offline_id: "<this row's UUID>",
- *     device_id: "<UUID>",
- *     opening_entry_offline_id: "<UUID>",  // PROTOCOL field — server
- *     material_receipt_offline_ids: [...]  //   resolves these to names
- *   }
- *
- * The wrapper's `opening_entry_offline_id` and `material_receipt_offline_ids`
- * elements ARE the parent UUIDs. A string-match deep-rewrite would replace
- * them with server doc names, after which the server's `_validate_uuid` /
- * `_resolve_opening_shift` / `_resolve_material_receipts` reject the
- * payload as "Invalid uuid". The server is already the authoritative
- * resolver — front-end pre-resolution is a no-op at best (inner doc lives
- * inside a JSON STRING the walker doesn't recurse into) and an active
- * sabotage at worst (wrapper protocol fields get rewritten).
- *
- * The function is kept as an explicit pass-through (not deleted) because
- * `sync.ts` calls it on every send. If a future non-wrapper outbox shape
- * needs front-end resolution, restore a *scoped* rewrite — never one that
- * walks protocol fields.
- *
- * P-7's gating still happens via `evaluateParents` + `evaluateClosingReadiness`
- * (we don't ship until parents are synced/voided). Server-side
- * `_resolve_*` then maps UUIDs to real doc names at submit time.
+ * Pass payload through unchanged. The server is the authoritative resolver of
+ * offline UUIDs to real doc names — front-end pre-resolution would corrupt
+ * wrapper protocol fields (`opening_entry_offline_id` etc.) that the server
+ * expects as UUIDs.
  */
 export async function resolvePayload<T>(
 	entry: OutboxEntry<T>,
@@ -1031,24 +910,8 @@ export async function countPending(): Promise<number> {
 }
 
 /**
- * F7 — Edit & Retry. Mutates the queued payload, re-encrypts, and re-queues
- * for the scheduler.
- *
- * Used by the per-category fix flows in the reconciliation workspace
- * (date-retry, serial-swap, detach-parent, detach-sibling). The caller
- * decrypts via `getEntry`, computes the desired payload, and hands the
- * mutated value back here. We:
- *   1. Re-encrypt under the same AAD (offline_id) so the audit hash chain
- *      stays bound to the original row identity.
- *   2. Recompute `payload_integrity_hash` so `verifyIntegrity` agrees.
- *   3. Update the indexed sibling columns `posting_date` / `parent_offline_ids`
- *      when the caller patches them (otherwise the scheduler's parent
- *      evaluator and the accounting-period check still see the old values).
- *   4. Reset status to `enqueued`, clear error fields, attempt_count=0.
- *   5. Notify enqueue listeners so the scheduler wakes immediately.
- *
- * Refuses on `voided` or `synced` rows — those are terminal. A synced row
- * already has a real server doc; the right tool is a reversal, not an edit.
+ * Edit & Retry: mutate the queued payload, re-encrypt, recompute integrity hash,
+ * reset status to enqueued, and wake the scheduler. Refuses on voided/synced rows.
  */
 export async function patchPayloadAndReset(
 	offlineId: string,
@@ -1117,11 +980,7 @@ export async function resetForRetry(offlineId: string): Promise<void> {
 	if (!stored) throw new Error(`outbox ${offlineId} not found`);
 	if (stored.status === "voided") return; // terminal — refuse to revive
 
-	// Build the post-update on-disk row, then persist it. Notify listeners
-	// with the SAME post-update shape (decrypted) — the prior version
-	// notified with the pre-update row, so subscribers (Pinia store, sync
-	// scheduler, telemetry) saw stale `status` / `last_error_category` /
-	// `attempt_count` immediately after a Retry click.
+	// Notify with post-update shape so subscribers see current status immediately.
 	const updatedStored = {
 		...stored,
 		status: "enqueued" as const,
@@ -1155,12 +1014,6 @@ function readDeviceId(): string {
 	}
 	return "unknown-device";
 }
-
-// `currentCashier` is sourced from the shared module at @/offline/cashier
-// so call-registry.ts adapters and outbox.ts agree on one implementation
-// (and one fallback ladder). The earlier two-copy state silently bypassed
-// the cookie fallback whenever an adapter pre-stamped owner_user via
-// `options.ownerUser`, since adapters used a less-safe local helper.
 
 function todayIsoDate(): string {
 	const d = new Date();
