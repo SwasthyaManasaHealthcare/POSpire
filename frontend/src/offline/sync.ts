@@ -1,26 +1,13 @@
 /**
- * Sync scheduler (Agent 3).
+ * Sync scheduler.
  *
  * Owns the drain loop that empties the outbox into the server, one entry at
  * a time, in dependency order. Leader-gated across tabs via the Web Locks
- * API (D-26) with a Dexie-lease fallback for older browsers. Pauses on
- * connectivity transitions, resumes on reconnect, and stops cleanly when
- * `Pos.vue` unmounts.
+ * API with a Dexie-lease fallback for older browsers. Pauses on connectivity
+ * transitions, resumes on reconnect, and stops cleanly when `Pos.vue` unmounts.
  *
- * Principles (see 01-architecture-principles.md):
- *   P-6:  one scheduler per device at a time. The exported singleton is
- *         intended to be `.start()`-ed from `Pos.vue` onMounted; until
- *         Phase 2 adds the component, we start at module import and never
- *         stop. Documented as a deviation below.
- *   P-7:  dependency ordered — `evaluateParents` + `evaluateClosingReadiness`
- *         gate every send.
- *   P-14: failures propagate. The scheduler classifies error categories and
- *         commits the outcome to Dexie before moving on.
- *
- * Observability: per-cycle summary appended to `metadata.sync_log`, capped
- * at 1,000 entries (05-outbox-and-sync.md §8). Uploaded to the server via
- * `pospire.pospire.api.offline.log_batch` on reconnect (wired from the
- * connectivity module's log flush; here we just append).
+ * Per-cycle summaries are appended to `metadata.sync_log` (capped at 1,000)
+ * and uploaded via `log_batch` on reconnect.
  */
 
 import { connectivity, type ConnectivityState } from "./connectivity";
@@ -85,14 +72,7 @@ const IDLE_WAKE_MS = 30_000;
  */
 const PAUSE_META_KEY = "scheduler.user_paused";
 
-/**
- * Threshold for the cashier-visible "large backlog" banner. When the
- * queue depth (pending + retry) crosses this, the OfflineSyncStatus UI
- * surfaces a one-tap Pause control so the cashier can choose between
- * draining now or pausing while they take more orders. Picked at the
- * level where a sequential drain (~1-3s/entry) starts running into
- * minutes — not a hard stop, just a heads-up.
- */
+/** Queue depth at which the UI surfaces the Pause control. */
 export const LARGE_BACKLOG_THRESHOLD = 50;
 
 // ---------------------------------------------------------------------------
@@ -150,10 +130,7 @@ export class SyncScheduler {
 	 */
 	private forceOneCycle = false;
 
-	/**
-	 * Start the scheduler. Acquires the leader lock and begins the drain loop.
-	 * Idempotent. Phase 2 will call this from `Pos.vue` onMounted.
-	 */
+	/** Start the scheduler. Acquires the leader lock and begins the drain loop. Idempotent. */
 	async start(): Promise<void> {
 		if (this.running) return this.leaderAcquired ?? Promise.resolve();
 		this.running = true;
@@ -172,7 +149,7 @@ export class SyncScheduler {
 			this.userPaused = false;
 		}
 
-		// Crash-recovery (T11): a tab close / browser crash mid-drain leaves
+		// Crash-recovery: a tab close / browser crash mid-drain leaves
 		// rows stuck in `in_flight` forever — `listReady` only picks up
 		// `enqueued` and `retry_pending`. Re-arm them as enqueued on startup
 		// so the scheduler retries; server idempotency on offline_id makes
@@ -530,15 +507,7 @@ export class SyncScheduler {
 				continue;
 			}
 
-			// Cashier-set pause (Phase 1f). Idle the same way as the
-			// kill-switch branch but with `waitForWake` instead of a
-			// fixed sleep — so `resumeSync()` / `syncNow()` can wake us
-			// immediately instead of waiting up to IDLE_WAKE_MS.
-			//
-			// `forceOneCycle` is the one-shot bypass set by `syncNow()`:
-			// when set, we consume it (clear) and fall through to run
-			// one work cycle, even though `userPaused` is true. Next
-			// iteration sees forceOneCycle=false again and idles.
+			// Cashier-set pause. `forceOneCycle` is the one-shot bypass set by `syncNow()`.
 			if (this.userPaused) {
 				if (this.forceOneCycle) {
 					this.forceOneCycle = false;
@@ -554,12 +523,7 @@ export class SyncScheduler {
 				}
 			}
 
-			// Cycle preamble (Phase 1b): drain any needs_review rows that
-			// haven't yet been handed off to the server-side review queue.
-			// This heals after a transient offline window where the
-			// in-line handoff at needs_review-classification time couldn't
-			// reach the server. Idempotent on offline_id, bounded scan,
-			// non-throwing — never derails the rest of the cycle.
+			// Drain needs_review rows not yet handed off; heals after offline windows. Non-throwing.
 			try {
 				await flushPendingHandoffs();
 			} catch (err) {
@@ -567,12 +531,7 @@ export class SyncScheduler {
 				console.warn("[sync] flushPendingHandoffs threw", err);
 			}
 
-			// Vacuum (Phase 1f): poll the server for resolution status of
-			// any local `handed_off` tombstones and upgrade them when the
-			// manager has resolved or voided. Unblocks dependent children
-			// (parent_offline_ids gate, strict-closure check) without
-			// requiring a page reload. Bounded scan + non-throwing,
-			// same as the handoff flush above.
+			// Poll server for resolved/voided tombstones and upgrade local rows. Non-throwing.
 			try {
 				await vacuumTombstones();
 			} catch (err) {
@@ -580,10 +539,7 @@ export class SyncScheduler {
 				console.warn("[sync] vacuumTombstones threw", err);
 			}
 
-			// P2-D runtime config refresh + tombstone GC. Refresh first
-			// (cheap when cached) so GC uses the latest retention window.
-			// Both are non-throwing; failures here never block the work
-			// step that follows.
+			// Refresh runtime config then run tombstone GC. Both non-throwing.
 			try {
 				await refreshRuntimeConfig();
 			} catch (err) {
@@ -680,15 +636,8 @@ export class SyncScheduler {
 						result.detail,
 					);
 				} else {
-					// Phase 1b: hand off to the server-side review queue so a
-					// Sales Manager / System Manager (not the cashier) owns
-					// the fix-up workflow. We mark needs_review FIRST so the
-					// row is in a stable terminal state even if the handoff
-					// POST itself fails — the next drain cycle re-attempts
-					// the handoff via `attemptHandoff` (which only fires on
-					// `needs_review` rows). On success, the row transitions
-					// to `handed_off` (tombstone) and stops appearing in any
-					// scheduler-driven list.
+					// Mark needs_review first (stable terminal state) before attempting
+					// handoff — the next cycle retries the handoff if it fails.
 					await markNeedsReview(
 						entry.offline_id,
 						result.category,
@@ -765,11 +714,8 @@ export class SyncScheduler {
 		);
 
 		try {
-			// F7: bypass call()'s online/offline gate. The scheduler has
-			// already (a) checked connectivity at drain-loop scope, (b) carries
-			// a resolved offline.* method, and (c) has a server-shaped payload
-			// from the outbox row. Re-entering call()'s normal flow would risk
-			// re-enqueueing if connectivity flips during the send.
+			// Bypass call()'s connectivity gate; the scheduler already verified online and
+			// holds a resolved payload — re-entering the normal flow risks re-enqueueing.
 			const res = (await call({
 				method,
 				args: {
@@ -788,16 +734,9 @@ export class SyncScheduler {
 				is_background_job?: boolean;
 			};
 
-			// F6: refuse to mark "synced" if the server response represents a
-			// not-yet-final state. posapp.submit_invoice can return a draft
-			// (docstatus !== 1) when posa_allow_submissions_in_background_job
-			// is on; treating that as synced hides any later background-job
-			// failure. Idempotency makes a retry safe — the next POST returns
-			// the same name and (eventually) docstatus=1.
-			//
-			// Customer is a non-submittable doctype (docstatus always 0). The
-			// check only applies to entry types that map to submittable Frappe
-			// doctypes (invoice, opening_entry, closing_entry, material_receipt).
+			// Refuse "synced" for non-final docstatus — submit_invoice can return
+			// docstatus=0 when background submissions are enabled. Retry is safe via idempotency.
+			// Customer is non-submittable (docstatus always 0); skip the check for that type.
 			const docstatus = typeof res.docstatus === "number" ? res.docstatus : null;
 			const isSubmittableType = entry.type !== "customer";
 			if (
@@ -1031,27 +970,9 @@ type SendResult =
 // ---------------------------------------------------------------------------
 
 /**
- * Hand off a needs_review entry to the server-side
- * `POSpire Offline Sync Review` queue, then transition the local row to
- * the `handed_off` tombstone state. Idempotent on offline_id — safe to
- * call multiple times for the same entry (the server endpoint short-
- * circuits on existing offline_id and returns the same recovery row
- * name, and `markHandedOff` is itself idempotent).
- *
- * Failure modes:
- *   - Connectivity offline / detector reports not-online: skip silently.
- *     The entry stays in `needs_review`; the next online cycle calls
- *     `flushPendingHandoffs` (built into the cycle preamble below) to
- *     try again.
- *   - 5xx / network error: caught here; entry stays in `needs_review`,
- *     retried next cycle.
- *   - Validation error from the server (e.g. unknown entry_type): logged
- *     and the entry stays in `needs_review`. A real bug — the cashier
- *     can't fix it from their device, so it surfaces in the cashier's
- *     read-only tracking view as "handoff_pending" until ops investigates.
- *
- * NEVER throws — this runs as a side-effect of needs_review classification
- * and must not derail the cycle's bookkeeping.
+ * Hand off a needs_review entry to the server-side review queue, transitioning
+ * the local row to `handed_off`. Idempotent on offline_id. Skipped while offline;
+ * flushPendingHandoffs retries on the next online cycle. Never throws.
  */
 async function attemptHandoff(
 	entry: OutboxEntry<unknown>,
@@ -1068,17 +989,8 @@ async function attemptHandoff(
 		// resolved the envelope before the send attempt). We pass it
 		// straight through; the server canonicalises and hashes.
 		//
-		// CRITICAL: pin offline_id via offlineIdempotencyKey. The default
-		// path in @/utils/call generates a fresh UUID and OVERWRITES
-		// `args.offline_id` (call.ts:445-449) — the spread order puts the
-		// generated key after our args. For most writes that's correct
-		// (offline_id is the row's idempotency key), but recovery.handoff
-		// is a meta-operation: its `offline_id` arg is the FAILED ENTRY's
-		// identity, not a fresh write key. Without this pin, the OSR row
-		// gets a random UUID while the embedded payload keeps the entry's
-		// real id — and manager Retry then submits the invoice under the
-		// OSR's bogus id, leaving the closing's strict-closure check
-		// permanently looking for the entry's real id.
+		// Pin the failed entry's offline_id, not a fresh UUID — recovery.handoff
+		// uses the original id to look up the entry server-side.
 		const res = (await call({
 			method: "pospire.pospire.api.recovery.handoff",
 			intent: "write",
@@ -1149,10 +1061,7 @@ async function flushPendingHandoffs(): Promise<void> {
 		console.warn("[sync] flushPendingHandoffs: listByStatus failed", err);
 		return;
 	}
-	// Bound the scan: if a fleet of devices has hundreds of needs_review
-	// rows piled up, we don't want a single cycle to try to drain them
-	// all at once. The cycle preamble re-runs on the next iteration so
-	// the rest get picked up over time.
+	// Bound per cycle so a large backlog doesn't hog the leader.
 	for (const entry of entries.slice(0, 50)) {
 		await attemptHandoff(
 			entry,
@@ -1164,23 +1073,9 @@ async function flushPendingHandoffs(): Promise<void> {
 }
 
 /**
- * Vacuum pass for `handed_off` tombstones. Polls the server for the
- * resolution status of each local tombstone and upgrades the local row
- * when the server-side `POSpire Offline Sync Review` row has reached a
- * terminal state:
- *
- *   server `Resolved`  →  local `handed_off` → `synced` (server_doc_name
- *                          stamped from resolved_doc_name; dependent
- *                          children unblock on next gate-check).
- *   server `Voided`    →  local `handed_off` → `voided` (children stay
- *                          blocked — manager voided deliberately).
- *   server `Pending Review` / `In Review` / `Retrying`  →  no change.
- *
- * Bounded scan (100 ids per call) and skipped while offline. The
- * server endpoint is also bounded so a malicious caller can't enumerate
- * the whole queue. Runs in the cycle preamble so it picks up manager
- * actions on the natural cycle cadence (every drain wake or every
- * 30s when idle).
+ * Poll the server for resolution status of `handed_off` tombstones and upgrade
+ * local rows: Resolved → synced (unblocks dependents), Voided → voided.
+ * Bounded scan, skipped while offline.
  */
 async function vacuumTombstones(): Promise<void> {
 	if (!connectivity.isOnline()) return;
@@ -1194,16 +1089,10 @@ async function vacuumTombstones(): Promise<void> {
 	}
 	if (entries.length === 0) return;
 
-	// Cap the lookup batch — server enforces 200 max per call. We pick
-	// 100 to leave headroom and to keep the response payload small on
-	// wire-cost-sensitive deployments. Slice instead of paginating: the
-	// next cycle will pick up the rest.
+	// Cap below server's 200-id limit; next cycle picks up remainder.
 	const slice = entries.slice(0, 100);
 	const offlineIds = slice.map((e) => e.offline_id);
-	// Parallel name list: when a tombstone's OSR was created under a
-	// divergent offline_id (historical handoff identity bug), the only
-	// stable bridge to the server row is recovery_entry_name. Send both;
-	// the server prefers offline_id match and falls back to name match.
+	// Send both ids; server prefers offline_id match, falls back to name match.
 	const recoveryEntryNames = slice.map((e) => e.recovery_entry_name ?? "");
 
 	let resolutions: Record<
@@ -1235,10 +1124,7 @@ async function vacuumTombstones(): Promise<void> {
 		const remote = resolutions?.[entry.offline_id];
 		if (!remote) continue; // Server has no record — leave tombstoned.
 		if (remote.matched_by === "recovery_entry_name") {
-			// Legacy-corruption hit: the OSR row's offline_id does not match
-			// our local entry's offline_id (handoff identity bug from a prior
-			// build). The match worked by name, so resolution is sound, but
-			// log it for visibility.
+			// Matched by name fallback — log for visibility.
 			console.warn(
 				"[sync] vacuum matched tombstone via recovery_entry_name",
 				{ local_offline_id: entry.offline_id, recovery_entry_name: entry.recovery_entry_name },
@@ -1277,7 +1163,7 @@ async function vacuumTombstones(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// P2-16 / P2-17: tombstone GC + handoff stuck escalation
+// Tombstone GC + stuck handoff escalation
 // ---------------------------------------------------------------------------
 
 /**
@@ -1333,34 +1219,8 @@ async function refreshRuntimeConfig(): Promise<void> {
 	}
 }
 
-/**
- * P2-16: garbage-collect local outbox tombstones older than the
- * retention window. Deletes rows whose status ∈ {synced, voided} AND
- * whose age (since `synced_at` for synced rows, or `enqueued_at` for
- * voided rows that never got a synced_at) exceeds
- * `client_tombstone_retention_days`.
- *
- * Safe because:
- *   1. Server-side audit (Sales Invoice / Customer / etc + the recovery
- *      row's full Activity + Edits trail) is not deleted by this.
- *   2. We only delete tombstones — never anything still in flight or
- *      in needs_review. The status check is the load-bearing safety.
- *   3. Bounded scan (1000 rows per status) prevents a pathological
- *      deep history from blocking a cycle.
- *   4. Setting `client_tombstone_retention_days = 0` disables GC
- *      entirely (we no-op).
- *
- * Idempotent + safe to call from every cycle preamble. The cost is one
- * indexed scan per status when nothing to delete; deletes happen in a
- * single Dexie transaction.
- */
-/**
- * Maximum number of tombstones we'll delete in a single GC cycle.
- * Prevents the cycle preamble from doing minutes of Dexie work in
- * pathological backlog scenarios. A fleet that builds up more than
- * this in a single retention window will catch up over the next
- * several cycles — bounded but progressing.
- */
+/** Delete synced/voided outbox rows older than `client_tombstone_retention_days`. Idempotent. */
+/** Max tombstones deleted per GC cycle — prevents pathological backlog from blocking a cycle. */
 const GC_MAX_DELETIONS_PER_CYCLE = 1000;
 
 async function gcLocalTombstones(): Promise<void> {
@@ -1417,18 +1277,7 @@ async function gcLocalTombstones(): Promise<void> {
 	}
 }
 
-/**
- * P2-17: stuck-handoff escalation. Tracks per-offline-id consecutive
- * handoff failures from `attemptHandoff` and surfaces a flag on the
- * row when it crosses the threshold. The flag goes into
- * `last_error_detail` (already in the beacon projection so it lights
- * up the dashboard). We don't transition the row to a new status —
- * just decorate it so an operator can grep beacons for "STUCK_HANDOFF".
- *
- * Reset semantics: a successful handoff (markHandedOff) implicitly
- * removes the row from `needs_review`, so the in-memory counter for
- * that offline_id self-cleans on the next listByStatus iteration.
- */
+/** Tracks per-id consecutive handoff failures; decorates the row with STUCK_HANDOFF when threshold crossed. */
 const handoffFailureCounts = new Map<string, number>();
 
 function trackHandoffOutcome(offlineId: string, ok: boolean): void {
@@ -1469,18 +1318,8 @@ function trackHandoffOutcome(offlineId: string, ok: boolean): void {
 }
 
 /**
- * Boot-time migration entry point (Phase 1c).
- *
- * Called from `App.vue` after `syncScheduler.start()` so devices upgrading
- * from a pre-Phase-1b client immediately attempt to hand off any
- * needs_review rows already sitting in their local outbox — without
- * waiting for the first scheduler wake. Idempotent: rows that have
- * already been handed off are in the `handed_off` tombstone state and
- * `listByStatus("needs_review")` skips them, so calling this on every
- * boot is safe and self-healing.
- *
- * Unlike the in-cycle preamble, this returns the count of attempted
- * handoffs so the caller can log a one-line migration summary.
+ * Boot-time flush: attempt handoff for any needs_review rows already in the local outbox.
+ * Idempotent — rows already handed off are skipped. Returns attempted count.
  */
 export async function migrateLegacyNeedsReviewEntries(): Promise<{
 	attempted: number;
@@ -1525,13 +1364,10 @@ function methodForEntry(entry: OutboxEntry<unknown>): string | null {
 		case "closing_entry":
 			return "pospire.pospire.api.offline.create_closing_entry";
 		case "return":
-			// Returns are intentionally live-only in the current phase.
-			// Keep this unmapped so any stray legacy `return` row is surfaced
-			// to needs_review instead of being replayed as a partially-wired flow.
+			// Live-only; unmapped so stray rows surface to needs_review.
 			return null;
 		case "payment":
-			// Payment entries go through the online payment pipeline in v1;
-			// offline payment enqueue is not wired.
+			// Not wired for offline; goes through the online payment pipeline.
 			return null;
 		case "cash_movement":
 			return null;
@@ -1654,10 +1490,8 @@ function classifySendError(
 }
 
 /**
- * Defensively patches posting_date + owner_user into the inner `data` JSON
- * so the server's `_apply_payload_metadata` (P-5, P-11) accepts the request
- * even if the adapter at enqueue time forgot them, or the outbox row was
- * created before the adapters were fixed.
+ * Patches posting_date + owner_user into the inner `data` JSON if missing,
+ * so the server's `_apply_payload_metadata` always has them.
  */
 function patchInnerDataMetadata(
 	payload: Record<string, unknown>,
@@ -1768,15 +1602,6 @@ function errorCodeToCategory(
 	fallback: NonNullable<LastErrorCategory>,
 ): NonNullable<LastErrorCategory> {
 	if (!errorCode) return fallback;
-	// Code names match server constants in `pospire/api/offline.py`:
-	//   ERROR_PARENT_NOT_READY      = "parent_not_ready"
-	//   ERROR_SIBLINGS_NOT_READY    = "siblings_not_ready"
-	//   ERROR_STOCK_SHORTAGE        = "stock_shortage"
-	//   ERROR_BATCH_OR_SERIAL_…     = "batch_or_serial_conflict"
-	//   ERROR_ACCOUNTING_PERIOD_…   = "accounting_period_closed"
-	//   ERROR_VALIDATION            = "validation_error"
-	//   ERROR_PERMISSION            = "permission_error"
-	//   ERROR_SCHEMA_MISMATCH       = "schema_mismatch"
 	switch (errorCode) {
 		case "parent_not_ready":
 			return "parent_not_ready";
@@ -1877,21 +1702,8 @@ export async function getEntryByOfflineId(
 }
 
 // ---------------------------------------------------------------------------
-// Singleton — ONE scheduler per device.
-//
-// PHASE 2 HANDOFF: `Pos.vue` will own `scheduler.start()` / `scheduler.stop()`
-// in its `onMounted` / `onUnmounted` hooks (P-6). During Phase 1 there is no
-// component to own that lifecycle; the only caller is `main.js`-level code
-// that imports this module. We intentionally do NOT auto-start on import so
-// tests / Storybook / node harnesses can import without spinning up a drain
-// loop against a mock DB. The Phase 2 task is to:
-//
-//   import { scheduler } from "@/offline/sync";
-//   onMounted(() => { scheduler.start() });
-//   onUnmounted(() => { scheduler.stop() });
-//
-// Until then, non-pos bootstrap code should call `scheduler.start()` once
-// from its equivalent root (e.g. the Vuetify root mount in `main.js`).
+// Singleton — ONE scheduler per device. Not auto-started on import so tests
+// can import without spinning up a drain loop. Pos.vue owns start()/stop().
 // ---------------------------------------------------------------------------
 
 export const scheduler = new SyncScheduler();

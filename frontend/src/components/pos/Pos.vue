@@ -98,23 +98,6 @@ export default {
 
 	methods: {
 		async check_opening_entry() {
-			// B3 — stale-while-revalidate shift-open hydration.
-			//
-			// Strategy:
-			//   1. Synchronously read the cached snapshot. If fresh (<24h),
-			//      register it immediately so the cashier sees a populated UI
-			//      in milliseconds, even on a cold boot.
-			//   2. Fire the live `check_opening_shift` in the background. If
-			//      it returns a meaningfully different snapshot (different
-			//      shift name or pos_profile.modified), re-emit
-			//      register_pos_profile so downstream panels reload without a
-			//      manual refresh.
-			//   3. If the live call fails AND no fresh cache exists → fall
-			//      through to the opening dialog (cold start, no offline hint).
-			//
-			// The TTL is 24h: a stale-but-still-valid cache covers a typical
-			// overnight outage; older than that and we'd rather make the
-			// cashier reconnect than serve potentially-corrupt data.
 			const SNAPSHOT_KEY = "pospire.opening_shift_snapshot";
 			const SNAPSHOT_META_KEY = "pospire.opening_shift_snapshot.meta";
 			const SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -141,9 +124,6 @@ export default {
 					this.persistOpeningSnapshot(r, SNAPSHOT_KEY, SNAPSHOT_META_KEY);
 				}
 			} catch (err) {
-				// liveCallSucceeded stays false. If we already registered the
-				// cache, swallow — banner tells the cashier they're offline.
-				// If we haven't, we'll fall through to the opening dialog.
 				if (!registeredFromCache) {
 					console.warn(
 						"[Pos] check_opening_shift failed and no fresh snapshot cached",
@@ -153,39 +133,21 @@ export default {
 			}
 
 			if (r) {
-				// Compare-and-swap: only re-emit register_pos_profile when the
-				// fresh response disagrees with what we already showed. This
-				// avoids a re-render storm on every boot when nothing changed.
-				if (
-					!registeredFromCache ||
-					this.openingSnapshotDiffers(cachedSnapshot, r)
-				) {
+				if (!registeredFromCache || this.openingSnapshotDiffers(cachedSnapshot, r)) {
 					this.applyOpeningSnapshot(r);
 				} else {
-					// Still keep the in-memory pos_profile / pos_opening_shift
-					// pointing at the live response so any field the cache lost
-					// (e.g. the `modified` timestamp) is current.
 					this.pos_profile = r.pos_profile;
 					this.pos_opening_shift = r.pos_opening_shift;
 				}
 				console.info("LoadPosProfile");
-			} else if (liveCallSucceeded) {
-				// Server is reachable AND says there is no open shift. The
-				// cached snapshot (if any) is now stale — the shift was closed
-				// on another device, expired, or never existed. Invalidate
-				// the cache, clear the in-memory references, and route the
-				// cashier to the opening dialog so they don't keep selling
-				// against a phantom shift.
+			} else if (liveCallSucceeded && !cachedSnapshot?.pos_opening_shift?.pospire_pending_sync) {
 				this.invalidateOpeningSnapshot(SNAPSHOT_KEY, SNAPSHOT_META_KEY);
 				this.pos_profile = "";
 				this.pos_opening_shift = "";
 				this.create_opening_voucher();
 			} else if (!registeredFromCache) {
-				// Live call failed AND no cache → cold start, open dialog.
 				this.create_opening_voucher();
 			}
-			// (Live call failed AND we registered from cache → keep using
-			// the cache. The cashier is offline; the banner explains it.)
 		},
 
 		readCachedOpeningSnapshot(key, metaKey, ttlMs) {
@@ -196,8 +158,6 @@ export default {
 				if (!parsed || !parsed.pos_profile || !parsed.pos_opening_shift) {
 					return null;
 				}
-				// TTL gate. The meta key holds `cached_at` so the snapshot blob
-				// stays exactly the shape the live API returns.
 				const metaRaw = localStorage.getItem(metaKey);
 				if (!metaRaw) return null;
 				const meta = JSON.parse(metaRaw);
@@ -226,29 +186,20 @@ export default {
 			}
 		},
 
-		/**
-		 * Wipe the cached opening snapshot. Called when the server confirms
-		 * that no shift is open — the cache is now actively misleading and
-		 * has to be cleared before the cashier can be redirected to the
-		 * opening dialog.
-		 */
 		invalidateOpeningSnapshot(key, metaKey) {
 			try {
-				localStorage.removeItem(key);
 				localStorage.removeItem(metaKey);
+				const raw = localStorage.getItem(key);
+				if (raw) {
+					const parsed = JSON.parse(raw);
+					parsed.pos_opening_shift = null;
+					localStorage.setItem(key, JSON.stringify(parsed));
+				}
 			} catch {
 				/* private mode */
 			}
 		},
 
-		/**
-		 * Decide whether the live response is materially different from the
-		 * cached one. We compare:
-		 *   - Opening shift NAME — different shifts entirely.
-		 *   - POS Profile modified timestamp — config edited mid-shift.
-		 * Anything else (balance_details aging, taxes recomputed) is
-		 * downstream and not worth a re-emit.
-		 */
 		openingSnapshotDiffers(cached, live) {
 			if (!cached) return true;
 			if (
@@ -271,9 +222,6 @@ export default {
 			this.get_offers(this.pos_profile.name);
 			this.eventBus.emit("register_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
-			// H4: if this shift was locked because an offline closing was
-			// queued before reload, re-emit the lock event so Invoice.vue
-			// re-arms the add_item / show_payment refusals after hydrate.
 			if (snapshot.pos_opening_shift?.pospire_closing_pending) {
 				this.eventBus.emit("shift_closing_pending", {
 					shift_offline_id: snapshot.pos_opening_shift?.pos_offline_id,
@@ -281,9 +229,6 @@ export default {
 						snapshot.pos_opening_shift?.pospire_pending_closing_offline_id,
 				});
 			}
-			// B5 — feed the observability beacon with the active outlet/shift
-			// so dashboards can group device pings by store. Free-form outlet
-			// label falls back to the POS Profile name.
 			try {
 				setBeaconContext({
 					outlet:
@@ -296,13 +241,6 @@ export default {
 			} catch (err) {
 				console.warn("[Pos] setBeaconContext failed", err);
 			}
-			// Warm the customer-form-options read cache (Customer Group /
-			// Territory / Gender lists). This path fires on every boot —
-			// including reload-from-cache and new-tab — not only when the
-			// opening dialog runs. Without this, the cache was only warmed
-			// via register_pos_data (emitted by OpeningDialog.vue), so a
-			// cashier who reloaded with an existing shift would get empty
-			// dropdowns on the Create Customer dialog when offline.
 			this.warm_customer_form_options_cache();
 		},
 		create_opening_voucher() {
@@ -318,12 +256,6 @@ export default {
 					}
 				);
 			} catch (err) {
-				// Offline / transport failure — synthesise a minimal closing
-				// shape from the cached opening shift so the cashier can still
-				// enter their physical denominations. Aggregated expected
-				// amounts (sum of invoices for this shift) require server-side
-				// SQL across synced docs and aren't available offline; the
-				// reconciliation banner in the dialog tells the cashier why.
 				console.warn("[Pos] make_closing_shift offline fallback", err);
 				r = this.buildOfflineClosingStub();
 			}
@@ -331,12 +263,6 @@ export default {
 				this.eventBus.emit("open_ClosingDialog", r);
 			}
 		},
-		/**
-		 * Synthesise the data shape `open_ClosingDialog` expects when
-		 * `make_closing_shift_from_opening` is unreachable. Opening amounts
-		 * come from the cached opening shift; expected_amount is left equal
-		 * to opening (the cashier reconciles after sync).
-		 */
 		buildOfflineClosingStub() {
 			const opening = this.pos_opening_shift || {};
 			const balance = Array.isArray(opening.balance_details)
@@ -345,8 +271,6 @@ export default {
 			const payment_reconciliation = balance.map((row) => ({
 				mode_of_payment: row.mode_of_payment,
 				opening_amount: row.amount || 0,
-				// expected_amount stays equal to opening — invoices for this
-				// shift haven't aggregated server-side yet.
 				expected_amount: row.amount || 0,
 				closing_amount: 0,
 				difference: 0,
@@ -383,12 +307,6 @@ export default {
 				invoice_offline_ids: await this.collectShiftInvoiceOfflineIds(),
 			};
 
-			// Pre-flight: if the active shift already has a queued closing OR
-			// any unsynced invoice in the local outbox, sending this close via
-			// the live path would close the shift on the server before the
-			// queued writes drain — orphaning every queued invoice (validate_shift
-			// throws "POS Shift X is not open"). forceQueue routes through the
-			// offline endpoint so strict-closure waits for siblings to sync.
 			const closeRoute = await this.classifyCloseRoute();
 			if (closeRoute === "already-queued") {
 				toast.warning(
@@ -409,35 +327,21 @@ export default {
 			} catch (err) {
 				console.error("[Pos] submit_closing_shift failed", err);
 				toast.error(err && err.message ? err.message : __("Failed to close shift"));
+				this.check_opening_entry();
 				return;
 			}
-				// Offline ack — closing is queued. Server-side strict closure on
-				// each retry blocks until every invoice in the shift has synced;
-				// once they do, the closing fires automatically.
 				if (r && r.offline === true && r.status === "enqueued") {
 					this.pendingClosingOfflineId = r.offline_id;
 					toast.info(
 						__("Shift close queued. It will finalise once every invoice in this shift has synced."),
 						{ autoClose: 5000 },
 					);
-				// Freeze the local shift: any invoice rung up after this point
-				// would NOT be in the closing's parent_offline_ids (we
-				// captured the sibling list at queue time), so the server
-				// would either reject the closing as having orphan siblings
-				// or — worse — submit the closing AND then submit a stray
-				// invoice under the now-closed shift. Lock the shift locally
-				// and re-route to the opening dialog so the cashier opens a
-				// new shift if they need to keep selling. The lock releases
-				// when the closing's onSynced fires.
 				if (this.pos_opening_shift) {
 					this.pos_opening_shift = {
 						...this.pos_opening_shift,
 						pospire_closing_pending: true,
 						pospire_pending_closing_offline_id: r.offline_id,
 					};
-					// Mirror onto the localStorage snapshot so a hard reload
-					// preserves the lock. The snapshot is the authoritative
-					// boot-time state for the cashier.
 					try {
 						const raw = localStorage.getItem("pospire.opening_shift_snapshot");
 						if (raw) {
@@ -455,18 +359,10 @@ export default {
 						/* non-fatal */
 					}
 				}
-				// Notify the cart layer (Invoice.vue) so add_item /
-				// show_payment refuse new actions on the locked shift.
 				this.eventBus.emit("shift_closing_pending", {
 					shift_offline_id: this.pos_opening_shift?.pos_offline_id,
 					closing_offline_id: r.offline_id,
 				});
-				// Re-route to the opening dialog (completing the intent stated
-				// in the comment above). Strip pos_opening_shift from the
-				// snapshot so a hard reload also falls through to the dialog
-				// rather than re-arming the closing lock. pos_profile and
-				// company stay intact — OpeningDialog uses them offline via
-				// synthesizeDialogDataFromShiftSnapshot.
 				try {
 					const raw = localStorage.getItem("pospire.opening_shift_snapshot");
 					if (raw) {
@@ -489,49 +385,6 @@ export default {
 				this.check_opening_entry();
 			}
 		},
-		/**
-		 * Collect every invoice offline_id that belongs to the current shift,
-		 * regardless of current outbox status. The server's strict-closure
-		 * check in `_ensure_all_invoices_submitted` requires the COMPLETE
-		 * sibling list — including invoices that are temporarily in
-		 * `needs_review`. If a `needs_review` row gets fixed and resyncs
-		 * later, the closing's `parent_offline_ids` must include it so the
-		 * scheduler unblocks the closing on its sync (cascade-unblock fires
-		 * from `markSynced` regardless of category).
-		 *
-		 * Two collection paths:
-		 *   1. Offline-opened shift (pos_offline_id present) — fast: index
-		 *      scan via `shift_offline_id` set at enqueue time.
-		 *   2. Online-opened shift (no pos_offline_id) — needs the inner
-		 *      `posa_pos_opening_shift` field which lives inside the encrypted
-		 *      invoice payload. We decrypt and match. Cost is bounded by the
-		 *      invoice count for the current shift (typically <100).
-		 *
-		 * The previous version returned `[]` for online-opened shifts, so
-		 * the closing payload shipped without sibling ids and the server's
-		 * orphan check rejected the closing as siblings_not_ready. With no
-		 * parent_offline_ids on the closing's outbox row, scheduler
-		 * cascade-unblock had nothing to react to, leaving the manager to
-		 * void + retry by hand.
-		 */
-		/**
-		 * Decide how to route a Close Shift action based on the local outbox
-		 * state for the active shift:
-		 *
-		 *   "already-queued" → an unsynced closing_entry exists for this shift;
-		 *     refuse a second close so we don't enqueue a duplicate that the
-		 *     server would reject (and so we don't fire a redundant live close
-		 *     that closes the shift before sibling invoices drain).
-		 *   "force-queue"    → no queued closing yet, but unsynced invoices
-		 *     exist for this shift. The closing MUST go through the outbox so
-		 *     strict-closure (P-8) waits for every sibling. A live close here
-		 *     would orphan the queued invoices via validate_shift.
-		 *   "live"           → no queued activity for this shift; the live path
-		 *     is safe (call() will still enqueue if currently offline).
-		 *
-		 * Failure modes (Dexie unavailable, kill switch off, etc.) fall through
-		 * to "live" — better to let the cashier close than to wedge the UI.
-		 */
 		async classifyCloseRoute() {
 			const openingOfflineId = this.pos_opening_shift?.pos_offline_id;
 			const openingServerName = this.pos_opening_shift?.name;
@@ -581,6 +434,8 @@ export default {
 			const openingOfflineId = this.pos_opening_shift?.pos_offline_id;
 			const openingServerName = this.pos_opening_shift?.name;
 			if (!openingOfflineId && !openingServerName) return [];
+
+			const merged = new Set();
 			try {
 				const { listByStatus } = await import("@/offline/outbox");
 				const all = await Promise.all([
@@ -593,42 +448,47 @@ export default {
 				const flat = all.flat();
 				const invoiceRows = flat.filter((row) => row.type === "invoice");
 
-				// Fast path: index match on shift_offline_id.
 				if (openingOfflineId) {
-					return invoiceRows
+					invoiceRows
 						.filter((row) => row.shift_offline_id === openingOfflineId)
-						.map((row) => row.offline_id);
-				}
-
-				// Slow path (online-opened shift): inspect each invoice's
-				// inner doc to match by real shift name. The outbox repo
-				// returns rows with the payload field already decrypted.
-				const matches = [];
-				for (const row of invoiceRows) {
-					if (row.shift_offline_id) continue; // belongs to a different (offline) shift
-					const inner = this.unwrapInnerInvoicePayload(row.payload);
-					if (
-						inner &&
-						(inner.posa_pos_opening_shift === openingServerName ||
-							inner.pos_opening_shift === openingServerName)
-					) {
-						matches.push(row.offline_id);
+						.forEach((row) => merged.add(row.offline_id));
+				} else {
+					for (const row of invoiceRows) {
+						if (row.shift_offline_id) continue;
+						const inner = this.unwrapInnerInvoicePayload(row.payload);
+						if (
+							inner &&
+							(inner.posa_pos_opening_shift === openingServerName ||
+								inner.pos_opening_shift === openingServerName)
+						) {
+							merged.add(row.offline_id);
+						}
 					}
 				}
-				return matches;
 			} catch (err) {
-				console.warn("[Pos] collectShiftInvoiceOfflineIds failed", err);
-				return [];
+				console.warn("[Pos] collectShiftInvoiceOfflineIds local scan failed", err);
 			}
+
+			try {
+				const { call } = await import("@/utils/call");
+				const serverIds = await call({
+					method: "pospire.pospire.api.offline.get_shift_invoice_offline_ids",
+					args: {
+						opening_shift_name: openingServerName ?? null,
+						opening_shift_offline_id: openingOfflineId ?? null,
+					},
+					intent: "read",
+				});
+				if (Array.isArray(serverIds)) {
+					serverIds.forEach((id) => { if (id) merged.add(id); });
+				}
+			} catch (err) {
+				console.warn("[Pos] collectShiftInvoiceOfflineIds server fetch failed", err);
+			}
+
+			return [...merged];
 		},
 
-		/**
-		 * Outbox payloads for offline-capable writes follow the wrapper
-		 * shape `{ data: "<JSON-stringified inner doc>", offline_id, … }`.
-		 * Strip the wrapper so callers can read inner fields like
-		 * `posa_pos_opening_shift` without re-implementing the parse on
-		 * every site.
-		 */
 		unwrapInnerInvoicePayload(payload) {
 			if (!payload || typeof payload !== "object") return null;
 			if (typeof payload.data === "string") {
@@ -759,12 +619,13 @@ export default {
 				this.get_offers(this.pos_profile.name);
 				this.pos_opening_shift = data.pos_opening_shift;
 				this.eventBus.emit("register_pos_profile", data);
-				// Warm the offline read-cache for the Create / Update
-				// Customer dialog's dropdowns (Customer Group, Territory,
-				// Gender) while we're definitely online (shift just opened).
-				// Fire-and-forget: a failure here is non-fatal — the dialog
-				// will retry on its own first open and surface any error
-				// there if the cashier never had a successful warm fetch.
+				if (data.pos_profile && data.company) {
+					this.persistOpeningSnapshot(
+						data,
+						"pospire.opening_shift_snapshot",
+						"pospire.opening_shift_snapshot.meta",
+					);
+				}
 				this.warm_customer_form_options_cache();
 				console.info("LoadPosProfile");
 			});

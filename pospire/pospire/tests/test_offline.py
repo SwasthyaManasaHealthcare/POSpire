@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from contextlib import suppress
+from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -34,12 +35,16 @@ from pospire.pospire.api.offline import (
 	ERROR_ACCOUNTING_PERIOD_CLOSED,
 	ERROR_PARENT_NOT_READY,
 	ERROR_PERMISSION,
+	ERROR_SIBLINGS_NOT_READY,
 	ERROR_VALIDATION,
 	OfflineSubmitError,
 	_acting_as_user,
+	_aggregate_closing_from_invoices,
 	_apply_payload_metadata,
 	_assert_offline_action_allowed_by_shift,
 	_check_accounting_period_open,
+	_enrich_closing_payload,
+	_ensure_all_invoices_submitted,
 	_existing_by_offline_id,
 	_idempotent_submit,
 	_resolve_opening_shift,
@@ -58,6 +63,7 @@ from pospire.pospire.tests.test_utils import (
 # must use this generator for offline_id values.
 _UUID_VALID = "12345678-1234-4abc-9def-0123456789ab"
 _UUID_VALID_2 = "abcdef01-2345-4abc-89cd-0123456789ab"
+_UUID_VALID_3 = "fedcba98-7654-4abc-89cd-0123456789ab"
 
 
 def _make_offline_id() -> str:
@@ -98,6 +104,150 @@ class TestResolvers(FrappeTestCase):
 		real shift name."""
 		with self.assertRaises(OfflineSubmitError):
 			_resolve_opening_shift_flexible("POSA-OS-26-DOESNOTEXIST")
+
+
+# ---------------------------------------------------------------------------
+# Strict closure — P-8 server-side sibling validation
+# ---------------------------------------------------------------------------
+
+
+class TestStrictClosureValidation(FrappeTestCase):
+	"""Strict closure accepts already-submitted server siblings omitted by
+	older payloads, while still blocking declared siblings that are not yet
+	submitted."""
+
+	def test_auto_includes_submitted_shift_invoices_omitted_from_payload(self):
+		"""Online-before-offline invoices are server-submitted siblings. They
+		should not force managers to hand-edit historical OSR payloads."""
+
+		def fake_get_all(doctype, filters=None, pluck=None, **kwargs):
+			filters = filters or {}
+			self.assertEqual(doctype, "Sales Invoice")
+			if filters.get("pos_offline_id"):
+				return [_UUID_VALID]
+			if filters.get("posa_pos_opening_shift") == "POSA-OS-26-0000041":
+				return [_UUID_VALID, _UUID_VALID_2]
+			return []
+
+		with patch("pospire.pospire.api.offline.frappe.get_all", side_effect=fake_get_all):
+			opening_name, canonical_ids, auto_included_ids = _ensure_all_invoices_submitted(
+				"POSA-OS-26-0000041",
+				[_UUID_VALID],
+			)
+
+		self.assertEqual(opening_name, "POSA-OS-26-0000041")
+		self.assertEqual(canonical_ids, sorted([_UUID_VALID, _UUID_VALID_2]))
+		self.assertEqual(auto_included_ids, [_UUID_VALID_2])
+
+	def test_declared_invoice_must_still_be_submitted(self):
+		"""Auto-inclusion only covers submitted server siblings; explicitly
+		listed invoice IDs still block the close until they submit."""
+
+		def fake_get_all(doctype, filters=None, pluck=None, **kwargs):
+			filters = filters or {}
+			self.assertEqual(doctype, "Sales Invoice")
+			if filters.get("pos_offline_id"):
+				return []
+			if filters.get("posa_pos_opening_shift") == "POSA-OS-26-0000041":
+				return [_UUID_VALID_2]
+			return []
+
+		with patch("pospire.pospire.api.offline.frappe.get_all", side_effect=fake_get_all):
+			with self.assertRaises(OfflineSubmitError):
+				_ensure_all_invoices_submitted("POSA-OS-26-0000041", [_UUID_VALID_3])
+		self.assertEqual(frappe.local.response.get("error_code"), ERROR_SIBLINGS_NOT_READY)
+
+
+# ---------------------------------------------------------------------------
+# Closing enrichment — _aggregate_closing_from_invoices / _enrich_closing_payload
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichClosingPayload(FrappeTestCase):
+	"""_enrich_closing_payload builds correct totals from submitted invoices."""
+
+	def test_opening_balance_seeded_into_expected_amount(self):
+		"""pay_expected starts from the opening shift balance, then adds invoice
+		payments — so expected cash = opening_cash + invoice_cash_sales."""
+
+		def fake_get_all(doctype, filters=None, pluck=None, fields=None, **kwargs):
+			filters = filters or {}
+			if doctype == "POS Opening Shift Detail":
+				return [frappe._dict({"mode_of_payment": "Cash", "amount": 5000})]
+			if doctype == "Sales Invoice" and pluck == "name":
+				return ["INV-001"] if filters.get("posa_pos_opening_shift") else []
+			if doctype == "Sales Invoice":
+				return [
+					frappe._dict(
+						name="INV-001",
+						posting_date="2026-05-15",
+						grand_total=2075,
+						net_total=2075,
+						total_qty=3,
+						customer="Test Customer",
+						change_amount=0,
+					)
+				]
+			if doctype == "Sales Invoice Payment":
+				return [frappe._dict({"mode_of_payment": "Cash", "amount": 2075})]
+			if doctype == "Sales Taxes and Charges":
+				return []
+			if doctype == "Payment Entry":
+				return []
+			return []
+
+		with (
+			patch("pospire.pospire.api.offline.frappe.get_all", side_effect=fake_get_all),
+			patch("pospire.pospire.api.offline.frappe.get_cached_value", return_value=None),
+			patch("pospire.pospire.api.offline.frappe.db.get_value", return_value=None),
+		):
+			agg = _aggregate_closing_from_invoices("POSA-OS-TEST", None)
+
+		self.assertAlmostEqual(agg["pay_expected"]["Cash"], 7075.0)
+		self.assertAlmostEqual(agg["grand_total"], 2075.0)
+		self.assertEqual(len(agg["pos_transactions"]), 1)
+
+	def test_invoice_via_offline_link_included_in_aggregation(self):
+		"""Invoices linked only by pos_opening_shift_offline_id are aggregated —
+		matches the two-path lookup used by strict closure."""
+		offline_uuid = _UUID_VALID
+
+		def fake_get_all(doctype, filters=None, pluck=None, fields=None, **kwargs):
+			filters = filters or {}
+			if doctype == "POS Opening Shift Detail":
+				return []
+			if doctype == "Sales Invoice" and pluck == "name":
+				if filters.get("posa_pos_opening_shift"):
+					return []
+				if filters.get("pos_opening_shift_offline_id") == offline_uuid:
+					return ["INV-OFFLINE-001"]
+				return []
+			if doctype == "Sales Invoice":
+				return [
+					frappe._dict(
+						name="INV-OFFLINE-001",
+						posting_date="2026-05-15",
+						grand_total=500,
+						net_total=500,
+						total_qty=1,
+						customer="Test Customer",
+						change_amount=0,
+					)
+				]
+			if doctype in ("Sales Invoice Payment", "Sales Taxes and Charges", "Payment Entry"):
+				return []
+			return []
+
+		with (
+			patch("pospire.pospire.api.offline.frappe.get_all", side_effect=fake_get_all),
+			patch("pospire.pospire.api.offline.frappe.get_cached_value", return_value=None),
+			patch("pospire.pospire.api.offline.frappe.db.get_value", return_value=None),
+		):
+			agg = _aggregate_closing_from_invoices("POSA-OS-TEST", None, opening_offline_id=offline_uuid)
+
+		self.assertAlmostEqual(agg["grand_total"], 500.0)
+		self.assertEqual(len(agg["pos_transactions"]), 1)
+		self.assertEqual(agg["pos_transactions"][0]["sales_invoice"], "INV-OFFLINE-001")
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +698,7 @@ class TestModuleSurface(FrappeTestCase):
 			"get_observability_summary",
 			"snapshot_profile_flags_onto_opening_shift",
 			"get_offline_flags_for_shift",
+			"get_shift_invoice_offline_ids",
 		]
 		for name in expected:
 			self.assertTrue(

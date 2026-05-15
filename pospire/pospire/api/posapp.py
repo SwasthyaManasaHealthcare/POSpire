@@ -43,6 +43,7 @@ from erpnext.stock.doctype.batch.batch import (
 	get_batch_qty,
 )
 from erpnext.stock.get_item_details import get_item_details
+from erpnext.stock.stock_ledger import NegativeStockError
 from frappe import _
 from frappe.query_builder import Field
 from frappe.query_builder.functions import IfNull
@@ -675,7 +676,9 @@ def update_invoice(data: str | dict):
 
 		# Step 1: Handle accounting dimensions (custom + standard)
 		try:
-			accounting_dimensions = get_accounting_dimensions(as_list=False, filters={"disabled": 0})
+			# ERPNext v16's get_accounting_dimensions() already filters disabled
+			# dimensions and no longer accepts a `filters` kwarg.
+			accounting_dimensions = get_accounting_dimensions(as_list=False)
 			accounting_dimensions_fields = [d.fieldname for d in accounting_dimensions]
 
 			# Include standard dimensions
@@ -1024,7 +1027,10 @@ def submit_invoice(invoice: str | dict, data: str | dict, offline_id: str | None
 				},
 			)
 	else:
-		invoice_doc.submit()
+		try:
+			invoice_doc.submit()
+		except NegativeStockError as e:
+			frappe.throw(str(e), title=_("Insufficient Stock"))
 		if invoice_doc.is_return and invoice_doc.return_against and not is_cashback:
 			original_invoice = frappe.get_doc("Sales Invoice", invoice_doc.return_against)
 			custom_delivery_charge = flt(original_invoice.get("custom_delivery_charge_rate") or 0)

@@ -25,7 +25,7 @@ from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import cint, get_datetime, now
+from frappe.utils import cint, flt, get_datetime, now
 
 # ---------------------------------------------------------------------------
 # Error taxonomy (see docs/offline/12-server-side-changes.md §5)
@@ -461,6 +461,51 @@ def get_offline_flags_for_shift(opening_shift_name: str) -> dict[str, int]:
 			snapshot.get("pos_profile_snapshot_allow_add_to_stock_at_pos") or 0
 		),
 	}
+
+
+@frappe.whitelist()
+def get_shift_invoice_offline_ids(
+	opening_shift_name: str | None = None,
+	opening_shift_offline_id: str | None = None,
+) -> list[str]:
+	"""Return pos_offline_id values for all submitted invoices on a shift.
+
+	Mirrors the two-path query in _ensure_all_invoices_submitted so the frontend
+	can include server-submitted invoices in the closing payload's invoice_offline_ids,
+	preventing strict-closure retries from waiting on invoices that are already
+	submitted on the server.
+
+	Returns only non-null pos_offline_id values (invoices without one are not
+	checked by strict closure and don't need to be listed).
+	"""
+	return sorted(_get_submitted_shift_invoice_offline_ids(opening_shift_name, opening_shift_offline_id))
+
+
+def _get_submitted_shift_invoice_offline_ids(
+	opening_shift_name: str | None = None,
+	opening_shift_offline_id: str | None = None,
+) -> set[str]:
+	"""Return submitted Sales Invoice offline IDs linked to a POS shift."""
+	ids: set[str] = set()
+	if opening_shift_name:
+		for x in frappe.get_all(
+			"Sales Invoice",
+			filters={"posa_pos_opening_shift": opening_shift_name, "docstatus": 1},
+			pluck="pos_offline_id",
+		):
+			if x:
+				ids.add(x)
+
+	if opening_shift_offline_id:
+		for x in frappe.get_all(
+			"Sales Invoice",
+			filters={"pos_opening_shift_offline_id": opening_shift_offline_id, "docstatus": 1},
+			pluck="pos_offline_id",
+		):
+			if x:
+				ids.add(x)
+
+	return ids
 
 
 # ---------------------------------------------------------------------------
@@ -1511,19 +1556,22 @@ def _ensure_all_invoices_submitted(
 	opening_ref: str,
 	invoice_offline_ids: list[str],
 	opening_offline_id: str | None = None,
-) -> str:
+) -> tuple[str, list[str], list[str]]:
 	"""Strict-closure precondition for offline closing entries (§4.4, P-8).
 
 	Two-part check:
 	  (a) every offline id the client lists maps to a submitted Sales Invoice;
-	  (b) no orphan Sales Invoice exists on the server under this shift that
-	      the client forgot to list.
-	Both must hold before we accept a closing entry.
+	  (b) every already-submitted Sales Invoice linked to the shift is folded
+	      into the canonical sibling list, including online-before-offline
+	      invoices omitted by older closing payloads.
 
-	`opening_ref` is the REAL shift name (post-resolution). `opening_offline_id`
-	is the optional UUID that lets the orphan check also catch invoices that
-	reference the shift via `pos_opening_shift_offline_id` (offline-queued
-	invoices created before the shift's offline_id was rewritten).
+	`opening_ref` is the REAL shift name (post-resolution).
+	`opening_offline_id` is the optional UUID that lets the server-side
+	enrichment also catch invoices that reference the shift via
+	`pos_opening_shift_offline_id` (offline-queued invoices created before the
+	shift's offline_id was rewritten).
+
+	Returns `(opening_name, canonical_invoice_offline_ids, auto_included_ids)`.
 	"""
 	# Resolved name is supplied by the caller now; the previous in-line
 	# offline-only lookup didn't support online-opened shifts.
@@ -1547,15 +1595,20 @@ def _ensure_all_invoices_submitted(
 				{"missing_offline_ids": missing_on_server},
 			)
 
-	# Orphan check: every SUBMITTED Sales Invoice tied to this shift on the
-	# server must appear in the client's list. A mismatch means the client's
-	# outbox view of the shift is incomplete.
+	# Server-side enrichment: every SUBMITTED Sales Invoice tied to this
+	# shift is already safe for closing dependency purposes, even if an older
+	# offline payload omitted it from `invoice_offline_ids` because it was
+	# created online before the device went offline. We add those IDs to the
+	# canonical set instead of requiring a manager to edit historical OSR
+	# payloads by hand.
 	#
 	# Mixed-mode shifts can have invoices linked via EITHER:
 	#   - `posa_pos_opening_shift = <real name>` (online-opened OR resolved)
 	#   - `pos_opening_shift_offline_id = <UUID>` (offline-queued, before
 	#     opening sync rewrote the link).
-	# Run both checks; union the results.
+	# Run both checks; union the results. This does not weaken the important
+	# sibling gate above: any invoice ID explicitly listed by the client still
+	# must map to a submitted Sales Invoice before the close can proceed.
 	#
 	# `docstatus=1` filter is correctness AND performance:
 	#   1. Cancelled (docstatus=2) and drafts (docstatus=0) are not siblings
@@ -1563,42 +1616,187 @@ def _ensure_all_invoices_submitted(
 	#   2. The B1 compound index
 	#      `pospire_strict_closure_idx (pos_opening_shift_offline_id, docstatus)`
 	#      satisfies the offline-id query from the index alone.
-	orphans: set[str] = set()
+	declared_ids = set(cleaned)
+	server_submitted_ids = _get_submitted_shift_invoice_offline_ids(
+		opening_name,
+		opening_offline_id,
+	)
+	auto_included_ids = sorted(server_submitted_ids - declared_ids)
+	canonical_invoice_ids = sorted(declared_ids | server_submitted_ids)
 
-	# Online-link orphans (posa_pos_opening_shift = real shift name).
-	online_filters: dict[str, Any] = {
-		"posa_pos_opening_shift": opening_name,
-		"docstatus": 1,
-	}
-	if cleaned:
-		online_filters["pos_offline_id"] = ["not in", cleaned]
-	for x in frappe.get_all("Sales Invoice", filters=online_filters, pluck="pos_offline_id"):
-		if x:
-			orphans.add(x)
+	return opening_name, canonical_invoice_ids, auto_included_ids
 
-	# Offline-link orphans (pos_opening_shift_offline_id = UUID). Only
-	# applicable when we have an offline_id to query by.
+
+def _aggregate_closing_from_invoices(
+	opening_name: str,
+	pos_profile_name: str | None,
+	opening_offline_id: str | None = None,
+) -> dict[str, Any]:
+	"""Aggregate invoice-derived fields for a POS Closing Shift.
+
+	Returns a dict with keys: pos_transactions, taxes, pos_payments,
+	grand_total, net_total, total_quantity, pay_expected (mop → amount).
+	pay_expected is seeded from the opening shift balance_details (opening
+	cash in drawer) then invoice payments are added on top — matching the
+	live builder in make_closing_shift_from_opening.
+	"""
+	cash_mode = (
+		frappe.get_cached_value("POS Profile", pos_profile_name, "posa_cash_mode_of_payment")
+		if pos_profile_name
+		else None
+	) or "Cash"
+
+	# Seed pay_expected from opening balance (mirrors live builder line 209-218).
+	pay_expected: dict[str, float] = {}
+	for bd in frappe.get_all(
+		"POS Opening Shift Detail",
+		filters={"parent": opening_name},
+		fields=["mode_of_payment", "amount"],
+	):
+		pay_expected[bd.mode_of_payment] = flt(bd.amount)
+
+	# Collect invoice names from both link paths (mirrors _ensure_all_invoices_submitted).
+	inv_names: set[str] = set()
+	for row in frappe.get_all(
+		"Sales Invoice",
+		filters={"posa_pos_opening_shift": opening_name, "docstatus": 1},
+		pluck="name",
+	):
+		inv_names.add(row)
 	if opening_offline_id:
-		offline_filters: dict[str, Any] = {
-			"pos_opening_shift_offline_id": opening_offline_id,
-			"docstatus": 1,
-		}
-		if cleaned:
-			offline_filters["pos_offline_id"] = ["not in", cleaned]
-		for x in frappe.get_all("Sales Invoice", filters=offline_filters, pluck="pos_offline_id"):
-			if x:
-				orphans.add(x)
+		for row in frappe.get_all(
+			"Sales Invoice",
+			filters={"pos_opening_shift_offline_id": opening_offline_id, "docstatus": 1},
+			pluck="name",
+		):
+			inv_names.add(row)
 
-	if orphans:
-		_throw(
-			ERROR_SIBLINGS_NOT_READY,
-			_("Cannot close: shift has invoices not listed in closing payload: {0}").format(
-				", ".join(sorted(orphans))
-			),
-			{"unlisted_offline_ids": sorted(orphans)},
+	invoices = (
+		frappe.get_all(
+			"Sales Invoice",
+			filters={"name": ["in", sorted(inv_names)]},
+			fields=[
+				"name",
+				"posting_date",
+				"grand_total",
+				"net_total",
+				"total_qty",
+				"customer",
+				"change_amount",
+			],
 		)
+		if inv_names
+		else []
+	)
 
-	return opening_name
+	pos_transactions: list[dict] = []
+	taxes: list[dict] = []
+	grand_total = 0.0
+	net_total = 0.0
+	total_quantity = 0.0
+
+	for inv in invoices:
+		pos_transactions.append(
+			{
+				"sales_invoice": inv.name,
+				"posting_date": inv.posting_date,
+				"grand_total": inv.grand_total,
+				"customer": inv.customer,
+			}
+		)
+		grand_total += flt(inv.grand_total)
+		net_total += flt(inv.net_total)
+		total_quantity += flt(inv.total_qty)
+
+		for t in frappe.get_all(
+			"Sales Taxes and Charges",
+			filters={"parent": inv.name},
+			fields=["account_head", "rate", "tax_amount"],
+		):
+			existing = next(
+				(tx for tx in taxes if tx["account_head"] == t.account_head and tx["rate"] == t.rate),
+				None,
+			)
+			if existing:
+				existing["amount"] += flt(t.tax_amount)
+			else:
+				taxes.append({"account_head": t.account_head, "rate": t.rate, "amount": flt(t.tax_amount)})
+
+		for p in frappe.get_all(
+			"Sales Invoice Payment",
+			filters={"parent": inv.name},
+			fields=["mode_of_payment", "amount"],
+		):
+			amount = flt(p.amount)
+			if p.mode_of_payment == cash_mode:
+				amount -= flt(inv.change_amount)
+			pay_expected[p.mode_of_payment] = pay_expected.get(p.mode_of_payment, 0.0) + amount
+
+	pos_payments: list[dict] = []
+	for py in frappe.get_all(
+		"Payment Entry",
+		filters={"docstatus": 1, "reference_no": opening_name, "payment_type": "Receive"},
+		fields=["name", "mode_of_payment", "paid_amount", "posting_date", "party"],
+	):
+		pos_payments.append(
+			{
+				"payment_entry": py.name,
+				"mode_of_payment": py.mode_of_payment,
+				"paid_amount": py.paid_amount,
+				"posting_date": py.posting_date,
+				"customer": py.party,
+			}
+		)
+		pay_expected[py.mode_of_payment] = pay_expected.get(py.mode_of_payment, 0.0) + flt(py.paid_amount)
+
+	return {
+		"pos_transactions": pos_transactions,
+		"taxes": taxes,
+		"pos_payments": pos_payments,
+		"grand_total": grand_total,
+		"net_total": net_total,
+		"total_quantity": total_quantity,
+		"pay_expected": pay_expected,
+	}
+
+
+def _enrich_closing_payload(
+	payload: dict[str, Any], opening_name: str, opening_offline_id: str | None = None
+) -> None:
+	"""Overwrite invoice-derived fields on an offline closing payload.
+
+	Preserves cashier-entered fields (closing_amount, denomination_details,
+	period dates, user, company, pos_profile). Recomputes everything that
+	must come from submitted server records.
+	"""
+	pos_profile_name = payload.get("pos_profile") or frappe.db.get_value(
+		"POS Opening Shift", opening_name, "pos_profile"
+	)
+	agg = _aggregate_closing_from_invoices(opening_name, pos_profile_name, opening_offline_id)
+
+	payload["pos_transactions"] = agg["pos_transactions"]
+	payload["taxes"] = agg["taxes"]
+	payload["pos_payments"] = agg["pos_payments"]
+	payload["grand_total"] = agg["grand_total"]
+	payload["net_total"] = agg["net_total"]
+	payload["total_quantity"] = agg["total_quantity"]
+
+	pay_expected = agg["pay_expected"]
+	existing_recon = payload.get("payment_reconciliation") or []
+	seen_mops: set[str] = set()
+	new_recon: list[dict] = []
+	for row in existing_recon:
+		if not isinstance(row, dict):
+			continue
+		mop = row.get("mode_of_payment")
+		new_recon.append({**row, "expected_amount": pay_expected.get(mop, 0.0)})
+		seen_mops.add(mop)
+	for mop, exp in pay_expected.items():
+		if mop not in seen_mops:
+			new_recon.append(
+				{"mode_of_payment": mop, "opening_amount": 0, "expected_amount": exp, "closing_amount": 0}
+			)
+	payload["payment_reconciliation"] = new_recon
 
 
 @frappe.whitelist()
@@ -1652,14 +1850,34 @@ def create_closing_entry(
 		)
 
 	opening_name, opening_offline_id = _resolve_opening_shift_flexible(ref)
-	_ensure_all_invoices_submitted(
+	(
+		opening_name,
+		canonical_invoice_offline_ids,
+		auto_included_invoice_offline_ids,
+	) = _ensure_all_invoices_submitted(
 		opening_name,
 		invoice_offline_ids,
 		opening_offline_id=opening_offline_id,
 	)
 	payload["pos_opening_shift"] = opening_name
+	_enrich_closing_payload(payload, opening_name, opening_offline_id)
 
-	return _idempotent_submit(
+	# If a draft exists from a prior partial replay, patch it with the
+	# enriched payload before _idempotent_submit resumes submission — the
+	# draft branch submits the existing doc as-is without re-applying fields.
+	existing_draft_name = frappe.db.get_value(
+		"POS Closing Shift", {"pos_offline_id": offline_id, "docstatus": 0}, "name"
+	)
+	if existing_draft_name:
+		draft = frappe.get_doc("POS Closing Shift", existing_draft_name)
+		for field in ("pos_transactions", "taxes", "pos_payments", "payment_reconciliation"):
+			draft.set(field, payload.get(field, []))
+		for field in ("grand_total", "net_total", "total_quantity"):
+			draft.set(field, payload.get(field, 0))
+		draft.flags.ignore_permissions = True
+		draft.save()
+
+	result = _idempotent_submit(
 		"POS Closing Shift",
 		payload,
 		offline_id,
@@ -1667,6 +1885,10 @@ def create_closing_entry(
 		submit=True,
 		owner_user=owner_user,
 	)
+	if auto_included_invoice_offline_ids:
+		result["auto_included_invoice_offline_ids"] = auto_included_invoice_offline_ids
+		result["validated_invoice_offline_ids"] = canonical_invoice_offline_ids
+	return result
 
 
 @frappe.whitelist()
@@ -2016,6 +2238,7 @@ __all__ = [
 	"create_material_receipt",
 	"create_opening_entry",
 	"get_offline_flags_for_shift",
+	"get_shift_invoice_offline_ids",
 	"log_batch",
 	"ping",
 	"snapshot_profile_flags_onto_opening_shift",
