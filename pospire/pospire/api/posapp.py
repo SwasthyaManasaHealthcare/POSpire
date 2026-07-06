@@ -50,11 +50,25 @@ from frappe.query_builder.functions import IfNull
 from frappe.utils import cint, cstr, flt, getdate, nowdate
 from frappe.utils.background_jobs import enqueue
 
+from pospire.pospire.api.stock_reconcile import (
+	ensure_stock_for_invoice,
+	ensure_typed_batches_exist_for_invoice,
+)
 from pospire.pospire.doctype.delivery_charges.delivery_charges import (
 	get_applicable_delivery_charges as _get_applicable_delivery_charges,
 )
 from pospire.pospire.doctype.pos_coupon.pos_coupon import check_coupon_code
 from pospire.pospire.utils.pos_server_cache import CUSTOMERS_KEY_PREFIX, ITEMS_KEY_PREFIX
+
+
+def submit_sales_invoice(invoice_doc) -> bool:
+	"""Run pre-submit stock hooks and submit a draft Sales Invoice."""
+	if cint(invoice_doc.docstatus) != 0:
+		return False
+
+	ensure_stock_for_invoice(invoice_doc)
+	invoice_doc.submit()
+	return True
 
 
 def _make_pos_cache_key(prefix: str, *args) -> str:
@@ -375,7 +389,7 @@ def get_items(
 										}
 									)
 				serial_no_data = []
-				if search_serial_no:
+				if item.has_serial_no:
 					serial_no_data = frappe.get_all(
 						"Serial No",
 						filters={
@@ -860,6 +874,7 @@ def update_invoice(data: str | dict):
 	if invoice_doc.get("posting_date") and getdate(invoice_doc.posting_date) != today_date:
 		invoice_doc.set_posting_time = 1
 
+	ensure_typed_batches_exist_for_invoice(invoice_doc)
 	invoice_doc.save()
 	return invoice_doc
 
@@ -991,6 +1006,7 @@ def submit_invoice(invoice: str | dict, data: str | dict, offline_id: str | None
 	invoice_doc.flags.ignore_permissions = True
 	frappe.flags.ignore_account_permission = True
 	invoice_doc.posa_is_printed = 1
+	ensure_typed_batches_exist_for_invoice(invoice_doc)
 	invoice_doc.save()
 
 	if data.get("due_date"):
@@ -1028,7 +1044,7 @@ def submit_invoice(invoice: str | dict, data: str | dict, offline_id: str | None
 			)
 	else:
 		try:
-			invoice_doc.submit()
+			submit_sales_invoice(invoice_doc)
 		except NegativeStockError as e:
 			frappe.throw(str(e), title=_("Insufficient Stock"))
 		if invoice_doc.is_return and invoice_doc.return_against and not is_cashback:
@@ -1168,8 +1184,9 @@ def submit_in_background_job(kwargs):
 	payments = kwargs.get("payments")
 
 	invoice_doc = frappe.get_doc("Sales Invoice", invoice)
-	invoice_doc.submit()
-	redeeming_customer_credit(invoice_doc, data, is_payment_entry, total_cash, cash_account, payments)
+	submitted_now = submit_sales_invoice(invoice_doc)
+	if submitted_now:
+		redeeming_customer_credit(invoice_doc, data, is_payment_entry, total_cash, cash_account, payments)
 
 
 @frappe.whitelist()
@@ -1345,6 +1362,7 @@ def get_item_detail(
 	today = nowdate()
 	item_code = item.get("item_code")
 	batch_no_data = []
+	serial_no_data = []
 	if warehouse and item.get("has_batch_no"):
 		batch_list = get_batch_qty(warehouse=warehouse, item_code=item_code)
 		if batch_list:
@@ -1363,6 +1381,16 @@ def get_item_detail(
 								"manufacturing_date": batch_doc.manufacturing_date,
 							}
 						)
+	if warehouse and item.get("has_serial_no"):
+		serial_no_data = frappe.get_all(
+			"Serial No",
+			filters={
+				"item_code": item_code,
+				"status": "Active",
+				"warehouse": warehouse,
+			},
+			fields=["name as serial_no"],
+		)
 
 	item["selling_price_list"] = price_list
 
@@ -1376,6 +1404,7 @@ def get_item_detail(
 		res["actual_qty"] = get_stock_availability(item_code, warehouse)
 	res["max_discount"] = max_discount
 	res["batch_no_data"] = batch_no_data
+	res["serial_no_data"] = serial_no_data
 	return res
 
 

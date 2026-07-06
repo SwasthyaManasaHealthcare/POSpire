@@ -27,6 +27,9 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, get_datetime, now
 
+from pospire.pospire.api.posapp import submit_sales_invoice
+from pospire.pospire.api.stock_reconcile import ensure_typed_batches_exist_for_invoice
+
 # ---------------------------------------------------------------------------
 # Error taxonomy (see docs/offline/12-server-side-changes.md §5)
 # ---------------------------------------------------------------------------
@@ -351,6 +354,7 @@ def _log_batch_rate_limit(user: str) -> None:
 POS_PROFILE_OFFLINE_FLAGS: tuple[str, ...] = (
 	"custom_allow_negative_stock",
 	"custom_allow_add_to_stock_at_pos",
+	"posa_auto_stock_reconcile",
 )
 
 
@@ -362,8 +366,8 @@ def snapshot_profile_flags_onto_opening_shift(doc) -> None:
 	only source of truth read by submit-time handlers (Q-2 constraint).
 
 	**Cross-branch dependency**: the source POS Profile flags
-	(`custom_allow_negative_stock`, `custom_allow_add_to_stock_at_pos`) are
-	defined on the `feature/allow-negative-stock-pos` branch, NOT on this
+	(`custom_allow_negative_stock`, `custom_allow_add_to_stock_at_pos`,
+	`posa_auto_stock_reconcile`) are defined on feature branches, NOT on this
 	(offline) branch. We cannot assume they exist on the running database —
 	the offline branch may run alone, alongside the feature branch, or
 	post-merge. To stay branch-independent we filter the read field list to
@@ -398,6 +402,10 @@ def snapshot_profile_flags_onto_opening_shift(doc) -> None:
 	if doc.meta.has_field("pos_profile_snapshot_allow_add_to_stock_at_pos"):
 		doc.pos_profile_snapshot_allow_add_to_stock_at_pos = cint(
 			profile_values.get("custom_allow_add_to_stock_at_pos") or 0
+		)
+	if doc.meta.has_field("pos_profile_snapshot_auto_stock_reconcile"):
+		doc.pos_profile_snapshot_auto_stock_reconcile = cint(
+			profile_values.get("posa_auto_stock_reconcile") or 0
 		)
 
 
@@ -450,6 +458,7 @@ def get_offline_flags_for_shift(opening_shift_name: str) -> dict[str, int]:
 			[
 				"pos_profile_snapshot_allow_negative_stock",
 				"pos_profile_snapshot_allow_add_to_stock_at_pos",
+				"pos_profile_snapshot_auto_stock_reconcile",
 			],
 			as_dict=True,
 		)
@@ -460,6 +469,7 @@ def get_offline_flags_for_shift(opening_shift_name: str) -> dict[str, int]:
 		"custom_allow_add_to_stock_at_pos": cint(
 			snapshot.get("pos_profile_snapshot_allow_add_to_stock_at_pos") or 0
 		),
+		"posa_auto_stock_reconcile": cint(snapshot.get("pos_profile_snapshot_auto_stock_reconcile") or 0),
 	}
 
 
@@ -1237,6 +1247,7 @@ def submit_invoice(
 				}
 			)
 			draft.flags.ignore_permissions = True
+			ensure_typed_batches_exist_for_invoice(draft)
 			draft.insert()
 		except frappe.DuplicateEntryError:
 			frappe.db.rollback()
@@ -1365,7 +1376,7 @@ def _complete_or_resume_invoice(
 			if cint(doc.docstatus) == 0:
 				doc.flags.ignore_permissions = True
 				frappe.flags.ignore_account_permission = True
-				doc.submit()
+				submit_sales_invoice(doc)
 				doc.reload()
 			return {"name": doc.name, "docstatus": cint(doc.docstatus)}
 		except frappe.TimestampMismatchError as exc:

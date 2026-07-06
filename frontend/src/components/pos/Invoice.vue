@@ -677,34 +677,52 @@
 										class="shrink mr-2 mt-0"
 									></v-checkbox>
 								</v-col>
-								<v-col cols="4" v-if="item.has_serial_no == 1 || item.serial_no">
-									<v-text-field
-										density="compact"
-										variant="outlined"
-										color="primary"
-										:label="__('Serial No QTY')"
-										bg-color="white"
-										hide-details
-										v-model="item.serial_no_selected_count"
-										type="number"
-										readonly
-									></v-text-field>
-								</v-col>
-								<v-col cols="12" v-if="item.has_serial_no == 1 || item.serial_no">
-									<v-autocomplete
-										v-model="item.serial_no_selected"
-										:items="item.serial_no_data"
-										item-title="serial_no"
-										variant="outlined"
-										density="compact"
-										chips
-										color="primary"
-										small-chips
-										:label="__('Serial No')"
-										multiple
-										@update:model-value="set_serial_no(item)"
-									></v-autocomplete>
-								</v-col>
+									<v-col cols="4" v-if="item.has_serial_no == 1 || item.serial_no">
+										<v-text-field
+											density="compact"
+											variant="outlined"
+											color="primary"
+											:label="__('Serial No QTY')"
+											bg-color="white"
+											hide-details
+											v-model="item.serial_no_selected_count"
+											type="number"
+											readonly
+										></v-text-field>
+									</v-col>
+									<v-col cols="12" v-if="item.has_serial_no == 1 || item.serial_no">
+										<v-combobox
+											v-if="pos_profile.posa_auto_stock_reconcile == 1"
+											v-model="item.serial_no_selected"
+											:items="item.serial_no_data"
+											item-title="serial_no"
+											item-value="serial_no"
+											variant="outlined"
+											density="compact"
+											chips
+											color="primary"
+											small-chips
+											:label="__('Serial No')"
+											multiple
+											@update:modelValue="set_serial_no(item, $event)"
+										></v-combobox>
+
+										<v-autocomplete
+											v-else
+											v-model="item.serial_no_selected"
+											:items="item.serial_no_data"
+											item-title="serial_no"
+											item-value="serial_no"
+											variant="outlined"
+											density="compact"
+											chips
+											color="primary"
+											small-chips
+											:label="__('Serial No')"
+											multiple
+											@update:modelValue="set_serial_no(item, $event)"
+										></v-autocomplete>
+									</v-col>
 								<v-col cols="4" v-if="item.has_batch_no == 1 || item.batch_no">
 									<v-text-field
 										density="compact"
@@ -730,27 +748,57 @@
 									></v-text-field>
 								</v-col>
 								<v-col cols="8" v-if="item.has_batch_no == 1 || item.batch_no">
-									<v-autocomplete
+									<!-- Auto Stock Reconciliation ON -->
+									<v-combobox
+										v-if="pos_profile.posa_auto_stock_reconcile"
 										v-model="item.batch_no"
 										:items="item.batch_no_data"
 										item-title="batch_no"
+										item-value="batch_no"
 										variant="outlined"
 										density="compact"
 										color="primary"
 										:label="__('Batch No')"
 										@update:model-value="set_batch_qty(item, $event)"
-									>
-										<template v-slot:item="{ props, item }">
-											<v-list-item v-bind="props">
-												<v-list-item-title>
-													{{ item.raw.batch_no }}
-												</v-list-item-title>
-												<v-list-item-subtitle>
-													Available QTY '{{ item.raw.batch_qty }}' - Expiry Date {{ item.raw.expiry_date }}
-												</v-list-item-subtitle>
-											</v-list-item>
-										</template>
-									</v-autocomplete>
+										>
+											<template v-slot:item="{ props, item }">
+												<v-list-item v-bind="props" :title="null" :subtitle="null">
+													<v-list-item-title>
+														{{ item.raw.batch_no }}
+													</v-list-item-title>
+													<v-list-item-subtitle>
+														Available Qty: {{ item.raw.batch_qty }} - Expiry Date:
+														{{ item.raw.expiry_date }}
+													</v-list-item-subtitle>
+												</v-list-item>
+											</template>
+										</v-combobox>
+
+									<!-- Auto Stock Reconciliation OFF -->
+									<v-autocomplete
+										v-else
+										v-model="item.batch_no"
+										:items="item.batch_no_data"
+										item-title="batch_no"
+										item-value="batch_no"
+										variant="outlined"
+										density="compact"
+										color="primary"
+										:label="__('Batch No')"
+										@update:model-value="set_batch_qty(item, $event)"
+										>
+											<template v-slot:item="{ props, item }">
+												<v-list-item v-bind="props" :title="null" :subtitle="null">
+													<v-list-item-title>
+														{{ item.raw.batch_no }}
+													</v-list-item-title>
+													<v-list-item-subtitle>
+														Available Qty: {{ item.raw.batch_qty }} - Expiry Date:
+														{{ item.raw.expiry_date }}
+													</v-list-item-subtitle>
+												</v-list-item>
+											</template>
+										</v-autocomplete>
 								</v-col>
 								<v-col
 									cols="4"
@@ -2527,7 +2575,10 @@ export default {
 						}
 					}
 				}
-				if (this.stock_settings.allow_negative_stock != 1) {
+				if (
+					this.stock_settings.allow_negative_stock != 1 &&
+					!this.pos_profile.posa_auto_stock_reconcile
+				) {
 					if (
 						this.invoiceType == "Invoice" &&
 						((item.is_stock_item && item.stock_qty && !item.actual_qty) ||
@@ -2572,7 +2623,10 @@ export default {
 					}
 				}
 				if (item.has_batch_no) {
-					if (item.stock_qty > item.actual_batch_qty) {
+					if (
+						!this.pos_profile.posa_auto_stock_reconcile &&
+						item.stock_qty > item.actual_batch_qty
+					) {
 						toast.error(
 							__(`The existing batch quantity of item {0} is not enough`, [
 								item.item_name,
@@ -2850,6 +2904,7 @@ export default {
 					update_stock: this.pos_profile.update_stock,
 					price_list: this.get_price_list(),
 					has_batch_no: item.has_batch_no,
+					has_serial_no: item.has_serial_no,
 					serial_no: item.serial_no,
 					batch_no: item.batch_no,
 					is_stock_item: item.is_stock_item,
@@ -2857,6 +2912,9 @@ export default {
 			}).then((r) => {
 				if (r) {
 					const data = r;
+					item.serial_no_data = data.serial_no_data || [];
+					item.serial_no_selected = item.serial_no_selected || [];
+					item.serial_no_selected_count = item.serial_no_selected.length;
 					if (data.batch_no_data) {
 						item.batch_no_data = data.batch_no_data;
 					}
@@ -3169,22 +3227,31 @@ export default {
 			this.$forceUpdate();
 		},
 
-		set_serial_no(item) {
+		set_serial_no(item, value) {
+			if (value !== undefined) {
+				item.serial_no_selected = value || [];
+			}
 			if (!item.has_serial_no) return;
 			item.serial_no = "";
-			item.serial_no_selected.forEach((element) => {
-				item.serial_no += element + "\n";
+			const selected_serials = item.serial_no_selected || [];
+			selected_serials.forEach((element) => {
+				const serial_no =
+					element && typeof element === "object" ? element.serial_no : element;
+				if (serial_no) {
+					item.serial_no += serial_no + "\n";
+				}
 			});
-			item.serial_no_selected_count = item.serial_no_selected.length;
+			item.serial_no_selected_count = selected_serials.length;
 			if (item.serial_no_selected_count != item.stock_qty) {
 				item.qty = item.serial_no_selected_count;
 				this.calc_stock_qty(item, item.qty);
-				this.$forceUpdate();
 			}
+			this.$forceUpdate();
 		},
 
 		set_batch_qty(item, value, update = true) {
-			console.log(item, value);
+			const autoStockReconcile = !!this.pos_profile.posa_auto_stock_reconcile;
+			const selected_batch_no = value && typeof value === "object" ? value.batch_no : value;
 			const existing_items = this.items.filter(
 				(element) =>
 					element.item_code == item.item_code && element.posa_row_id != item.posa_row_id,
@@ -3211,7 +3278,7 @@ export default {
 			// 3. we should not use batch with remaining_qty = 0
 			// 4. we should the highest remaining_qty
 			const batch_no_data = Object.values(used_batches)
-				.filter((batch) => batch.remaining_qty > 0)
+				.filter((batch) => autoStockReconcile || batch.remaining_qty > 0)
 				.sort((a, b) => {
 					if (a.expiry_date && b.expiry_date) {
 						return a.expiry_date - b.expiry_date;
@@ -3231,11 +3298,29 @@ export default {
 				});
 			if (batch_no_data.length > 0) {
 				let batch_to_use = null;
-				if (value) {
-					batch_to_use = batch_no_data.find((batch) => batch.batch_no == value);
+				if (selected_batch_no) {
+					batch_to_use = batch_no_data.find(
+						(batch) => batch.batch_no == selected_batch_no,
+					);
+				}
+				if (!batch_to_use && autoStockReconcile && selected_batch_no) {
+					batch_to_use = {
+						batch_no: selected_batch_no,
+						batch_qty: 0,
+						expiry_date: null,
+						batch_price: null,
+					};
+				}
+				if (!batch_to_use && !autoStockReconcile) {
+					batch_to_use = batch_no_data[0];
 				}
 				if (!batch_to_use) {
-					batch_to_use = batch_no_data[0];
+					item.batch_no = selected_batch_no || null;
+					item.actual_batch_qty = null;
+					item.batch_no_expiry_date = null;
+					item.batch_price = null;
+					item.batch_no_data = batch_no_data;
+					return;
 				}
 				item.batch_no = batch_to_use.batch_no;
 				item.actual_batch_qty = batch_to_use.batch_qty;
@@ -3248,6 +3333,11 @@ export default {
 					item.batch_price = null;
 					this.update_item_detail(item);
 				}
+			} else if (autoStockReconcile && selected_batch_no) {
+				item.batch_no = selected_batch_no;
+				item.actual_batch_qty = 0;
+				item.batch_no_expiry_date = null;
+				item.batch_price = null;
 			} else {
 				item.batch_no = null;
 				item.actual_batch_qty = null;
