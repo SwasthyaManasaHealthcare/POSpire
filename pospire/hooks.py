@@ -361,6 +361,10 @@ fixtures = [
 					"Stock Entry-pos_offline_id",
 					"Stock Entry-pos_device_id",
 					"Customer-pos_offline_id",
+					"POS Profile-custom_auto_stock_reconcile",
+					"POS Opening Shift-custom_auto_stock_reconciliation",
+					"Stock Reconciliation-custom_stock_reconciliation",
+					"Stock Reconciliation-custom_pos_sales_invoice",
 				),
 			]
 		],
