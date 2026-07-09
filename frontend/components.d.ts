@@ -12,6 +12,7 @@ declare module 'vue' {
     ClosingDialog: typeof import('./src/components/pos/ClosingDialog.vue')['default']
     CouponsModal: typeof import('./src/components/pos/CouponsModal.vue')['default']
     Customer: typeof import('./src/components/pos/Customer.vue')['default']
+    Dashboard: typeof import('./src/components/dashboard/Dashboard.vue')['default']
     Drafts: typeof import('./src/components/pos/Drafts.vue')['default']
     EnhancedEmptyState: typeof import('./src/components/pos/EnhancedEmptyState.vue')['default']
     Invoice: typeof import('./src/components/pos/Invoice.vue')['default']
