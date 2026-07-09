@@ -57,6 +57,7 @@ import connectivity from "@/offline/connectivity";
 import { initOfflineStorage } from "@/offline/db";
 import { registerReadCache } from "@/offline/runtime";
 import { DexieMetadataReadCache } from "@/offline/read-cache";
+import { call } from "@/utils/call";
 import {
 	scheduler as syncScheduler,
 	migrateLegacyNeedsReviewEntries,
@@ -74,6 +75,13 @@ export default {
 			reconciliationOpen: false,
 			offlineDisabled: false,
 		};
+	},
+	beforeMount() {
+		// Register the read-cache before route components mount. Dashboard.vue
+		// can fetch on its own onMounted hook; if this stayed in App.mounted(),
+		// that first successful online read could happen before call() had a
+		// cache implementation to write into.
+		registerReadCache(new DexieMetadataReadCache());
 	},
 	async mounted() {
 		// Bootstrap the offline storage layer: opens Dexie, seeds device_id,
@@ -94,15 +102,15 @@ export default {
 			return;
 		}
 
-		// Wire the Dexie-backed read cache. DexieMetadataReadCache layers an
-		// in-memory Map over the existing `metadata` IndexedDB table (rows
-		// prefixed "rc:") so cached reads (customer groups, territories, genders)
-		// survive page reloads — cashiers who go offline after at least one
-		// online session still see populated dropdowns.
-		registerReadCache(new DexieMetadataReadCache());
-
 		// Start the connectivity detector so it drives the banner state.
 		connectivity.start();
+
+		this.bootstrapPosProfileForNavbar().catch((err) => {
+			// Non-fatal: POS.vue still performs the full opening-shift flow when
+			// the cashier visits POS. This startup fetch only teaches Navbar
+			// whether profile-gated menu items such as Payments should appear.
+			console.warn("[App] POS profile bootstrap failed", err);
+		});
 
 		// Start the outbox sync scheduler. Acquires the Web Locks API leader
 		// lock; only the leader tab drains. Other tabs read state passively
@@ -168,8 +176,27 @@ export default {
 		}
 	},
 	methods: {
+		async bootstrapPosProfileForNavbar() {
+			if (!window.user || window.user === "Guest") return;
+
+			const snapshot = await call("pospire.pospire.api.posapp.check_opening_shift", {
+				user: window.user,
+			});
+
+			if (!snapshot?.pos_profile) return;
+
+			this.eventBus.emit("register_pos_profile", snapshot);
+			this.eventBus.emit("set_company", snapshot.company);
+		},
 		navigateTo(page) {
-			const route = page === "Payments" ? "/payments" : "/pos";
+			const routes = {
+				POS: "/pos",
+				Payments: "/payments",
+				Dashboard: "/dashboard",
+			};
+
+			const route = routes[page] || "/pos";
+
 			if (this.$route.path !== route) {
 				this.$router.push(route);
 			}

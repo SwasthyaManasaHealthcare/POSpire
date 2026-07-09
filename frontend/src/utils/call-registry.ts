@@ -197,7 +197,10 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "read",
 		offline: false,
 	},
-
+	"pospire.pospire.api.dashboard.get_shift_dashboard": {
+		intent: "read",
+		offline: false,
+	},
 	// Payment entry reads (pay.vue flow)
 	"pospire.pospire.api.payment_entry.get_available_pos_profiles": {
 		intent: "read",

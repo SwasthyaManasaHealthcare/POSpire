@@ -250,7 +250,9 @@ export default {
       drawer: false,
       mini: true,
       item: 0,
-      items: [{ text: 'POS', icon: 'mdi-network-pos' }],
+      items: [{ text: 'POS', icon: 'mdi-network-pos' },
+              { text: 'Dashboard', icon: 'mdi-view-dashboard-outline' }
+      ],
       page: '',
       fav: true,
       menu: false,
@@ -351,7 +353,7 @@ export default {
         const payments = { text: 'Payments', icon: 'mdi-cash-register' };
         if (
           this.pos_profile.posa_use_pos_awesome_payments &&
-          this.items.length !== 2
+          !this.items.some((item) => item.text === 'Payments')
         ) {
           this.items.push(payments);
         }
