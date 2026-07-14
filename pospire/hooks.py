@@ -49,6 +49,7 @@ doctype_js = {
 	"POS Profile": "pospire/api/pos_profile.js",
 	"Sales Invoice": "pospire/api/invoice.js",
 	"Company": "pospire/api/company.js",
+	"Payment Entry": "pospire/api/payment_entry.js",
 	"POS Manager PIN": "pospire/pospire/doctype/pos_manager_pin/pos_manager_pin.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
@@ -365,6 +366,7 @@ fixtures = [
 					"POS Opening Shift-pos_profile_snapshot_auto_stock_reconcile",
 					"Stock Reconciliation-posa_pos_offline_id",
 					"Stock Reconciliation-posa_sales_invoice",
+					"Payment Entry-custom_pos_opening_shift",
 				),
 			]
 		],

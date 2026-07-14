@@ -190,10 +190,10 @@
 				</div>
 
 				<v-row
-					class="pyments px-1 py-0"
+					class="pyments loyalty-redemption-row px-1"
 					v-if="invoice_doc && available_pioints_amount > 0 && !invoice_doc.is_return"
 				>
-					<v-col cols="7">
+					<v-col cols="12" sm="7" class="py-1">
 						<v-text-field
 							density="compact"
 							variant="outlined"
@@ -206,7 +206,7 @@
 							:prefix="currencySymbol(invoice_doc.currency)"
 						></v-text-field>
 					</v-col>
-					<v-col cols="5">
+					<v-col cols="12" sm="5" class="py-1">
 						<v-text-field
 							density="compact"
 							variant="outlined"
@@ -870,9 +870,6 @@ export default {
 				payment.amount = flt(payment.amount);
 				totalPayedAmount += payment.amount;
 			});
-			if (this.invoice_doc.is_return && totalPayedAmount == 0) {
-				this.invoice_doc.is_pos = 0;
-			}
 			if (this.customer_credit_dict.length) {
 				this.customer_credit_dict.forEach((row) => {
 					row.credit_to_redeem = flt(row.credit_to_redeem);
@@ -1722,5 +1719,11 @@ export default {
 .small-switch {
 	transform: scale(0.85);
 	transform-origin: left center;
+}
+
+.loyalty-redemption-row {
+	align-items: flex-start;
+	margin-bottom: 16px;
+	row-gap: 8px;
 }
 </style>

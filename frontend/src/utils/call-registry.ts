@@ -171,6 +171,10 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		cacheTTLMs: 2 * HOUR,
 	},
+	"pospire.pospire.api.dashboard.get_shift_dashboard": {
+		intent: "read",
+		offline: true,
+	},
 
 	// -----------------------------------------------------------------------
 	// Reads — LIVE ONLY (P-4: server stays authoritative)
@@ -194,10 +198,6 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	"pospire.pospire.api.posapp.get_pos_coupon": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_active_gift_coupons": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_sales_invoice_child_table": {
-		intent: "read",
-		offline: false,
-	},
-	"pospire.pospire.api.dashboard.get_shift_dashboard": {
 		intent: "read",
 		offline: false,
 	},
