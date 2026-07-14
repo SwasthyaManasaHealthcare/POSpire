@@ -13,6 +13,16 @@ def _empty_cards():
 	}
 
 
+def _empty_card_comparisons():
+	return {
+		key: {
+			"status": "no_previous",
+			"percentage": None,
+		}
+		for key in _empty_cards()
+	}
+
+
 def _empty_hourly_sales():
 	return {
 		"labels": [],
@@ -32,6 +42,15 @@ def _empty_top_categories():
 	return []
 
 
+def _empty_shift_summary():
+	return {
+		"opening_float": 0,
+		"cash_sales": 0,
+		"cash_in": 0,
+		"cash_out": 0,
+	}
+
+
 def _get_current_open_shift():
 	open_vouchers = frappe.db.get_all(
 		"POS Opening Shift",
@@ -41,11 +60,189 @@ def _get_current_open_shift():
 			"docstatus": 1,
 			"status": "Open",
 		},
-		fields=["name", "period_start_date"],
+		fields=["name", "period_start_date", "pos_profile"],
 		order_by="period_start_date desc",
 		limit_page_length=1,
 	)
 	return open_vouchers[0] if open_vouchers else None
+
+
+def _get_cash_mode(pos_profile):
+	return frappe.get_cached_value("POS Profile", pos_profile, "posa_cash_mode_of_payment") or "Cash"
+
+
+def _get_previous_closed_shift(pos_profile, current_period_start_date):
+	closed_vouchers = frappe.db.get_all(
+		"POS Opening Shift",
+		filters={
+			"pos_profile": pos_profile,
+			"period_start_date": ["<", current_period_start_date],
+			"docstatus": 1,
+			"status": "Closed",
+		},
+		fields=["name"],
+		order_by="period_start_date desc",
+		limit_page_length=1,
+	)
+	return closed_vouchers[0] if closed_vouchers else None
+
+
+def _get_opening_float(pos_opening_shift, cash_mode):
+	return flt(
+		frappe.db.get_value(
+			"POS Opening Shift Detail",
+			{
+				"parent": pos_opening_shift,
+				"parenttype": "POS Opening Shift",
+				"parentfield": "balance_details",
+				"mode_of_payment": cash_mode,
+			},
+			"amount",
+		)
+	)
+
+
+def _get_cash_sales(pos_opening_shift, cash_mode):
+	rows = frappe.db.sql(
+		"""
+		SELECT COALESCE(SUM(sip.amount - si.change_amount), 0) AS cash_sales
+		FROM `tabSales Invoice Payment` sip
+		JOIN `tabSales Invoice` si
+			ON si.name = sip.parent
+		WHERE si.docstatus = 1
+			AND si.is_pos = 1
+			AND si.posa_pos_opening_shift = %(shift)s
+			AND sip.mode_of_payment = %(cash_mode)s
+		""",
+		{"shift": pos_opening_shift, "cash_mode": cash_mode},
+		as_dict=True,
+	)
+
+	return flt(rows[0].cash_sales) if rows else 0
+
+
+def _get_cash_movement(pos_opening_shift, cash_mode, payment_type):
+	rows = frappe.db.sql(
+		"""
+		SELECT COALESCE(SUM(paid_amount), 0) AS amount
+		FROM `tabPayment Entry`
+		WHERE docstatus = 1
+			AND payment_type = %(payment_type)s
+			AND custom_pos_opening_shift = %(shift)s
+			AND mode_of_payment = %(cash_mode)s
+		""",
+		{
+			"payment_type": payment_type,
+			"shift": pos_opening_shift,
+			"cash_mode": cash_mode,
+		},
+		as_dict=True,
+	)
+
+	return flt(rows[0].amount) if rows else 0
+
+
+def _get_shift_summary(opening_shift):
+	pos_opening_shift = opening_shift["name"]
+	cash_mode = _get_cash_mode(opening_shift["pos_profile"])
+
+	return {
+		"opening_float": _get_opening_float(pos_opening_shift, cash_mode),
+		"cash_sales": _get_cash_sales(pos_opening_shift, cash_mode),
+		"cash_in": _get_cash_movement(pos_opening_shift, cash_mode, "Receive"),
+		"cash_out": _get_cash_movement(pos_opening_shift, cash_mode, "Pay"),
+	}
+
+
+def _get_shift_cards(pos_opening_shift):
+	rows = frappe.db.sql(
+		"""
+		SELECT
+			COALESCE(SUM(CASE
+				WHEN docstatus = 1
+					AND is_pos = 1
+					AND IFNULL(is_return, 0) = 0
+				THEN net_total ELSE 0
+			END), 0) AS total_net_sales,
+			COALESCE(SUM(CASE
+				WHEN docstatus = 1
+					AND is_pos = 1
+					AND IFNULL(is_return, 0) = 0
+				THEN 1 ELSE 0
+			END), 0) AS bill_count,
+				COALESCE(SUM(CASE
+					WHEN docstatus = 1
+						AND is_pos = 1
+						AND IFNULL(redeem_loyalty_points, 0) = 1
+					THEN loyalty_points ELSE 0
+				END), 0) AS loyalty_redemptions,
+			COALESCE(SUM(CASE
+				WHEN docstatus = 1
+					AND is_pos = 1
+					AND IFNULL(is_return, 0) = 1
+				THEN ABS(grand_total) ELSE 0
+			END), 0) AS total_returns,
+			COALESCE(SUM(CASE
+				WHEN docstatus = 0
+					AND IFNULL(posa_is_printed, 0) = 0
+				THEN 1 ELSE 0
+			END), 0) AS held_invoices,
+			COALESCE(SUM(CASE
+				WHEN docstatus = 2
+					AND is_pos = 1
+				THEN 1 ELSE 0
+			END), 0) AS cancelled_invoices
+		FROM `tabSales Invoice`
+		WHERE posa_pos_opening_shift = %(pos_opening_shift)s
+		""",
+		{"pos_opening_shift": pos_opening_shift},
+		as_dict=True,
+	)
+
+	if not rows:
+		return _empty_cards()
+
+	row = rows[0]
+	return {
+		"total_net_sales": flt(row.total_net_sales),
+		"bill_count": cint(row.bill_count),
+		"loyalty_redemptions": flt(row.loyalty_redemptions),
+		"total_returns": flt(row.total_returns),
+		"held_invoices": cint(row.held_invoices),
+		"cancelled_invoices": cint(row.cancelled_invoices),
+	}
+
+
+def _get_card_comparisons(current_cards, previous_cards=None):
+	comparisons = _empty_card_comparisons()
+	if not previous_cards:
+		return comparisons
+
+	for key, current_value in current_cards.items():
+		previous_value = flt(previous_cards.get(key))
+		current_value = flt(current_value)
+
+		if previous_value == 0:
+			comparisons[key] = {
+				"status": "previous_zero",
+				"percentage": None,
+			}
+			continue
+
+		if current_value == previous_value:
+			comparisons[key] = {
+				"status": "same",
+				"percentage": 0,
+			}
+			continue
+
+		percentage = ((current_value - previous_value) / previous_value) * 100
+		comparisons[key] = {
+			"status": "up" if current_value > previous_value else "down",
+			"percentage": flt(abs(percentage), 1),
+		}
+
+	return comparisons
 
 
 def _get_hour_start(value):
@@ -199,95 +396,46 @@ def _get_top_categories(pos_opening_shift):
 @frappe.whitelist()
 def get_shift_dashboard():
 	cards = _empty_cards()
+	card_comparisons = _empty_card_comparisons()
 	hourly_sales = _empty_hourly_sales()
 	payment_distribution = _empty_payment_distribution()
 	top_products = _empty_top_products()
 	top_categories = _empty_top_categories()
+	shift_summary = _empty_shift_summary()
 	opening_shift = _get_current_open_shift()
 	if not opening_shift:
 		return {
 			"cards": cards,
+			"card_comparisons": card_comparisons,
 			"hourly_sales": hourly_sales,
 			"payment_distribution": payment_distribution,
 			"top_products": top_products,
 			"top_categories": top_categories,
+			"shift_summary": shift_summary,
 		}
 
 	pos_opening_shift = opening_shift["name"]
-
-	rows = frappe.db.sql(
-		"""
-		SELECT
-			COALESCE(SUM(CASE
-				WHEN docstatus = 1
-					AND is_pos = 1
-					AND IFNULL(is_return, 0) = 0
-				THEN net_total ELSE 0
-			END), 0) AS total_net_sales,
-			COALESCE(SUM(CASE
-				WHEN docstatus = 1
-					AND is_pos = 1
-					AND IFNULL(is_return, 0) = 0
-				THEN 1 ELSE 0
-			END), 0) AS bill_count,
-			COALESCE(SUM(CASE
-				WHEN docstatus = 1
-					AND is_pos = 1
-					AND IFNULL(redeem_loyalty_points, 0) = 1
-				THEN loyalty_amount ELSE 0
-			END), 0) AS loyalty_redemptions,
-			COALESCE(SUM(CASE
-				WHEN docstatus = 1
-					AND is_pos = 1
-					AND IFNULL(is_return, 0) = 1
-				THEN ABS(grand_total) ELSE 0
-			END), 0) AS total_returns,
-			COALESCE(SUM(CASE
-				WHEN docstatus = 0
-					AND IFNULL(posa_is_printed, 0) = 0
-				THEN 1 ELSE 0
-			END), 0) AS held_invoices,
-			COALESCE(SUM(CASE
-				WHEN docstatus = 2
-					AND is_pos = 1
-				THEN 1 ELSE 0
-			END), 0) AS cancelled_invoices
-		FROM `tabSales Invoice`
-		WHERE posa_pos_opening_shift = %(pos_opening_shift)s
-		""",
-		{"pos_opening_shift": pos_opening_shift},
-		as_dict=True,
+	cards = _get_shift_cards(pos_opening_shift)
+	previous_shift = _get_previous_closed_shift(
+		opening_shift["pos_profile"],
+		opening_shift["period_start_date"],
 	)
+	if previous_shift:
+		previous_cards = _get_shift_cards(previous_shift["name"])
+		card_comparisons = _get_card_comparisons(cards, previous_cards)
 
-	if not rows:
-		return {
-			"cards": cards,
-			"hourly_sales": hourly_sales,
-			"payment_distribution": payment_distribution,
-			"top_products": top_products,
-			"top_categories": top_categories,
-		}
-
-	row = rows[0]
-	cards.update(
-		{
-			"total_net_sales": flt(row.total_net_sales),
-			"bill_count": cint(row.bill_count),
-			"loyalty_redemptions": flt(row.loyalty_redemptions),
-			"total_returns": flt(row.total_returns),
-			"held_invoices": cint(row.held_invoices),
-			"cancelled_invoices": cint(row.cancelled_invoices),
-		}
-	)
 	hourly_sales = _get_hourly_sales(pos_opening_shift, opening_shift["period_start_date"])
 	payment_distribution = _get_payment_distribution(pos_opening_shift)
 	top_products = _get_top_products(pos_opening_shift)
 	top_categories = _get_top_categories(pos_opening_shift)
+	shift_summary = _get_shift_summary(opening_shift)
 
 	return {
 		"cards": cards,
+		"card_comparisons": card_comparisons,
 		"hourly_sales": hourly_sales,
 		"payment_distribution": payment_distribution,
 		"top_products": top_products,
 		"top_categories": top_categories,
+		"shift_summary": shift_summary,
 	}

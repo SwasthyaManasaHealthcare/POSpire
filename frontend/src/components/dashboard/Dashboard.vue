@@ -21,6 +21,12 @@
             <div class="dashboard-card__copy">
               <div class="dashboard-card__title">{{ card.title }}</div>
               <div class="dashboard-card__value">{{ formatCardValue(card) }}</div>
+              <div
+                class="dashboard-card__comparison"
+                :class="comparisonClass(card)"
+              >
+                {{ comparisonText(card) }}
+              </div>
             </div>
             <div
               class="dashboard-card__icon"
@@ -323,12 +329,34 @@
 	        </v-card>
 	      </v-col>
 	    </v-row>
+
+    <v-row v-if="!loading" class="dashboard-summary" dense>
+      <v-col cols="12" md="6">
+        <v-card class="dashboard-summary-card" elevation="1">
+          <v-card-title class="dashboard-summary-card__title">
+            {{ __("Shift Summary") }}
+          </v-card-title>
+          <v-card-text class="dashboard-summary-card__content">
+            <div
+              v-for="item in shiftSummaryItems"
+              :key="item.key"
+              class="dashboard-summary-card__row"
+            >
+              <span class="dashboard-summary-card__label">{{ item.title }}</span>
+              <span class="dashboard-summary-card__value">
+                {{ formatShiftSummaryValue(item) }}
+              </span>
+            </div>
+          </v-card-text>
+        </v-card>
+      </v-col>
+    </v-row>
 	  </v-container>
 	</template>
 
 <script>
 import { computed, onMounted, ref } from "vue";
-import { call } from "@/utils/call";
+import { call, unwrapStale } from "@/utils/call";
 
 function emptyCards() {
   return {
@@ -339,6 +367,16 @@ function emptyCards() {
     held_invoices: 0,
     cancelled_invoices: 0,
   };
+}
+
+function emptyCardComparisons() {
+  return Object.keys(emptyCards()).reduce((comparisons, key) => {
+    comparisons[key] = {
+      status: "no_previous",
+      percentage: null,
+    };
+    return comparisons;
+  }, {});
 }
 
 function emptyHourlySales() {
@@ -360,16 +398,27 @@ function emptyHourlySales() {
 	  return [];
 	}
 
+function emptyShiftSummary() {
+  return {
+    opening_float: 0,
+    cash_sales: 0,
+    cash_in: 0,
+    cash_out: 0,
+  };
+}
+
 export default {
   name: "Dashboard",
   setup() {
     const loading = ref(false);
     const error = ref("");
 	    const cards = ref(emptyCards());
+	    const cardComparisons = ref(emptyCardComparisons());
 	    const hourlySales = ref(emptyHourlySales());
 	    const paymentDistribution = ref(emptyPaymentDistribution());
 	    const topProducts = ref(emptyTopProducts());
 	    const topCategories = ref(emptyTopCategories());
+    const shiftSummary = ref(emptyShiftSummary());
 	    const showAllProducts = ref(false);
 	    const showAllCategories = ref(false);
     const cardItems = [
@@ -389,13 +438,13 @@ export default {
         color: "#2563eb",
         background: "#dbeafe",
       },
-      {
-        key: "loyalty_redemptions",
-        title: __("Loyalty"),
-        type: "currency",
-        icon: "mdi-star-circle-outline",
-        color: "#7c3aed",
-        background: "#ede9fe",
+	      {
+	        key: "loyalty_redemptions",
+	        title: __("Loyalty"),
+	        type: "points",
+	        icon: "mdi-star-circle-outline",
+	        color: "#7c3aed",
+	        background: "#ede9fe",
       },
       {
         key: "total_returns",
@@ -613,18 +662,51 @@ export default {
 		      }));
 		    });
 
+    const shiftSummaryItems = computed(() => [
+      {
+        key: "opening_float",
+        title: __("Opening Float"),
+        value: Number(shiftSummary.value.opening_float) || 0,
+        sign: "",
+      },
+      {
+        key: "cash_sales",
+        title: __("Cash Sales"),
+        value: Number(shiftSummary.value.cash_sales) || 0,
+        sign: "+",
+      },
+      {
+        key: "cash_in",
+        title: __("Cash In"),
+        value: Number(shiftSummary.value.cash_in) || 0,
+        sign: "+",
+      },
+      {
+        key: "cash_out",
+        title: __("Cash Out"),
+        value: Number(shiftSummary.value.cash_out) || 0,
+        sign: "-",
+      },
+    ]);
+
     async function fetchDashboard() {
       loading.value = true;
       error.value = "";
 
       try {
-        const result = await call({
+        const response = await call({
           method: "pospire.pospire.api.dashboard.get_shift_dashboard",
           intent: "read",
+          cacheKey: "dashboard.shift",
         });
+        const result = unwrapStale(response) || {};
         cards.value = {
           ...emptyCards(),
           ...(result?.cards || {}),
+        };
+        cardComparisons.value = {
+          ...emptyCardComparisons(),
+          ...(result?.card_comparisons || {}),
         };
         hourlySales.value = {
           ...emptyHourlySales(),
@@ -639,6 +721,10 @@ export default {
 	        topCategories.value = Array.isArray(result?.top_categories)
 	          ? result.top_categories
 	          : emptyTopCategories();
+        shiftSummary.value = {
+          ...emptyShiftSummary(),
+          ...(result?.shift_summary || {}),
+        };
 	        if ((topProducts.value || []).length <= productPreviewLimit) {
 	          showAllProducts.value = false;
 	        }
@@ -646,15 +732,22 @@ export default {
 	          showAllCategories.value = false;
 	        }
 	      } catch (err) {
+	        if (err?.name !== "OfflineReadUnavailable") {
 	        console.error("[Dashboard] failed to load shift dashboard", err);
+	        }
 	        cards.value = emptyCards();
+	        cardComparisons.value = emptyCardComparisons();
 	        hourlySales.value = emptyHourlySales();
 	        paymentDistribution.value = emptyPaymentDistribution();
 	        topProducts.value = emptyTopProducts();
 	        topCategories.value = emptyTopCategories();
+        shiftSummary.value = emptyShiftSummary();
 	        showAllProducts.value = false;
 	        showAllCategories.value = false;
-	        error.value = err?.message || __("Could not load dashboard.");
+	        error.value =
+	          err?.name === "OfflineReadUnavailable"
+	            ? ""
+	            : err?.message || __("Could not load dashboard.");
       } finally {
         loading.value = false;
       }
@@ -668,15 +761,73 @@ export default {
 	      showAllCategories.value = !showAllCategories.value;
 	    }
 
-    function formatCardValue(card) {
-      const value = Number(cards.value[card.key]) || 0;
-      if (card.type === "currency") {
-        return `₹${value.toLocaleString("en-IN", {
-          maximumFractionDigits: 2,
-        })}`;
-      }
-      return value.toLocaleString("en-IN");
-    }
+	    function formatCardValue(card) {
+	      const value = Number(cards.value[card.key]) || 0;
+	      if (card.type === "currency") {
+	        return `₹${value.toLocaleString("en-IN", {
+	          maximumFractionDigits: 2,
+	        })}`;
+	      }
+	      if (card.type === "points") {
+	        return `${value.toLocaleString("en-IN", {
+	          maximumFractionDigits: 0,
+	        })} ${__("Points")}`;
+	      }
+	      return value.toLocaleString("en-IN");
+	    }
+
+	    function getCardComparison(card) {
+	      return cardComparisons.value?.[card.key] || {
+	        status: "no_previous",
+	        percentage: null,
+	      };
+	    }
+
+	    function comparisonText(card) {
+	      const comparison = getCardComparison(card);
+	      if (comparison.status === "up") {
+	        return `▲ ${formatPercentage(comparison.percentage)} vs Previous Shift`;
+	      }
+	      if (comparison.status === "down") {
+	        return `▼ ${formatPercentage(comparison.percentage)} vs Previous Shift`;
+	      }
+	      if (comparison.status === "same") {
+	        return __("Same as Previous Shift");
+	      }
+	      if (comparison.status === "previous_zero") {
+	        return previousZeroText(card);
+	      }
+	      return __("No Previous Shift");
+	    }
+
+	    function previousZeroText(card) {
+	      const messages = {
+	        total_net_sales: __("Previous Shift had no Net Sales"),
+	        bill_count: __("Previous Shift had no Bills"),
+	        loyalty_redemptions: __("Previous Shift had no Loyalty Redemptions"),
+	        total_returns: __("Previous Shift had no Returns"),
+	        held_invoices: __("Previous Shift had no Held Invoices"),
+	        cancelled_invoices: __("Previous Shift had no Cancelled Invoices"),
+	      };
+	      return messages[card.key] || __("No Previous Shift");
+	    }
+
+	    function comparisonClass(card) {
+	      const status = getCardComparison(card).status;
+	      return {
+	        "dashboard-card__comparison--up": status === "up",
+	        "dashboard-card__comparison--down": status === "down",
+	        "dashboard-card__comparison--neutral": status !== "up" && status !== "down",
+	      };
+	    }
+
+	    function formatPercentage(value) {
+	      const number = Number(value);
+	      if (!Number.isFinite(number)) return "0%";
+	      return `${number.toLocaleString("en-IN", {
+	        maximumFractionDigits: 1,
+	      })}%`;
+	    }
 
 	    function formatCurrency(value) {
 	      const number = Number(value) || 0;
@@ -684,6 +835,10 @@ export default {
 	        maximumFractionDigits: 2,
 	      })}`;
 	    }
+
+    function formatShiftSummaryValue(item) {
+      return `${item.sign}${formatCurrency(item.value)}`;
+    }
 
 	    function formatNumber(value) {
 	      const number = Number(value) || 0;
@@ -753,7 +908,8 @@ export default {
       donutRadius,
 	      hasPaymentData,
 	      paymentSegments,
-	      paymentTotal,
+      paymentTotal,
+      shiftSummaryItems,
 		      hasTopProductsData,
 		      hasProductToggle,
 		      hasTopCategoriesData,
@@ -765,7 +921,10 @@ export default {
 		      toggleProductsView,
 		      toggleCategoriesView,
 		      formatCardValue,
+		      comparisonText,
+		      comparisonClass,
 		      formatCurrency,
+      formatShiftSummaryValue,
 		      formatCompactCurrency,
 		      formatHourLabel,
 		      formatNumber,
@@ -800,6 +959,54 @@ export default {
   margin-bottom: 20px;
 }
 
+.dashboard-summary {
+  margin-top: 20px;
+}
+
+.dashboard-summary-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+}
+
+.dashboard-summary-card__title {
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 16px 18px 4px;
+}
+
+.dashboard-summary-card__content {
+  display: grid;
+  gap: 14px;
+  padding: 12px 18px 18px;
+}
+
+.dashboard-summary-card__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dashboard-summary-card__label {
+  color: #64748b;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.dashboard-summary-card__value {
+  color: #0f172a;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .dashboard-card__content {
   height: 100%;
   display: flex;
@@ -827,6 +1034,25 @@ export default {
   font-weight: 700;
   line-height: 1.15;
   overflow-wrap: anywhere;
+}
+
+.dashboard-card__comparison {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.dashboard-card__comparison--up {
+  color: #16a34a;
+}
+
+.dashboard-card__comparison--down {
+  color: #dc2626;
+}
+
+.dashboard-card__comparison--neutral {
+  color: #64748b;
 }
 
 .dashboard-card__icon {
