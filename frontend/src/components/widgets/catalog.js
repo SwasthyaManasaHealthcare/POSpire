@@ -67,7 +67,13 @@ export const CATALOG = {
 			rows: slice || [],
 			columns: [
 				{ key: "item_group", label: __("Category"), width: "minmax(92px, 0.75fr)" },
-				{ key: "total_sales", label: "", bar: true, width: "minmax(120px, 1.4fr)" },
+				{
+					key: "total_sales_bar",
+					label: "",
+					bar: true,
+					barValueKey: "total_sales",
+					width: "minmax(120px, 1.4fr)",
+				},
 				{
 					key: "total_sales",
 					label: __("Sales"),
