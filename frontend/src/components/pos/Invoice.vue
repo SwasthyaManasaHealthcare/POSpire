@@ -748,7 +748,6 @@
 									></v-text-field>
 								</v-col>
 								<v-col cols="8" v-if="item.has_batch_no == 1 || item.batch_no">
-									<!-- Auto Stock Reconciliation ON -->
 									<v-combobox
 										v-if="pos_profile.posa_auto_stock_reconcile"
 										v-model="item.batch_no"
@@ -760,21 +759,20 @@
 										color="primary"
 										:label="__('Batch No')"
 										@update:model-value="set_batch_qty(item, $event)"
-										>
-											<template v-slot:item="{ props, item }">
-												<v-list-item v-bind="props" :title="null" :subtitle="null">
-													<v-list-item-title>
-														{{ item.raw.batch_no }}
-													</v-list-item-title>
-													<v-list-item-subtitle>
-														Available Qty: {{ item.raw.batch_qty }} - Expiry Date:
-														{{ item.raw.expiry_date }}
-													</v-list-item-subtitle>
-												</v-list-item>
-											</template>
-										</v-combobox>
+									>
+										<template v-slot:item="{ props, item }">
+											<v-list-item v-bind="props" :title="null" :subtitle="null">
+												<v-list-item-title>
+													{{ item.raw.batch_no }}
+												</v-list-item-title>
+												<v-list-item-subtitle>
+													Available Qty: {{ item.raw.batch_qty }} - Expiry Date:
+													{{ item.raw.expiry_date }}
+												</v-list-item-subtitle>
+											</v-list-item>
+										</template>
+									</v-combobox>
 
-									<!-- Auto Stock Reconciliation OFF -->
 									<v-autocomplete
 										v-else
 										v-model="item.batch_no"
@@ -786,19 +784,19 @@
 										color="primary"
 										:label="__('Batch No')"
 										@update:model-value="set_batch_qty(item, $event)"
-										>
-											<template v-slot:item="{ props, item }">
-												<v-list-item v-bind="props" :title="null" :subtitle="null">
-													<v-list-item-title>
-														{{ item.raw.batch_no }}
-													</v-list-item-title>
-													<v-list-item-subtitle>
-														Available Qty: {{ item.raw.batch_qty }} - Expiry Date:
-														{{ item.raw.expiry_date }}
-													</v-list-item-subtitle>
-												</v-list-item>
-											</template>
-										</v-autocomplete>
+									>
+										<template v-slot:item="{ props, item }">
+											<v-list-item v-bind="props" :title="null" :subtitle="null">
+												<v-list-item-title>
+													{{ item.raw.batch_no }}
+												</v-list-item-title>
+												<v-list-item-subtitle>
+													Available Qty: {{ item.raw.batch_qty }} - Expiry Date:
+													{{ item.raw.expiry_date }}
+												</v-list-item-subtitle>
+											</v-list-item>
+										</template>
+									</v-autocomplete>
 								</v-col>
 								<v-col
 									cols="4"
@@ -1901,7 +1899,7 @@ export default {
 				(!this.pos_profile.posa_auto_set_batch && new_item.has_batch_no) ||
 				new_item.has_serial_no
 			) {
-				this.expanded.push(new_item);
+				this.expanded.push(new_item.posa_row_id);
 			}
 			// Sales Person
 			new_item.sales_person = "";
@@ -3243,7 +3241,8 @@ export default {
 			});
 			item.serial_no_selected_count = selected_serials.length;
 			if (item.serial_no_selected_count != item.stock_qty) {
-				item.qty = item.serial_no_selected_count;
+				const conversion_factor = flt(item.conversion_factor) || 1;
+				item.qty = item.serial_no_selected_count / conversion_factor;
 				this.calc_stock_qty(item, item.qty);
 			}
 			this.$forceUpdate();
@@ -3369,7 +3368,9 @@ export default {
 			if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				this.expanded = [];
-				this.expanded.push(this.items[0]);
+				if (this.items[0]) {
+					this.expanded.push(this.items[0].posa_row_id);
+				}
 			}
 		},
 
@@ -3939,7 +3940,7 @@ export default {
 				(!this.pos_profile.posa_auto_set_batch && new_item.has_batch_no) ||
 				new_item.has_serial_no
 			) {
-				this.expanded.push(new_item);
+				this.expanded.push(new_item.posa_row_id);
 			}
 			this.update_item_detail(new_item);
 			return new_item;
@@ -4340,11 +4341,11 @@ export default {
 			if (data_value.length > 0) {
 				// Only update if item does not already have modified values
 				let expandedItem = this.items.find(
-					(i) => i.posa_row_id === data_value[0].posa_row_id,
+					(i) => i.posa_row_id === data_value[0],
 				);
 
 				if (expandedItem && !expandedItem.modified) {
-					this.update_item_detail(data_value[0]);
+					this.update_item_detail(expandedItem);
 				}
 			}
 		},

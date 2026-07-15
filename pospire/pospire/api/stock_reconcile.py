@@ -5,13 +5,12 @@
 
 from __future__ import annotations
 
-import traceback
-
 import frappe
 from erpnext.stock.doctype.batch.batch import get_batch_qty, make_batch
 from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
 	get_stock_ledgers_for_serial_nos,
 )
+from erpnext.stock.doctype.serial_no.serial_no import get_serial_nos
 from erpnext.stock.serial_batch_bundle import SerialBatchCreation
 from erpnext.stock.utils import get_or_make_bin, get_stock_balance
 from frappe import _
@@ -46,21 +45,8 @@ def ensure_stock_for_invoice(invoice_doc) -> None:
 	if not reconciliation.items:
 		return
 
-	try:
-		reconciliation.insert(ignore_permissions=True)
-		reconciliation.submit()
-	except Exception as exc:
-		frappe.log_error(
-			title="New Serial Validation Debug",
-			message=(
-				f"Exception Class: {exc.__class__.__name__}\n"
-				f"Exception Message: {exc!s}\n\n"
-				f"traceback.format_exc():\n{traceback.format_exc()}\n\n"
-				f"frappe.get_traceback():\n{frappe.get_traceback()}"
-			),
-		)
-		raise
-	return
+	reconciliation.insert(ignore_permissions=True)
+	reconciliation.submit()
 
 
 def ensure_typed_batches_exist_for_invoice(invoice_doc) -> None:
@@ -106,11 +92,22 @@ def _calculate_shortfalls(invoice_doc) -> list[dict]:
 			["has_batch_no", "has_serial_no"],
 			as_dict=True,
 		)
-		if cint(item_details.has_serial_no):
+		if not item_details:
+			continue
+
+		has_serial_no = cint(item_details.has_serial_no)
+		has_batch_no = cint(item_details.has_batch_no)
+
+		if has_serial_no:
+			if has_batch_no and not row.get("batch_no"):
+				frappe.throw(
+					_("Batch No is required for Item {0}.").format(frappe.bold(item_code)),
+					frappe.ValidationError,
+				)
 			serial_required_rows.append(row)
 			continue
 
-		if cint(item_details.has_batch_no):
+		if has_batch_no:
 			batch_no = row.get("batch_no")
 			if not batch_no:
 				frappe.throw(
@@ -195,7 +192,7 @@ def _calculate_shortfalls(invoice_doc) -> list[dict]:
 		)
 
 	for row in serial_required_rows:
-		serial_nos = _split_serial_nos(row.get("serial_no"))
+		serial_nos = get_serial_nos(row.get("serial_no"))
 		required_qty = flt(row.get("stock_qty") or row.get("qty"))
 		if not serial_nos:
 			frappe.throw(
@@ -218,13 +215,6 @@ def _calculate_shortfalls(invoice_doc) -> list[dict]:
 				getattr(invoice_doc, "posting_time", None),
 			)
 		)
-		stock_shortage_qty = cint(max(flt(required_qty - available_qty), 0))
-		if stock_shortage_qty > len(missing_serial_nos):
-			for serial_no in serial_nos:
-				if serial_no not in missing_serial_nos:
-					missing_serial_nos.append(serial_no)
-				if len(missing_serial_nos) >= stock_shortage_qty:
-					break
 
 		missing_qty = len(missing_serial_nos)
 
@@ -235,9 +225,12 @@ def _calculate_shortfalls(invoice_doc) -> list[dict]:
 			{
 				"item_code": row.get("item_code"),
 				"warehouse": row.get("warehouse"),
+				"batch_no": row.get("batch_no"),
 				"required_qty": required_qty,
 				"available_qty": available_qty,
 				"shortage_qty": missing_qty,
+				"selected_serial_nos": serial_nos,
+				"available_serial_nos": list(available_serial_nos),
 				"missing_serial_nos": missing_serial_nos,
 				"rows": [row],
 			}
@@ -379,12 +372,10 @@ def _build_stock_reconciliation(invoice_doc, shortfalls: list[dict]):
 
 
 def _get_reconciliation_link_values(invoice_doc) -> dict:
-	"""Return approved and branch-local reconciliation link field values."""
+	"""Return reconciliation link field values keyed by the installed field names."""
 	return {
 		"posa_pos_offline_id": getattr(invoice_doc, "pos_offline_id", None),
-		"custom_stock_reconciliation": getattr(invoice_doc, "pos_offline_id", None),
 		"posa_sales_invoice": getattr(invoice_doc, "name", None),
-		"custom_pos_sales_invoice": getattr(invoice_doc, "name", None),
 	}
 
 
@@ -394,6 +385,8 @@ def _get_reconciliation_posting_datetime(invoice_doc) -> tuple:
 		f"{invoice_doc.posting_date} {invoice_doc.posting_time or '00:00:00'}"
 	)
 	reconciliation_datetime = add_to_date(invoice_posting_datetime, seconds=-1, as_datetime=True)
+	if reconciliation_datetime.date() != invoice_posting_datetime.date():
+		reconciliation_datetime = invoice_posting_datetime
 	return reconciliation_datetime.date(), get_time(reconciliation_datetime)
 
 
@@ -412,6 +405,8 @@ def _get_reconciliation_rows(
 			["has_batch_no", "has_serial_no"],
 			as_dict=True,
 		)
+		if not item_details:
+			continue
 
 		if cint(item_details.has_serial_no):
 			rows.extend(_get_serial_reconciliation_rows(invoice_doc, shortfall, posting_date, posting_time))
@@ -485,19 +480,24 @@ def _get_serial_reconciliation_rows(invoice_doc, shortfall: dict, posting_date, 
 	if not serial_nos:
 		return []
 
-	qty = len(serial_nos)
+	batch_no = shortfall.get("batch_no")
+	target_serial_nos = _get_target_serial_nos(shortfall)
+	qty = len(target_serial_nos)
 	row = {
 		"item_code": shortfall["item_code"],
 		"warehouse": shortfall["warehouse"],
 		"qty": qty,
 		"valuation_rate": shortfall["valuation_rate"],
 		"allow_zero_valuation_rate": 0,
-		"serial_no": "\n".join(serial_nos),
+		"serial_no": "\n".join(target_serial_nos),
 		"use_serial_batch_fields": 1,
 		"reconcile_all_serial_batch": 1,
 	}
+	if batch_no:
+		_ensure_batch_exists(shortfall["item_code"], batch_no, invoice_doc)
+		row["batch_no"] = batch_no
 
-	if any(not frappe.db.exists("Serial No", serial_no) for serial_no in serial_nos):
+	if target_serial_nos:
 		bundle = _make_reconciliation_bundle(
 			invoice_doc=invoice_doc,
 			item_code=shortfall["item_code"],
@@ -506,43 +506,54 @@ def _get_serial_reconciliation_rows(invoice_doc, shortfall: dict, posting_date, 
 			valuation_rate=shortfall["valuation_rate"],
 			posting_date=posting_date,
 			posting_time=posting_time,
-			serial_nos=serial_nos,
+			serial_nos=target_serial_nos,
+			batch_no=batch_no,
+			batches=frappe._dict({batch_no: qty}) if batch_no else None,
 			use_serial_batch_fields=1,
 		)
 		row["serial_and_batch_bundle"] = bundle.name
-		frappe.log_error(
-			title="New Serial Bundle Debug",
-			message=frappe.as_json(
-				{
-					"bundle": {
-						"name": bundle.name,
-						"warehouse": bundle.get("warehouse"),
-						"voucher_type": bundle.get("voucher_type"),
-						"voucher_no": bundle.get("voucher_no"),
-						"entries": [
-							{
-								"serial_no": entry.get("serial_no"),
-								"qty": entry.get("qty"),
-								"warehouse": bundle.get("warehouse"),
-								"voucher_type": bundle.get("voucher_type"),
-								"voucher_no": bundle.get("voucher_no"),
-							}
-							for entry in bundle.get("entries")
-						],
-					},
-					"stock_reconciliation_item": {
-						"qty": row.get("qty"),
-						"current_qty": row.get("current_qty"),
-						"quantity_difference": row.get("quantity_difference"),
-						"serial_no": row.get("serial_no"),
-						"serial_and_batch_bundle": row.get("serial_and_batch_bundle"),
-					},
-				},
-				indent=2,
-			),
-		)
 
 	return [row]
+
+
+def _get_target_serial_nos(shortfall: dict) -> list[str]:
+	"""Return all serials that should exist after Stock Reconciliation."""
+	missing_serial_nos = set(_get_missing_serial_nos(shortfall))
+	target_serial_nos = _get_active_warehouse_serial_nos(
+		shortfall["item_code"],
+		shortfall["warehouse"],
+		shortfall.get("batch_no"),
+	)
+	for serial_no in missing_serial_nos:
+		if serial_no not in target_serial_nos:
+			target_serial_nos.append(serial_no)
+
+	return list(dict.fromkeys(target_serial_nos))
+
+
+def _get_active_warehouse_serial_nos(
+	item_code: str,
+	warehouse: str,
+	batch_no: str | None = None,
+) -> list[str]:
+	"""Return active serials currently in the warehouse for the reconciliation target."""
+	filters = {
+		"item_code": item_code,
+		"status": "Active",
+		"warehouse": warehouse,
+	}
+	if batch_no:
+		filters["batch_no"] = batch_no
+
+	return [
+		row.serial_no
+		for row in frappe.get_all(
+			"Serial No",
+			filters=filters,
+			fields=["name as serial_no"],
+			order_by="name",
+		)
+	]
 
 
 def _get_required_batches(shortfall: dict) -> dict:
@@ -567,7 +578,7 @@ def _get_missing_serial_nos(shortfall: dict) -> list[str]:
 
 	serial_nos = []
 	for row in shortfall["rows"]:
-		serial_nos.extend(_split_serial_nos(row.get("serial_no")))
+		serial_nos.extend(get_serial_nos(row.get("serial_no")))
 
 	if not serial_nos:
 		frappe.throw(
@@ -635,7 +646,7 @@ def _get_available_serial_nos_for_stock(
 		else:
 			row_serial_nos = {
 				serial_no
-				for serial_no in _split_serial_nos(row.get("serial_no"))
+				for serial_no in get_serial_nos(row.get("serial_no"))
 				if serial_no in selected_serial_nos
 			}
 
@@ -645,11 +656,6 @@ def _get_available_serial_nos_for_stock(
 			available_serial_nos.difference_update(row_serial_nos)
 
 	return available_serial_nos
-
-
-def _split_serial_nos(serial_no: str | None) -> list[str]:
-	"""Split newline-delimited serial numbers from POS invoice rows."""
-	return [d.strip() for d in (serial_no or "").replace(",", "\n").splitlines() if d.strip()]
 
 
 def _ensure_batch_exists(item_code: str, batch_no: str, invoice_doc) -> None:
@@ -691,6 +697,7 @@ def _make_reconciliation_bundle(
 	posting_time,
 	batches=None,
 	serial_nos=None,
+	batch_no: str | None = None,
 	use_serial_batch_fields: int = 0,
 ):
 	"""Create a draft inward Serial and Batch Bundle for Stock Reconciliation."""
@@ -709,6 +716,7 @@ def _make_reconciliation_bundle(
 				"incoming_rate": valuation_rate,
 				"batches": batches or frappe._dict(),
 				"serial_nos": serial_nos or [],
+				"batch_no": batch_no,
 				"use_serial_batch_fields": use_serial_batch_fields,
 				"do_not_submit": True,
 			}
