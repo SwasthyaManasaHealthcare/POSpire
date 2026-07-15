@@ -9,10 +9,12 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     ApprovalDialog: typeof import('./src/components/pos/ApprovalDialog.vue')['default']
+    Chart: typeof import('./src/components/widgets/Chart.vue')['default']
     ClosingDialog: typeof import('./src/components/pos/ClosingDialog.vue')['default']
     CouponsModal: typeof import('./src/components/pos/CouponsModal.vue')['default']
     Customer: typeof import('./src/components/pos/Customer.vue')['default']
     Dashboard: typeof import('./src/components/dashboard/Dashboard.vue')['default']
+    DataTable: typeof import('./src/components/widgets/DataTable.vue')['default']
     Drafts: typeof import('./src/components/pos/Drafts.vue')['default']
     EnhancedEmptyState: typeof import('./src/components/pos/EnhancedEmptyState.vue')['default']
     Invoice: typeof import('./src/components/pos/Invoice.vue')['default']
@@ -20,6 +22,7 @@ declare module 'vue' {
     MpesaPayments: typeof import('./src/components/pos/Mpesa-Payments.vue')['default']
     Navbar: typeof import('./src/components/Navbar.vue')['default']
     NewAddress: typeof import('./src/components/pos/NewAddress.vue')['default']
+    NumberCard: typeof import('./src/components/widgets/NumberCard.vue')['default']
     OffersModal: typeof import('./src/components/pos/OffersModal.vue')['default']
     OfflineBanner: typeof import('./src/components/offline/OfflineBanner.vue')['default']
     OfflineSyncStatus: typeof import('./src/components/offline/OfflineSyncStatus.vue')['default']
@@ -36,5 +39,6 @@ declare module 'vue' {
     SalesOrders: typeof import('./src/components/pos/SalesOrders.vue')['default']
     UpdateCustomer: typeof import('./src/components/pos/UpdateCustomer.vue')['default']
     Variants: typeof import('./src/components/pos/Variants.vue')['default']
+    WidgetRenderer: typeof import('./src/components/widgets/WidgetRenderer.vue')['default']
   }
 }
