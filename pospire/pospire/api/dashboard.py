@@ -439,3 +439,102 @@ def get_shift_dashboard():
 		"top_categories": top_categories,
 		"shift_summary": shift_summary,
 	}
+
+
+def _number_card(data_key, title, icon):
+	return {
+		"widget_type": "Number Card",
+		"data_key": data_key,
+		"variant": None,
+		"title": title,
+		"icon": icon,
+		"column_span": 4,
+	}
+
+
+DEFAULT_DASHBOARD_LAYOUT = [
+	_number_card("total_net_sales", "Total Net Sales", "mdi-cash-multiple"),
+	_number_card("bill_count", "Bills", "mdi-receipt-text-outline"),
+	_number_card("loyalty_redemptions", "Loyalty", "mdi-star-circle-outline"),
+	_number_card("total_returns", "Returns", "mdi-cash-refund"),
+	_number_card("held_invoices", "Held", "mdi-pause-circle-outline"),
+	_number_card("cancelled_invoices", "Cancelled", "mdi-close-circle-outline"),
+	{
+		"widget_type": "Chart",
+		"data_key": "hourly_sales",
+		"variant": "line",
+		"title": "Hourly Sales",
+		"icon": None,
+		"column_span": 6,
+	},
+	{
+		"widget_type": "Chart",
+		"data_key": "payment_distribution",
+		"variant": "donut",
+		"title": "Payment Distribution",
+		"icon": None,
+		"column_span": 6,
+	},
+	{
+		"widget_type": "Table",
+		"data_key": "top_products",
+		"variant": None,
+		"title": "Top Selling Products",
+		"icon": None,
+		"column_span": 6,
+	},
+	{
+		"widget_type": "Table",
+		"data_key": "top_categories",
+		"variant": None,
+		"title": "Top Selling Categories",
+		"icon": None,
+		"column_span": 6,
+	},
+	{
+		"widget_type": "Table",
+		"data_key": "shift_summary",
+		"variant": None,
+		"title": "Shift Summary",
+		"icon": None,
+		"column_span": 6,
+	},
+]
+
+_WIDGET_TYPE_MAP = {
+	"Number Card": "number-card",
+	"Chart": "chart",
+	"Table": "table",
+}
+
+
+@frappe.whitelist()
+def get_dashboard_layout():
+	settings = frappe.get_single("POS Dashboard Settings")
+	rows = settings.get("widgets") or []
+	layout = []
+	for row in rows:
+		if not row.enabled:
+			continue
+		layout.append(
+			{
+				"widget_type": _WIDGET_TYPE_MAP.get(row.widget_type, "number-card"),
+				"data_key": row.data_key,
+				"variant": row.variant or None,
+				"title": row.title or None,
+				"icon": row.icon or None,
+				"column_span": row.column_span or None,
+			}
+		)
+
+	if not layout:
+		return [dict(widget) for widget in _default_layout_kebab()]
+
+	return layout
+
+
+def _default_layout_kebab():
+	return [
+		{**widget, "widget_type": _WIDGET_TYPE_MAP[widget["widget_type"]]}
+		for widget in DEFAULT_DASHBOARD_LAYOUT
+	]
