@@ -65,8 +65,9 @@ export default {
 			const maxes = {};
 			for (const col of props.columns) {
 				if (!col.bar) continue;
+				const valueKey = col.barValueKey || col.key;
 				maxes[col.key] = props.rows.reduce(
-					(max, row) => Math.max(max, Number(row[col.key]) || 0),
+					(max, row) => Math.max(max, Number(row[valueKey]) || 0),
 					0,
 				);
 			}
@@ -81,7 +82,8 @@ export default {
 		function barWidth(row, col) {
 			const max = maxByColumn.value[col.key] || 0;
 			if (!max) return 0;
-			return Math.max((Number(row[col.key]) / max) * 100, 2);
+			const valueKey = col.barValueKey || col.key;
+			return Math.max((Number(row[valueKey]) / max) * 100, 2);
 		}
 
 		function alignClass(col) {
