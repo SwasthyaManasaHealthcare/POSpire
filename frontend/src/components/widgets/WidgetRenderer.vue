@@ -4,6 +4,7 @@
       v-for="(item, index) in resolvedWidgets"
       :key="index"
       cols="12"
+      :sm="item.sm"
       :md="item.cols"
     >
       <v-card
@@ -11,8 +12,8 @@
         class="widget-grid__card"
         elevation="1"
       >
-        <v-card-title v-if="item.props.title" class="widget-grid__title">
-          {{ item.props.title }}
+        <v-card-title v-if="item.title" class="widget-grid__title">
+          {{ item.title }}
         </v-card-title>
         <v-card-text class="widget-grid__body">
           <component :is="item.component" v-bind="item.props" />
@@ -50,8 +51,10 @@ export default {
 				items.push({
 					component,
 					type: resolved.type,
+					title: resolved.title,
 					props: resolved.props,
 					cols: Math.min(Math.max(resolved.colSpan, 1), 12),
+					sm: resolved.type === "number-card" ? 6 : 12,
 				});
 			}
 			return items;

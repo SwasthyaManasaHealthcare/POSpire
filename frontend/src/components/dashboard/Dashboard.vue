@@ -24,6 +24,19 @@ const CARD_KEYS = [
 	"cancelled_invoices",
 ];
 
+// Client-side fallback that mirrors the server default in
+// dashboard.py::DEFAULT_DASHBOARD_LAYOUT. Used only when the layout endpoint
+// is unreachable (offline first load or server error) so the dashboard still
+// renders instead of going blank.
+const DEFAULT_LAYOUT = [
+	...CARD_KEYS.map((key) => ({ widget_type: "number-card", data_key: key, column_span: 4 })),
+	{ widget_type: "chart", data_key: "hourly_sales", variant: "line", column_span: 6 },
+	{ widget_type: "chart", data_key: "payment_distribution", variant: "donut", column_span: 6 },
+	{ widget_type: "table", data_key: "top_products", column_span: 6 },
+	{ widget_type: "table", data_key: "top_categories", column_span: 6 },
+	{ widget_type: "table", data_key: "shift_summary", column_span: 6 },
+];
+
 const PREVIOUS_ZERO_LABELS = {
 	total_net_sales: "Previous Shift had no Net Sales",
 	bill_count: "Previous Shift had no Bills",
@@ -76,12 +89,12 @@ export default {
 					cacheKey: "dashboard.layout",
 				});
 				const result = unwrapStale(response);
-				layout.value = Array.isArray(result) ? result : [];
+				layout.value = Array.isArray(result) && result.length ? result : DEFAULT_LAYOUT;
 			} catch (err) {
 				if (err?.name !== "OfflineReadUnavailable") {
 					console.error("[Dashboard] failed to load layout", err);
 				}
-				layout.value = [];
+				layout.value = DEFAULT_LAYOUT;
 			}
 		}
 
