@@ -6,100 +6,161 @@ import {
 	formatHourLabel,
 } from "@/utils/dashboardFormat";
 
-const CARD = (dataKey, valueType) => ({
-	type: "number-card",
-	resolve: (slice) => ({
-		value: slice?.value ?? 0,
-		valueType,
-		trend: slice?.trend ?? { status: "no_previous", percentage: null, label: "" },
-		iconColor: CARD_COLORS[dataKey]?.color,
-		iconBg: CARD_COLORS[dataKey]?.background,
-	}),
-});
+const CARD_META = {
+	total_net_sales: { valueType: "currency", icon: "mdi-cash-multiple" },
+	bill_count: { valueType: "number", icon: "mdi-receipt-text-outline" },
+	loyalty_redemptions: { valueType: "points", icon: "mdi-star-circle-outline" },
+	total_returns: { valueType: "currency", icon: "mdi-cash-refund" },
+	held_invoices: { valueType: "number", icon: "mdi-pause-circle-outline" },
+	cancelled_invoices: { valueType: "number", icon: "mdi-close-circle-outline" },
+};
+
+function cardEntry(dataKey, defaultTitle) {
+	const meta = CARD_META[dataKey];
+	return {
+		defaultType: "number-card",
+		defaultTitle,
+		icon: meta.icon,
+		resolvers: {
+			"number-card": (slice) => ({
+				value: slice?.value ?? 0,
+				valueType: meta.valueType,
+				trend: slice?.trend ?? { status: "no_previous", percentage: null, label: "" },
+				iconColor: CARD_COLORS[dataKey]?.color,
+				iconBg: CARD_COLORS[dataKey]?.background,
+			}),
+		},
+	};
+}
+
+function rankedProducts(slice) {
+	return (slice || [])
+		.filter((row) => Number(row.total_qty) > 0)
+		.map((row, index) => ({ ...row, rank: index + 1 }));
+}
 
 export const CATALOG = {
-	total_net_sales: CARD("total_net_sales", "currency"),
-	bill_count: CARD("bill_count", "number"),
-	loyalty_redemptions: CARD("loyalty_redemptions", "points"),
-	total_returns: CARD("total_returns", "currency"),
-	held_invoices: CARD("held_invoices", "number"),
-	cancelled_invoices: CARD("cancelled_invoices", "number"),
+	total_net_sales: cardEntry("total_net_sales", () => __("Total Net Sales")),
+	bill_count: cardEntry("bill_count", () => __("Bills")),
+	loyalty_redemptions: cardEntry("loyalty_redemptions", () => __("Loyalty")),
+	total_returns: cardEntry("total_returns", () => __("Returns")),
+	held_invoices: cardEntry("held_invoices", () => __("Held")),
+	cancelled_invoices: cardEntry("cancelled_invoices", () => __("Cancelled")),
 
 	hourly_sales: {
-		type: "chart",
-		resolve: (slice) => ({
-			labels: (slice?.labels || []).map(formatHourLabel),
-			values: slice?.values || [],
-			valueFormat: formatCompactCurrency,
-		}),
+		defaultType: "chart",
+		defaultTitle: () => __("Hourly Sales"),
+		defaultVariant: "line",
+		resolvers: {
+			chart: (slice) => ({
+				labels: (slice?.labels || []).map(formatHourLabel),
+				values: slice?.values || [],
+				valueFormat: formatCompactCurrency,
+			}),
+		},
 	},
 
 	payment_distribution: {
-		type: "chart",
-		resolve: (slice) => ({
-			labels: (slice || []).map((r) => r.mode_of_payment || __("Unknown")),
-			values: (slice || []).map((r) => Number(r.amount) || 0),
-			valueFormat: formatCurrency,
-		}),
+		defaultType: "chart",
+		defaultTitle: () => __("Payment Distribution"),
+		defaultVariant: "donut",
+		resolvers: {
+			chart: (slice) => {
+				const rows = (slice || []).filter((row) => Number(row.amount) > 0);
+				return {
+					labels: rows.map((row) => row.mode_of_payment || __("Unknown")),
+					values: rows.map((row) => Number(row.amount) || 0),
+					valueFormat: formatCurrency,
+				};
+			},
+		},
 	},
 
 	top_products: {
-		type: "table",
-		resolve: (slice) => ({
-			rows: slice || [],
-			columns: [
-				{ key: "item_name", label: __("Product"), width: "minmax(0, 1fr)" },
-				{ key: "total_qty", label: __("Qty"), align: "right", width: "76px", format: formatNumber },
-				{
-					key: "total_sales",
-					label: __("Sales"),
-					align: "right",
-					width: "110px",
-					format: formatCurrency,
-				},
-			],
-		}),
+		defaultType: "table",
+		defaultTitle: () => __("Top Selling Products"),
+		defaultVariant: "bar",
+		resolvers: {
+			table: (slice) => ({
+				rows: rankedProducts(slice),
+				columns: [
+					{ key: "rank", label: "#", width: "34px" },
+					{ key: "item_name", label: __("Product"), width: "minmax(0, 1fr)" },
+					{ key: "total_qty", label: __("Qty"), align: "right", width: "76px", format: formatNumber },
+					{
+						key: "total_sales",
+						label: __("Sales"),
+						align: "right",
+						width: "110px",
+						format: formatCurrency,
+					},
+				],
+			}),
+			chart: (slice) => {
+				const rows = (slice || []).filter((row) => Number(row.total_sales) > 0);
+				return {
+					labels: rows.map((row) => row.item_name || row.item_code || __("Unknown")),
+					values: rows.map((row) => Number(row.total_sales) || 0),
+					valueFormat: formatCurrency,
+				};
+			},
+		},
 	},
 
 	top_categories: {
-		type: "table",
-		resolve: (slice) => ({
-			rows: slice || [],
-			columns: [
-				{ key: "item_group", label: __("Category"), width: "minmax(92px, 0.75fr)" },
-				{
-					key: "total_sales_bar",
-					label: "",
-					bar: true,
-					barValueKey: "total_sales",
-					width: "minmax(120px, 1.4fr)",
-				},
-				{
-					key: "total_sales",
-					label: __("Sales"),
-					align: "right",
-					width: "96px",
-					format: formatCurrency,
-				},
-			],
-		}),
+		defaultType: "table",
+		defaultTitle: () => __("Top Selling Categories"),
+		defaultVariant: "bar",
+		resolvers: {
+			table: (slice) => ({
+				rows: (slice || []).filter((row) => Number(row.total_qty) > 0),
+				columns: [
+					{ key: "item_group", label: __("Category"), width: "minmax(92px, 0.75fr)" },
+					{
+						key: "total_sales_bar",
+						label: "",
+						bar: true,
+						barValueKey: "total_sales",
+						width: "minmax(120px, 1.4fr)",
+					},
+					{
+						key: "total_sales",
+						label: __("Sales"),
+						align: "right",
+						width: "96px",
+						format: formatCurrency,
+					},
+				],
+			}),
+			chart: (slice) => {
+				const rows = (slice || []).filter((row) => Number(row.total_sales) > 0);
+				return {
+					labels: rows.map((row) => row.item_group || __("Unknown")),
+					values: rows.map((row) => Number(row.total_sales) || 0),
+					valueFormat: formatCurrency,
+				};
+			},
+		},
 	},
 
 	shift_summary: {
-		type: "table",
-		resolve: (slice) => ({
-			previewLimit: 99,
-			rows: [
-				{ label: __("Opening Float"), value: formatCurrency(slice?.opening_float || 0) },
-				{ label: __("Cash Sales"), value: `+${formatCurrency(slice?.cash_sales || 0)}` },
-				{ label: __("Cash In"), value: `+${formatCurrency(slice?.cash_in || 0)}` },
-				{ label: __("Cash Out"), value: `-${formatCurrency(slice?.cash_out || 0)}` },
-			],
-			columns: [
-				{ key: "label", label: __("Shift Summary"), width: "minmax(0, 1fr)" },
-				{ key: "value", label: "", align: "right", width: "140px" },
-			],
-		}),
+		defaultType: "table",
+		defaultTitle: () => __("Shift Summary"),
+		resolvers: {
+			table: (slice) => ({
+				previewLimit: 99,
+				rows: [
+					{ label: __("Opening Float"), value: formatCurrency(slice?.opening_float || 0) },
+					{ label: __("Cash Sales"), value: `+${formatCurrency(slice?.cash_sales || 0)}` },
+					{ label: __("Cash In"), value: `+${formatCurrency(slice?.cash_in || 0)}` },
+					{ label: __("Cash Out"), value: `-${formatCurrency(slice?.cash_out || 0)}` },
+				],
+				columns: [
+					{ key: "label", label: "", width: "minmax(0, 1fr)" },
+					{ key: "value", label: "", align: "right", width: "140px" },
+				],
+			}),
+		},
 	},
 };
 
@@ -109,17 +170,35 @@ export function resolveWidget(descriptor, slice) {
 	const entry = CATALOG[descriptor.data_key];
 	if (!entry) return null;
 
-	const resolved = entry.resolve(slice);
-	const props = {
-		title: descriptor.title || undefined,
-		...resolved,
-	};
-	if (entry.type === "number-card" && descriptor.icon) props.icon = descriptor.icon;
-	if (entry.type === "chart") props.variant = descriptor.variant || "line";
+	let type = descriptor.widget_type || entry.defaultType;
+	let resolver = entry.resolvers[type];
+	if (!resolver) {
+		if (import.meta.env.DEV) {
+			console.warn(
+				"[catalog] unsupported widget_type",
+				descriptor.widget_type,
+				"for",
+				descriptor.data_key,
+			);
+		}
+		type = entry.defaultType;
+		resolver = entry.resolvers[type];
+	}
+
+	const title = descriptor.title || entry.defaultTitle?.();
+	const props = resolver(slice);
+	if (type === "number-card") {
+		props.title = title;
+		props.icon = descriptor.icon || entry.icon;
+	}
+	if (type === "chart") {
+		props.variant = descriptor.variant || entry.defaultVariant || "line";
+	}
 
 	return {
-		type: entry.type,
+		type,
+		title,
 		props,
-		colSpan: descriptor.column_span || DEFAULT_SPAN[entry.type] || 6,
+		colSpan: descriptor.column_span || DEFAULT_SPAN[type] || 6,
 	};
 }

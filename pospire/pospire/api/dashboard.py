@@ -441,64 +441,43 @@ def get_shift_dashboard():
 	}
 
 
-def _number_card(data_key, title, icon):
+# Default layout carries only structure (which widgets, order, span, variant).
+# Presentation - titles and icons - is supplied and translated by the frontend
+# catalog, so these entries intentionally leave title/icon as None.
+def _number_card(data_key):
 	return {
 		"widget_type": "Number Card",
 		"data_key": data_key,
 		"variant": None,
-		"title": title,
-		"icon": icon,
+		"title": None,
+		"icon": None,
 		"column_span": 4,
 	}
 
 
+def _widget(widget_type, data_key, variant=None):
+	return {
+		"widget_type": widget_type,
+		"data_key": data_key,
+		"variant": variant,
+		"title": None,
+		"icon": None,
+		"column_span": 6,
+	}
+
+
 DEFAULT_DASHBOARD_LAYOUT = [
-	_number_card("total_net_sales", "Total Net Sales", "mdi-cash-multiple"),
-	_number_card("bill_count", "Bills", "mdi-receipt-text-outline"),
-	_number_card("loyalty_redemptions", "Loyalty", "mdi-star-circle-outline"),
-	_number_card("total_returns", "Returns", "mdi-cash-refund"),
-	_number_card("held_invoices", "Held", "mdi-pause-circle-outline"),
-	_number_card("cancelled_invoices", "Cancelled", "mdi-close-circle-outline"),
-	{
-		"widget_type": "Chart",
-		"data_key": "hourly_sales",
-		"variant": "line",
-		"title": "Hourly Sales",
-		"icon": None,
-		"column_span": 6,
-	},
-	{
-		"widget_type": "Chart",
-		"data_key": "payment_distribution",
-		"variant": "donut",
-		"title": "Payment Distribution",
-		"icon": None,
-		"column_span": 6,
-	},
-	{
-		"widget_type": "Table",
-		"data_key": "top_products",
-		"variant": None,
-		"title": "Top Selling Products",
-		"icon": None,
-		"column_span": 6,
-	},
-	{
-		"widget_type": "Table",
-		"data_key": "top_categories",
-		"variant": None,
-		"title": "Top Selling Categories",
-		"icon": None,
-		"column_span": 6,
-	},
-	{
-		"widget_type": "Table",
-		"data_key": "shift_summary",
-		"variant": None,
-		"title": "Shift Summary",
-		"icon": None,
-		"column_span": 6,
-	},
+	_number_card("total_net_sales"),
+	_number_card("bill_count"),
+	_number_card("loyalty_redemptions"),
+	_number_card("total_returns"),
+	_number_card("held_invoices"),
+	_number_card("cancelled_invoices"),
+	_widget("Chart", "hourly_sales", "line"),
+	_widget("Chart", "payment_distribution", "donut"),
+	_widget("Table", "top_products"),
+	_widget("Table", "top_categories"),
+	_widget("Table", "shift_summary"),
 ]
 
 _WIDGET_TYPE_MAP = {
@@ -528,7 +507,7 @@ def get_dashboard_layout():
 		)
 
 	if not layout:
-		return [dict(widget) for widget in _default_layout_kebab()]
+		return _default_layout_kebab()
 
 	return layout
 
