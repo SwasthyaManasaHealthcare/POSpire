@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+from collections import Counter
 from typing import Any
 
 import frappe
@@ -1096,9 +1097,13 @@ def redeeming_customer_credit(invoice_doc, data, is_payment_entry, total_cash, c
 			cost_center = frappe.get_value("Company", invoice_doc.company, "cost_center")
 		if not cost_center:
 			frappe.throw(_("Cost Center is not set in pos profile {}").format(invoice_doc.pos_profile))
+		# snapshot already-booked entries so a retry skips them without collapsing equal rows
+		booked_journal_entries = _booked_customer_credit_journal_counter(invoice_doc)
 		for row in data.get("customer_credit_dict"):
 			if row["type"] == "Invoice" and row["credit_to_redeem"]:
-				if _customer_credit_journal_entry_exists(invoice_doc, row):
+				journal_key = (row.get("credit_origin"), flt(row.get("credit_to_redeem")))
+				if booked_journal_entries.get(journal_key, 0) > 0:
+					booked_journal_entries[journal_key] -= 1
 					continue
 				outstanding_invoice = frappe.get_doc("Sales Invoice", row["credit_origin"])
 
@@ -1141,10 +1146,18 @@ def redeeming_customer_credit(invoice_doc, data, is_payment_entry, total_cash, c
 				jv_doc.submit()
 
 	if is_payment_entry and total_cash > 0:
+		# snapshot already-booked entries so a retry skips them without collapsing equal rows
+		booked_payment_entries = _booked_customer_credit_payment_counter(invoice_doc)
 		for payment in payments or []:
 			if not flt(payment.get("amount")):
 				continue
-			if _customer_credit_payment_entry_exists(invoice_doc, payment):
+			payment_key = (
+				payment.get("account"),
+				payment.get("mode_of_payment"),
+				flt(payment.get("amount")),
+			)
+			if booked_payment_entries.get(payment_key, 0) > 0:
+				booked_payment_entries[payment_key] -= 1
 				continue
 			payment_entry_doc = frappe.get_doc(
 				{
@@ -1178,12 +1191,8 @@ def redeeming_customer_credit(invoice_doc, data, is_payment_entry, total_cash, c
 			payment_entry_doc.submit()
 
 
-def _customer_credit_journal_entry_exists(invoice_doc, credit_row) -> bool:
-	amount = flt(credit_row.get("credit_to_redeem"))
-	credit_origin = credit_row.get("credit_origin")
-	if not amount or not credit_origin:
-		return False
-
+def _booked_customer_credit_journal_counter(invoice_doc) -> Counter:
+	"""Count redemption journal entries already booked for this invoice, by (origin, amount)."""
 	credit_lines = frappe.get_all(
 		"Journal Entry Account",
 		filters={
@@ -1195,30 +1204,32 @@ def _customer_credit_journal_entry_exists(invoice_doc, credit_row) -> bool:
 		},
 		fields=["parent", "credit_in_account_currency"],
 	)
-	parents = [row.parent for row in credit_lines if flt(row.credit_in_account_currency) == amount]
-	if not parents:
-		return False
+	if not credit_lines:
+		return Counter()
 
+	parent_amounts = {row.parent: flt(row.credit_in_account_currency) for row in credit_lines}
 	debit_lines = frappe.get_all(
 		"Journal Entry Account",
 		filters={
-			"parent": ["in", parents],
+			"parent": ["in", list(parent_amounts)],
 			"reference_type": "Sales Invoice",
-			"reference_name": credit_origin,
 			"party_type": "Customer",
 			"party": invoice_doc.customer,
 			"docstatus": 1,
 		},
-		fields=["debit_in_account_currency"],
+		fields=["parent", "reference_name", "debit_in_account_currency"],
 	)
-	return any(flt(row.debit_in_account_currency) == amount for row in debit_lines)
+
+	counter = Counter()
+	for row in debit_lines:
+		amount = parent_amounts.get(row.parent)
+		if amount is not None and flt(row.debit_in_account_currency) == amount:
+			counter[(row.reference_name, amount)] += 1
+	return counter
 
 
-def _customer_credit_payment_entry_exists(invoice_doc, payment) -> bool:
-	amount = flt(payment.get("amount"))
-	if not amount:
-		return False
-
+def _booked_customer_credit_payment_counter(invoice_doc) -> Counter:
+	"""Count payment entries already booked for this invoice, by (account, mode, paid_amount)."""
 	references = frappe.get_all(
 		"Payment Entry Reference",
 		filters={
@@ -1226,28 +1237,24 @@ def _customer_credit_payment_entry_exists(invoice_doc, payment) -> bool:
 			"reference_name": invoice_doc.name,
 			"docstatus": 1,
 		},
-		fields=["parent", "allocated_amount"],
+		fields=["parent"],
 	)
-	parents = [row.parent for row in references if flt(row.allocated_amount) == amount]
+	parents = list({row.parent for row in references})
 	if not parents:
-		return False
+		return Counter()
 
-	return bool(
-		frappe.get_all(
-			"Payment Entry",
-			filters={
-				"name": ["in", parents],
-				"docstatus": 1,
-				"payment_type": "Receive",
-				"party_type": "Customer",
-				"party": invoice_doc.customer,
-				"paid_to": payment.get("account"),
-				"mode_of_payment": payment.get("mode_of_payment"),
-				"paid_amount": amount,
-			},
-			limit=1,
-		)
+	entries = frappe.get_all(
+		"Payment Entry",
+		filters={
+			"name": ["in", parents],
+			"docstatus": 1,
+			"payment_type": "Receive",
+			"party_type": "Customer",
+			"party": invoice_doc.customer,
+		},
+		fields=["paid_to", "mode_of_payment", "paid_amount"],
 	)
+	return Counter((e.paid_to, e.mode_of_payment, flt(e.paid_amount)) for e in entries)
 
 
 def submit_in_background_job(kwargs):

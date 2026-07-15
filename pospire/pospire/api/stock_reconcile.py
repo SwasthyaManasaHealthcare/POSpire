@@ -372,12 +372,10 @@ def _build_stock_reconciliation(invoice_doc, shortfalls: list[dict]):
 
 
 def _get_reconciliation_link_values(invoice_doc) -> dict:
-	"""Return approved and branch-local reconciliation link field values."""
+	"""Return reconciliation link field values keyed by the installed field names."""
 	return {
 		"posa_pos_offline_id": getattr(invoice_doc, "pos_offline_id", None),
-		"custom_stock_reconciliation": getattr(invoice_doc, "pos_offline_id", None),
 		"posa_sales_invoice": getattr(invoice_doc, "name", None),
-		"custom_pos_sales_invoice": getattr(invoice_doc, "name", None),
 	}
 
 
