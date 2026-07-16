@@ -175,6 +175,13 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "read",
 		offline: true,
 	},
+	// Dashboard layout config. Static admin configuration that changes rarely,
+	// so it caches for a long window to keep the dashboard renderable offline.
+	"pospire.pospire.api.dashboard.get_dashboard_layout": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 
 	// -----------------------------------------------------------------------
 	// Reads — LIVE ONLY (P-4: server stays authoritative)
