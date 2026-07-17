@@ -14,7 +14,7 @@
             <v-text-field
               color="primary"
               :label="__('Invoice ID')"
-              bg-color="white"
+              bg-color="surface"
               hide-details
               v-model="invoice_name"
               density="compact"

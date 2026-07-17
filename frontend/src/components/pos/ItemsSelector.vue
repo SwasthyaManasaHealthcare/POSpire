@@ -11,7 +11,7 @@
 			<v-row class="items px-3 py-2">
 				<v-col class="pb-0 mb-2">
 					<div class="enhanced-search-wrapper">
-						<v-icon class="enhanced-search-icon" size="20" color="grey-darken-1"
+						<v-icon class="enhanced-search-icon" size="20"
 							>mdi-magnify</v-icon
 						>
 						<v-text-field
@@ -21,7 +21,7 @@
 							variant="outlined"
 							color="primary"
 							placeholder="Search by name, code, barcode, serial or batch number..."
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							v-model="debounce_search"
 							@keydown.esc="esc_event"
@@ -37,7 +37,7 @@
 						variant="outlined"
 						color="primary"
 						:label="__('QTY')"
-						bg-color="white"
+						bg-color="surface"
 						hide-details
 						v-model.number="qty"
 						type="number"
@@ -115,16 +115,12 @@
 								>
 									<!-- 1:1 Square Image Container -->
 									<div class="pospire-product-image-wrapper">
-										<v-img
-											:src="
-												item.image ||
-												'/assets/pospire/js/posapp/components/pos/placeholder-image.png'
-											"
+										<ItemImage
+											:src="item.image"
 											:aspect-ratio="1"
 											cover
 											class="pospire-product-image"
-										>
-										</v-img>
+										/>
 
 										<!--
 											Stock Badge Overlay. Rendered only when the
@@ -241,7 +237,7 @@
 								:row-props="getRowProps"
 							>
 								<template v-slot:item.rate="{ item }">
-									<span class="font-weight-medium" style="color: #34495e"
+									<span class="item-rate-text font-weight-medium"
 										>{{ currencySymbol(item.currency) }}
 										{{ formatCurrency(item.rate) }}</span
 									>
@@ -264,12 +260,7 @@
 								<template v-slot:item.item_name="{ item }">
 									<div class="d-flex align-center">
 										<v-avatar size="32" class="mr-2">
-											<v-img
-												:src="
-													item.image ||
-													'/assets/pospire/js/posapp/components/pos/placeholder-image.png'
-												"
-											></v-img>
+											<ItemImage :src="item.image" compact />
 										</v-avatar>
 										<div>
 											<div class="font-weight-medium">
@@ -389,8 +380,10 @@ import format from "@/utils/format";
 import { playSound } from "@/utils/sounds";
 import { useConnectivityStore } from "@/stores/connectivity";
 import _ from "lodash";
+import ItemImage from "./ItemImage.vue";
 export default {
 	mixins: [format],
+	components: { ItemImage },
 	setup() {
 		// Expose `connectionQuality` so the template and the customer
 		// watcher can gate on it. The stock badges (OUT / LOW / STOCK)
@@ -1150,6 +1143,8 @@ export default {
 
 .enhanced-search-wrapper {
 	position: relative;
+	background: var(--pospire-surface);
+	border-radius: var(--pospire-input-border-radius);
 }
 
 .enhanced-search-icon {
@@ -1158,10 +1153,16 @@ export default {
 	top: 50%;
 	transform: translateY(-50%);
 	z-index: 2;
+	color: var(--pospire-text-muted);
 }
 
 .enhanced-search-field :deep(.v-field__input) {
 	padding-left: 2.5rem !important;
+}
+
+.enhanced-search-field :deep(.v-field) {
+	background: var(--pospire-surface) !important;
+	overflow: hidden;
 }
 
 .enhanced-empty-state {
@@ -1295,6 +1296,10 @@ export default {
 .pospire-product-price {
 	font: var(--pospire-font-body-medium);
 	color: var(--pospire-vibrant-teal);
+}
+
+.item-rate-text {
+	color: var(--pospire-text-primary);
 }
 
 /* Product Stock */

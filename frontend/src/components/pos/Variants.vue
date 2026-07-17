@@ -45,20 +45,15 @@
 									min-height="50"
 								>
 									<v-card hover="hover" @click="add_item(item)">
-										<v-img
-											:src="
-												item.image ||
-												'/assets/pospire/js/posapp/components/pos/placeholder-image.png'
-											"
+										<ItemImage
+											:src="item.image"
 											class="text-white align-end"
-											gradient="to bottom, rgba(0,0,0,.2), rgba(0,0,0,.7)"
 											height="100px"
 										>
-											<v-card-text
-												v-text="item.item_name"
-												class="text-subtitle-2 px-1 pb-2"
-											></v-card-text>
-										</v-img>
+											<div class="variant-image-caption text-subtitle-2 px-1 pb-2">
+												{{ item.item_name }}
+											</div>
+										</ItemImage>
 										<v-card-text class="text--primary pa-1">
 											<div class="text-caption text-primary accent-3">
 												{{ item.rate || 0 }} {{ item.currency || "" }}
@@ -75,7 +70,10 @@
 	</v-row>
 </template>
 <script>
+import ItemImage from "./ItemImage.vue";
+
 export default {
+	components: { ItemImage },
 	data: () => ({
 		varaintsDialog: false,
 		parentItem: null,
@@ -149,3 +147,14 @@ export default {
 	},
 };
 </script>
+
+<style scoped>
+.variant-image-caption {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	color: white;
+	background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.7));
+}
+</style>

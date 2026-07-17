@@ -71,6 +71,7 @@ export const CATALOG = {
 					labels: rows.map((row) => row.mode_of_payment || __("Unknown")),
 					values: rows.map((row) => Number(row.amount) || 0),
 					valueFormat: formatCurrency,
+					legendMode: "html",
 				};
 			},
 		},
@@ -102,6 +103,7 @@ export const CATALOG = {
 					labels: rows.map((row) => row.item_name || row.item_code || __("Unknown")),
 					values: rows.map((row) => Number(row.total_sales) || 0),
 					valueFormat: formatCurrency,
+					legendMode: "html",
 				};
 			},
 		},
@@ -138,6 +140,7 @@ export const CATALOG = {
 					labels: rows.map((row) => row.item_group || __("Unknown")),
 					values: rows.map((row) => Number(row.total_sales) || 0),
 					valueFormat: formatCurrency,
+					legendMode: "html",
 				};
 			},
 		},
@@ -193,6 +196,7 @@ export function resolveWidget(descriptor, slice) {
 	}
 	if (type === "chart") {
 		props.variant = descriptor.variant || entry.defaultVariant || "line";
+		props.legendMode = descriptor.legend_mode || descriptor.legendMode || props.legendMode || "chart";
 	}
 
 	return {

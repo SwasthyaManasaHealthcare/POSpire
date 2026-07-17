@@ -134,7 +134,9 @@ export default {
 .dashboard-page {
 	min-height: 100%;
 	padding: 16px 18px 32px;
-	background: #f5f7fa;
+	background: var(--pospire-app-bg);
+	color: var(--pospire-text-main);
+	transition: background-color 0.2s ease, color 0.2s ease;
 }
 .dashboard-page__state {
 	min-height: 240px;

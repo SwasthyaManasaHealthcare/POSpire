@@ -26,7 +26,7 @@
 								color="primary"
 								label="Enter Coupon Code"
 								placeholder="Type or scan coupon code..."
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								v-model="new_coupon"
 								prepend-inner-icon="mdi-ticket-outline"

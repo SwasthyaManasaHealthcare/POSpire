@@ -209,5 +209,7 @@ export default {
 .pospire-app {
 	margin-top: 0px;
 	height: 100vh;
+	background: var(--pospire-app-bg);
+	color: var(--pospire-text-main);
 }
 </style>

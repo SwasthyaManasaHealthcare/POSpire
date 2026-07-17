@@ -12,7 +12,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Coupon')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							v-model="new_coupon"
 							class="mr-4"

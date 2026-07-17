@@ -17,7 +17,7 @@
 							<v-text-field
 								color="primary"
 								:label="__('Order ID')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								v-model="order_name"
 								density="compact"

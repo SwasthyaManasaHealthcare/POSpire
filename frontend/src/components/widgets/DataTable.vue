@@ -18,7 +18,7 @@
             <template v-if="col.bar">
               <svg class="widget-table__bar" viewBox="0 0 100 10" preserveAspectRatio="none">
                 <rect x="0" y="0" width="100" height="10" rx="5" class="widget-table__bar-track" />
-                <rect x="0" y="0" :width="barWidth(row, col)" height="10" rx="5" fill="#34d399" />
+                <rect x="0" y="0" :width="barWidth(row, col)" height="10" rx="5" class="widget-table__bar-value" />
               </svg>
             </template>
             <template v-else>{{ cell(row, col) }}</template>
@@ -113,10 +113,10 @@ export default {
 }
 .widget-table__header {
 	height: 34px;
-	color: #64748b;
+	color: var(--pospire-text-muted);
 	font-size: 0.75rem;
 	font-weight: 700;
-	border-bottom: 1px solid #e5e7eb;
+	border-bottom: 1px solid var(--pospire-border);
 }
 .widget-table__body {
 	min-height: 0;
@@ -128,9 +128,13 @@ export default {
 }
 .widget-table__row {
 	height: 40px;
-	color: #334155;
+	color: var(--pospire-text-main);
 	font-size: 0.875rem;
-	border-bottom: 1px solid #f1f5f9;
+	border-bottom: 1px solid var(--pospire-border-subtle);
+	transition: background-color 0.15s ease;
+}
+.widget-table__row:hover {
+	background: var(--pospire-hover-bg);
 }
 .widget-table__num {
 	justify-self: end;
@@ -144,7 +148,10 @@ export default {
 	display: block;
 }
 .widget-table__bar-track {
-	fill: #eef2f7;
+	fill: var(--pospire-table-bar-track);
+}
+.widget-table__bar-value {
+	fill: rgb(var(--v-theme-success));
 }
 .widget-table__toggle {
 	align-self: flex-end;
@@ -152,7 +159,7 @@ export default {
 	border: 0;
 	padding: 0;
 	background: transparent;
-	color: #2563eb;
+	color: rgb(var(--v-theme-primary));
 	cursor: pointer;
 	font-size: 0.8125rem;
 	font-weight: 600;
@@ -162,7 +169,7 @@ export default {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	color: #64748b;
+	color: var(--pospire-text-muted);
 	font-size: 0.875rem;
 	font-weight: 500;
 }

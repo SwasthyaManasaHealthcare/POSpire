@@ -71,13 +71,14 @@ export default {
 }
 .widget-grid__card {
 	height: 390px;
-	background: #ffffff;
-	border: 1px solid #e5e7eb;
+	background: var(--pospire-surface);
+	border: 1px solid var(--pospire-border);
 	border-radius: 14px;
-	box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+	box-shadow: var(--pospire-card-shadow);
+	transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .widget-grid__title {
-	color: #0f172a;
+	color: var(--pospire-text-primary);
 	font-size: 1rem;
 	font-weight: 600;
 	padding: 16px 18px 0;

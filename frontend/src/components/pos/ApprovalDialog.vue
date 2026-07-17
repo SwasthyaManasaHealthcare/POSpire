@@ -13,7 +13,7 @@
 					</div>
 				</v-card-title>
 				<v-card-text class="pospire-modal-body">
-					<div v-if="showValueSummary" class="mb-3 pa-2 rounded" style="background: #f5f5f5">
+					<div v-if="showValueSummary" class="approval-value-summary mb-3 pa-2 rounded">
 						<span v-if="valueFieldLabel" class="text-caption font-weight-medium">{{ valueFieldLabel }}: </span>
 						<span v-if="originalValue !== null" class="text-decoration-line-through text-medium-emphasis text-body-2">{{ formatSummaryValue(originalValue) }}</span>
 						<v-icon v-if="requestedValue !== null" size="14" class="mx-1">mdi-arrow-right</v-icon>
@@ -131,7 +131,7 @@
 					</div>
 				</v-card-title>
 				<v-card-text class="pospire-modal-body">
-					<div v-if="showValueSummary" class="mb-3 pa-2 rounded" style="background: #f5f5f5">
+					<div v-if="showValueSummary" class="approval-value-summary mb-3 pa-2 rounded">
 						<span v-if="valueFieldLabel" class="text-caption font-weight-medium">{{ valueFieldLabel }}: </span>
 						<span v-if="originalValue !== null" class="text-decoration-line-through text-medium-emphasis text-body-2">{{ formatSummaryValue(originalValue) }}</span>
 						<v-icon v-if="requestedValue !== null" size="14" class="mx-1">mdi-arrow-right</v-icon>
@@ -194,7 +194,7 @@
 					</div>
 				</v-card-title>
 				<v-card-text class="pospire-modal-body">
-					<div v-if="showValueSummary" class="mb-3 pa-2 rounded" style="background: #f5f5f5">
+					<div v-if="showValueSummary" class="approval-value-summary mb-3 pa-2 rounded">
 						<span v-if="valueFieldLabel" class="text-caption font-weight-medium">{{ valueFieldLabel }}: </span>
 						<span v-if="originalValue !== null" class="text-decoration-line-through text-medium-emphasis text-body-2">{{ formatSummaryValue(originalValue) }}</span>
 						<v-icon v-if="requestedValue !== null" size="14" class="mx-1">mdi-arrow-right</v-icon>
@@ -475,3 +475,10 @@ export default {
 	},
 };
 </script>
+
+<style scoped>
+.approval-value-summary {
+	background: var(--pospire-surface-soft);
+	color: var(--pospire-text-main);
+}
+</style>

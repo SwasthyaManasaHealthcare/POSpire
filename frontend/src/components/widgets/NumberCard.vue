@@ -35,8 +35,11 @@ export default {
 		value: { type: [Number, String], default: 0 },
 		valueType: { type: String, default: "number" },
 		icon: { type: String, default: "" },
-		iconColor: { type: String, default: "#2563eb" },
-		iconBg: { type: String, default: "#dbeafe" },
+		iconColor: { type: String, default: "rgb(var(--v-theme-primary))" },
+		iconBg: {
+			type: String,
+			default: "color-mix(in srgb, rgb(var(--v-theme-primary)) 14%, transparent)",
+		},
 		trend: {
 			type: Object,
 			default: () => ({ status: "no_previous", percentage: null, label: "" }),
@@ -76,10 +79,11 @@ export default {
 <style scoped>
 .number-card {
 	height: 116px;
-	background: #ffffff;
-	border: 1px solid #e5e7eb;
+	background: var(--pospire-surface);
+	border: 1px solid var(--pospire-border);
 	border-radius: 14px;
-	box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+	box-shadow: var(--pospire-card-shadow);
+	transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .number-card__content {
 	height: 100%;
@@ -93,14 +97,14 @@ export default {
 	min-width: 0;
 }
 .number-card__title {
-	color: #64748b;
+	color: var(--pospire-text-muted);
 	font-size: 0.8125rem;
 	font-weight: 500;
 	line-height: 1.3;
 	margin-bottom: 8px;
 }
 .number-card__value {
-	color: #0f172a;
+	color: var(--pospire-text-primary);
 	font-size: 2rem;
 	font-weight: 700;
 	line-height: 1.15;
@@ -113,13 +117,13 @@ export default {
 	line-height: 1.2;
 }
 .number-card__comparison--up {
-	color: #16a34a;
+	color: rgb(var(--v-theme-success));
 }
 .number-card__comparison--down {
-	color: #dc2626;
+	color: rgb(var(--v-theme-error));
 }
 .number-card__comparison--neutral {
-	color: #64748b;
+	color: var(--pospire-text-muted);
 }
 .number-card__icon {
 	width: 46px;
@@ -131,5 +135,9 @@ export default {
 	border-radius: 999px;
 	color: var(--card-accent);
 	background: var(--card-accent-bg);
+}
+
+:global(.v-theme--dark) .number-card__icon {
+	background: color-mix(in srgb, var(--card-accent) 22%, var(--pospire-surface-soft));
 }
 </style>
