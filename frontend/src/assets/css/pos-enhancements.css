@@ -2360,7 +2360,7 @@ html.pospire-theme-switching *::after {
 	--pospire-border-dark: #64748b;
 	--pospire-border-medium: #475569;
 	--pospire-text-secondary: #cbd5e1;
-	--pospire-text-light: #94a3b8;
+	--pospire-text-light: #cbd5e1;
 	--pospire-app-bg: #0f172a;
 	--pospire-surface: #111827;
 	--pospire-surface-soft: #1e293b;
@@ -2370,7 +2370,9 @@ html.pospire-theme-switching *::after {
 	--pospire-text-primary: #f8fafc;
 	--pospire-text-main: #e2e8f0;
 	--pospire-text-muted: #cbd5e1;
-	--pospire-text-faint: #94a3b8;
+	--pospire-text-faint: #cbd5e1;
+	--pospire-dark-text: var(--pospire-text-primary);
+	--pospire-muted-text: var(--pospire-text-muted);
 	--pospire-hover-bg: rgba(148, 163, 184, 0.14);
 	--pospire-card-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
 	--pospire-navbar-bg: linear-gradient(135deg, #111827 0%, #1e293b 100%);
@@ -2540,6 +2542,25 @@ html.pospire-theme-switching *::after {
 .v-theme--dark .v-label,
 .v-theme--dark .v-selection-control .v-label {
 	color: var(--pospire-text-main) !important;
+}
+
+.v-theme--dark .pos-page .text-grey,
+.v-theme--dark .pos-page .text-grey-lighten-1,
+.v-theme--dark .pos-page .text-grey-darken-1,
+.v-theme--dark .pos-page .text-grey-darken-2,
+.v-theme--dark .pos-page .text-medium-emphasis,
+.v-theme--dark .payments-page .text-grey,
+.v-theme--dark .payments-page .text-grey-lighten-1,
+.v-theme--dark .payments-page .text-grey-darken-1,
+.v-theme--dark .payments-page .text-grey-darken-2,
+.v-theme--dark .payments-page .text-medium-emphasis {
+	color: var(--pospire-text-main) !important;
+}
+
+.v-theme--dark .user-chip,
+.v-theme--dark .user-chip .v-chip__content,
+.v-theme--dark .user-chip .v-icon {
+	color: var(--pospire-text-primary) !important;
 }
 
 .v-theme--dark .nav-icon-container,

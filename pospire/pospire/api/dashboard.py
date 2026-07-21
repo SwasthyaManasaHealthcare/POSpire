@@ -517,3 +517,25 @@ def _default_layout_kebab():
 		{**widget, "widget_type": _WIDGET_TYPE_MAP[widget["widget_type"]]}
 		for widget in DEFAULT_DASHBOARD_LAYOUT
 	]
+
+
+@frappe.whitelist()
+def get_default_dashboard_layout_for_settings():
+	if not frappe.has_permission("POS Dashboard Settings", "write"):
+		frappe.throw(
+			frappe._("Not permitted to update POS Dashboard Settings."),
+			frappe.PermissionError,
+		)
+
+	return [
+		{
+			"widget_type": widget["widget_type"],
+			"data_key": widget["data_key"],
+			"variant": widget.get("variant"),
+			"enabled": 1,
+			"title": widget.get("title"),
+			"icon": widget.get("icon"),
+			"column_span": widget.get("column_span"),
+		}
+		for widget in DEFAULT_DASHBOARD_LAYOUT
+	]
