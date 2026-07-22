@@ -179,12 +179,80 @@ export default {
 		async bootstrapPosProfileForNavbar() {
 			if (!window.user || window.user === "Guest") return;
 
-			const snapshot = await call("pospire.pospire.api.posapp.check_opening_shift", {
-				user: window.user,
-			});
+			const snapshotKey = "pospire.opening_shift_snapshot";
+			const snapshotMetaKey = "pospire.opening_shift_snapshot.meta";
+			const snapshotTTLMs = 24 * 60 * 60 * 1000;
+			const cachedSnapshot = this.readCachedOpeningSnapshot(
+				snapshotKey,
+				snapshotMetaKey,
+				snapshotTTLMs,
+			);
+			const browserOffline =
+				typeof navigator !== "undefined" && navigator.onLine === false;
+			const shouldUseCachedImmediately =
+				cachedSnapshot && (!connectivity.isOnline() || browserOffline);
+
+			if (shouldUseCachedImmediately) {
+				this.emitOpeningSnapshotForNavbar(cachedSnapshot);
+			}
+
+			let snapshot = null;
+			try {
+				snapshot = await call("pospire.pospire.api.posapp.check_opening_shift", {
+					user: window.user,
+				});
+			} catch (err) {
+				if (cachedSnapshot && !shouldUseCachedImmediately) {
+					this.emitOpeningSnapshotForNavbar(cachedSnapshot);
+					return;
+				}
+				if (!cachedSnapshot) {
+					console.warn(
+						"[App] POS profile bootstrap failed and no cached snapshot is available",
+						err,
+					);
+				}
+				return;
+			}
 
 			if (!snapshot?.pos_profile) return;
 
+			this.persistOpeningSnapshot(snapshot, snapshotKey, snapshotMetaKey);
+			this.emitOpeningSnapshotForNavbar(snapshot);
+		},
+		readCachedOpeningSnapshot(key, metaKey, ttlMs) {
+			try {
+				const raw = localStorage.getItem(key);
+				if (!raw) return null;
+				const parsed = JSON.parse(raw);
+				if (!parsed || !parsed.pos_profile || !parsed.pos_opening_shift) {
+					return null;
+				}
+				const metaRaw = localStorage.getItem(metaKey);
+				if (!metaRaw) return null;
+				const meta = JSON.parse(metaRaw);
+				if (
+					!meta?.cached_at ||
+					typeof meta.cached_at !== "number" ||
+					Date.now() - meta.cached_at > ttlMs
+				) {
+					return null;
+				}
+				return parsed;
+			} catch {
+				return null;
+			}
+		},
+		persistOpeningSnapshot(snapshot, key, metaKey) {
+			try {
+				localStorage.setItem(key, JSON.stringify(snapshot));
+				localStorage.setItem(metaKey, JSON.stringify({ cached_at: Date.now() }));
+			} catch {
+				/* quota / privacy mode — non-fatal */
+			}
+		},
+		emitOpeningSnapshotForNavbar(snapshot) {
+			if (!snapshot?.pos_profile) return;
 			this.eventBus.emit("register_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
 		},
