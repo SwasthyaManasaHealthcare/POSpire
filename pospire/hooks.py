@@ -367,6 +367,7 @@ fixtures = [
 					"Stock Reconciliation-posa_pos_offline_id",
 					"Stock Reconciliation-posa_sales_invoice",
 					"Payment Entry-custom_pos_opening_shift",
+					"POS Opening Shift-custom_cancelled_count",
 				),
 			]
 		],

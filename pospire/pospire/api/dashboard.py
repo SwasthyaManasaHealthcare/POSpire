@@ -170,12 +170,12 @@ def _get_shift_cards(pos_opening_shift):
 					AND IFNULL(is_return, 0) = 0
 				THEN 1 ELSE 0
 			END), 0) AS bill_count,
-				COALESCE(SUM(CASE
-					WHEN docstatus = 1
-						AND is_pos = 1
-						AND IFNULL(redeem_loyalty_points, 0) = 1
-					THEN loyalty_points ELSE 0
-				END), 0) AS loyalty_redemptions,
+			COALESCE(SUM(CASE
+				WHEN docstatus = 1
+					AND is_pos = 1
+					AND IFNULL(redeem_loyalty_points, 0) = 1
+				THEN loyalty_points ELSE 0
+			END), 0) AS loyalty_redemptions,
 			COALESCE(SUM(CASE
 				WHEN docstatus = 1
 					AND is_pos = 1
@@ -186,12 +186,7 @@ def _get_shift_cards(pos_opening_shift):
 				WHEN docstatus = 0
 					AND IFNULL(posa_is_printed, 0) = 0
 				THEN 1 ELSE 0
-			END), 0) AS held_invoices,
-			COALESCE(SUM(CASE
-				WHEN docstatus = 2
-					AND is_pos = 1
-				THEN 1 ELSE 0
-			END), 0) AS cancelled_invoices
+			END), 0) AS held_invoices
 		FROM `tabSales Invoice`
 		WHERE posa_pos_opening_shift = %(pos_opening_shift)s
 		""",
@@ -203,13 +198,18 @@ def _get_shift_cards(pos_opening_shift):
 		return _empty_cards()
 
 	row = rows[0]
+	cancelled_invoices = frappe.db.get_value(
+		"POS Opening Shift",
+		pos_opening_shift,
+		"custom_cancelled_count",
+	)
 	return {
 		"total_net_sales": flt(row.total_net_sales),
 		"bill_count": cint(row.bill_count),
 		"loyalty_redemptions": flt(row.loyalty_redemptions),
 		"total_returns": flt(row.total_returns),
 		"held_invoices": cint(row.held_invoices),
-		"cancelled_invoices": cint(row.cancelled_invoices),
+		"cancelled_invoices": cint(cancelled_invoices),
 	}
 
 
