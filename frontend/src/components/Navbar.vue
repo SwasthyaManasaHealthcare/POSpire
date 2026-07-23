@@ -105,6 +105,9 @@
           {{ __('Online') }}
         </v-chip>
       </div>
+      <div class="theme-toggle-wrapper">
+        <ThemeToggle />
+      </div>
       <div class="user-info">
         <v-chip class="user-chip pospire-chip-neutral" variant="tonal" color="grey-darken-2">
           <v-icon start size="small">mdi-account-circle</v-icon>
@@ -228,8 +231,10 @@ import { call } from "@/utils/call";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { useOutboxStore } from "@/stores/outbox";
 import { useConnectivityStore } from "@/stores/connectivity";
+import ThemeToggle from "@/components/ThemeToggle.vue";
 
 export default {
+  components: { ThemeToggle },
   mixins: [hardwareUtils],
   emits: ["changePage", "open-reconciliation"],
   setup() {
@@ -250,7 +255,9 @@ export default {
       drawer: false,
       mini: true,
       item: 0,
-      items: [{ text: 'POS', icon: 'mdi-network-pos' }],
+      items: [{ text: 'POS', icon: 'mdi-network-pos' },
+              { text: 'Dashboard', icon: 'mdi-view-dashboard-outline' }
+      ],
       page: '',
       fav: true,
       menu: false,
@@ -351,7 +358,7 @@ export default {
         const payments = { text: 'Payments', icon: 'mdi-cash-register' };
         if (
           this.pos_profile.posa_use_pos_awesome_payments &&
-          this.items.length !== 2
+          !this.items.some((item) => item.text === 'Payments')
         ) {
           this.items.push(payments);
         }
@@ -377,23 +384,25 @@ export default {
 <style scoped>
 /* Header Styles */
 .modern-header {
-  border-bottom: 1px solid #e2e8f0 !important;
+  background: var(--pospire-navbar-bg) !important;
+  border-bottom: 1px solid var(--pospire-border) !important;
   backdrop-filter: blur(10px);
-  padding: 0 1rem;
+  padding: 0 1rem 0 0;
   height: 72px;
   max-height: 72px;
   ;
 }
 
 .modern-nav-icon {
-  color: #64748b !important;
+  color: var(--pospire-text-muted) !important;
   border-radius: 8px;
+  margin-inline-start: 0.75rem !important;
   transition: all 0.2s ease;
 }
 
 .modern-nav-icon:hover {
-  background-color: #f1f5f9 !important;
-  color: #334155 !important;
+  background-color: var(--pospire-hover-bg) !important;
+  color: var(--pospire-text-main) !important;
 }
 
 /* Brand Title */
@@ -421,7 +430,7 @@ export default {
   align-items: center;
   gap: 10px;
   padding: 6px 16px;
-  background: linear-gradient(135deg, rgba(0, 188, 212, 0.08) 0%, rgba(52, 73, 94, 0.05) 100%);
+  background: color-mix(in srgb, rgb(var(--v-theme-primary)) 8%, transparent);
   border-radius: 10px;
   border: 1px solid rgba(0, 188, 212, 0.15);
   transition: all 0.3s ease;
@@ -469,7 +478,7 @@ export default {
   font-family: 'Inter', sans-serif;
   font-size: 1.35rem;
   font-weight: 600;
-  color: #34495E;
+  color: var(--pospire-text-primary);
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -478,14 +487,14 @@ export default {
 }
 
 .client-logo {
-  border: 1px solid #e2e8f0;
-  background: white;
+  border: 1px solid var(--pospire-border);
+  background: var(--pospire-surface);
 }
 
 .brand-divider {
   width: 1px;
   height: 28px;
-  background: linear-gradient(180deg, transparent, #cbd5e1, transparent);
+  background: linear-gradient(180deg, transparent, var(--pospire-border), transparent);
   margin: 0 12px;
 }
 
@@ -499,7 +508,7 @@ export default {
 
 .powered-by-text {
   font-size: 0.6rem;
-  color: #94a3b8;
+  color: var(--pospire-text-faint);
   font-weight: 500;
   letter-spacing: 0.5px;
   text-transform: uppercase;
@@ -528,7 +537,7 @@ export default {
   font-family: 'Inter', sans-serif;
   font-size: 0.9rem;
   font-weight: 700;
-  color: #34495E;
+  color: var(--pospire-text-primary);
   letter-spacing: -0.3px;
 }
 
@@ -536,7 +545,7 @@ export default {
   font-family: 'Inter', sans-serif;
   font-size: 0.9rem;
   font-weight: 500;
-  color: #64748b;
+  color: var(--pospire-text-muted);
   letter-spacing: -0.2px;
   transition: color 0.3s ease;
 }
@@ -590,7 +599,7 @@ export default {
   font-family: 'Inter', sans-serif;
   font-size: 1.4rem;
   font-weight: 700;
-  color: #34495E;
+  color: var(--pospire-text-primary);
   letter-spacing: -0.5px;
   line-height: 1;
 }
@@ -609,7 +618,7 @@ export default {
   font-family: 'Inter', sans-serif;
   font-size: 1.5rem;
   font-weight: 700;
-  color: #34495E;
+  color: var(--pospire-text-primary);
   letter-spacing: -0.5px;
   line-height: 1;
   text-transform: uppercase;
@@ -620,7 +629,7 @@ export default {
   font-family: 'Inter', sans-serif;
   font-size: 1.5rem;
   font-weight: 500;
-  color: #64748b;
+  color: var(--pospire-text-muted);
   letter-spacing: -0.3px;
   line-height: 1;
   text-transform: lowercase;
@@ -681,7 +690,7 @@ export default {
   font-family: var(--brand-font-latin);
   font-size: 1.7rem;
   font-weight: 600;
-  color: #34495E;
+  color: var(--pospire-text-primary);
   letter-spacing: 1.5px;
   text-transform: uppercase;
   line-height: 1;
@@ -727,6 +736,13 @@ export default {
   letter-spacing: 0.3px;
 }
 
+.theme-toggle-wrapper {
+  margin-right: 10px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
 /*
  * Online pill is intentionally low-key: same chip shape as offline/degraded
  * for layout stability (no jumping when the network flaps), but muted so it
@@ -743,7 +759,7 @@ export default {
 }
 
 .menu-button {
-  color: #64748b !important;
+  color: var(--pospire-text-muted) !important;
   width: 40px;
   height: 40px;
   border-radius: 8px;
@@ -757,14 +773,14 @@ export default {
 }
 
 .menu-button:hover {
-  background-color: #f1f5f9 !important;
-  color: #334155 !important;
+  background-color: var(--pospire-hover-bg) !important;
+  color: var(--pospire-text-main) !important;
 }
 
 /* Sidebar Styles */
 .modern-sidebar {
   background: var(--sidebar-bg) !important;
-  border-right: 1px solid #e2e8f0 !important;
+  border-right: 1px solid var(--pospire-border) !important;
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
 }
 
@@ -780,7 +796,7 @@ export default {
 }
 
 .company-avatar {
-  border: 2px solid #e2e8f0;
+  border: 2px solid var(--pospire-border);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
@@ -791,19 +807,19 @@ export default {
 .company-name {
   font-size: 1.1rem;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--pospire-text-primary);
   line-height: 1.2;
 }
 
 .company-type {
   font-size: 0.85rem;
-  color: #64748b;
+  color: var(--pospire-text-muted);
   font-weight: 500;
   margin-top: 2px;
 }
 
 .sidebar-divider {
-  border-color: #e2e8f0 !important;
+  border-color: var(--pospire-border) !important;
   margin: 0 !important;
 }
 
@@ -841,7 +857,7 @@ export default {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background-color: #f1f5f9;
+  background-color: var(--pospire-surface-muted);
   transition: all 0.2s ease;
 }
 
@@ -854,13 +870,13 @@ export default {
 }
 
 .nav-icon {
-  color: #64748b !important;
+  color: var(--pospire-text-muted) !important;
   font-size: 18px !important;
   transition: all 0.2s ease;
 }
 
 .nav-item:hover .nav-icon {
-  color: #334155 !important;
+  color: var(--pospire-text-main) !important;
 }
 
 .nav-item.v-list-item--active .nav-icon {
@@ -869,7 +885,7 @@ export default {
 
 .nav-text {
   font-weight: 500 !important;
-  color: #334155 !important;
+  color: var(--pospire-text-main) !important;
   font-size: 0.95rem !important;
   margin-left: 12px;
   transition: all 0.2s ease;
@@ -967,4 +983,3 @@ export default {
   }
 }
 </style>
-

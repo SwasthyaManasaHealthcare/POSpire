@@ -14,7 +14,7 @@
             <v-text-field
               color="primary"
               :label="__('Invoice ID')"
-              bg-color="white"
+              bg-color="surface"
               hide-details
               v-model="invoice_name"
               density="compact"
@@ -26,7 +26,6 @@
               variant="text"
               class="ml-2"
               color="primary"
-              theme="dark"
               @click="search_invoices"
             >
               {{ __('Search') }}
@@ -116,14 +115,13 @@
 
         <v-card-actions class="mt-4">
           <v-spacer></v-spacer>
-          <v-btn color="grey-darken-1 mx-2" variant="text" theme="dark" @click="close_dialog">
+          <v-btn color="grey-darken-1" class="mx-2" variant="text" @click="close_dialog">
             {{ __('Close') }}
           </v-btn>
           <v-btn
             v-if="selected.length && !selected[0].fully_returned"
             variant="elevated"
             color="primary"
-            theme="dark"
             @click="open_item_selection"
           >
             {{ __('Select Items') }}
@@ -251,14 +249,13 @@
 
         <v-card-actions class="mt-4">
           <v-spacer></v-spacer>
-          <v-btn color="grey-darken-1 mx-2" variant="text" theme="dark" @click="close_item_selection">
+          <v-btn color="grey-darken-1" class="mx-2" variant="text" @click="close_item_selection">
             {{ __('Back') }}
           </v-btn>
           <v-btn
             v-if="selectedItems.length > 0"
             variant="elevated"
             color="primary"
-            theme="dark"
             @click="submit_return"
           >
             {{ __('Load Return') }}

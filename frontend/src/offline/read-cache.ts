@@ -80,6 +80,7 @@ const RC_PREFIX = "rc:";
  * `items` tables).
  */
 const DURABLE_KEYS: ReadonlySet<string> = new Set([
+	"dashboard.shift", // shift dashboard cards + graph/table payload
 	"offline.customer_form_options", // territory / gender / customer-group lists
 ]);
 

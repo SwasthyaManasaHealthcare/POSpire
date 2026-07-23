@@ -584,7 +584,7 @@ export default defineComponent({
   background: transparent;
 }
 .offline-sync-status__row {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--pospire-border-subtle);
 }
 .offline-sync-status__empty {
   padding: 32px;
@@ -592,7 +592,7 @@ export default defineComponent({
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--pospire-text-muted);
   font-size: 0.95rem;
 }
 .offline-sync-status__mono {

@@ -13,8 +13,8 @@
 				<div class="mb-4 blue-grey-lighten-5" v-if="invoice_doc">
 					<v-card variant="flat" class="mb-3 section-header">
 						<v-card-title class="section-header-title font-weight-bold">
-							<v-icon start size="20" color="#00BCD4">mdi-cash-multiple</v-icon>
-							<span style="color: #34495e">Payment Summary</span>
+							<v-icon start size="20" color="primary">mdi-cash-multiple</v-icon>
+							<span class="section-title-text">Payment Summary</span>
 						</v-card-title>
 					</v-card>
 					<v-row class="mb-2">
@@ -23,7 +23,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('Paid Amount')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								:model-value="formatCurrency(total_payments)"
 								readonly
@@ -36,7 +36,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__(diff_lable)"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								:model-value="formatCurrency(diff_payment)"
 								readonly
@@ -51,8 +51,8 @@
 				<div class="mb-4" v-if="diff_payment < 0 && !invoice_doc.is_return">
 					<v-card variant="flat" class="mb-3 section-header">
 						<v-card-title class="section-header-title font-weight-bold">
-							<v-icon start size="20" color="#00BCD4">mdi-cash-refund</v-icon>
-							<span style="color: #34495e">Change Details</span>
+							<v-icon start size="20" color="primary">mdi-cash-refund</v-icon>
+							<span class="section-title-text">Change Details</span>
 						</v-card-title>
 					</v-card>
 					<v-row>
@@ -61,7 +61,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('Paid Change')"
-								bg-color="white"
+								bg-color="surface"
 								v-model="paid_change"
 								@update:model-value="set_paid_change()"
 								:prefix="currencySymbol(invoice_doc.currency)"
@@ -77,7 +77,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('Credit Change')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								:model-value="formatCurrency(credit_change)"
 								readonly
@@ -94,8 +94,8 @@
 				<div class="mb-4" v-if="is_cashback">
 					<v-card variant="flat" class="mb-3 section-header">
 						<v-card-title class="section-header-title font-weight-bold">
-							<v-icon start size="20" color="#00BCD4">mdi-credit-card</v-icon>
-							<span style="color: #34495e">Payment Methods</span>
+							<v-icon start size="20" color="primary">mdi-credit-card</v-icon>
+							<span class="section-title-text">Payment Methods</span>
 						</v-card-title>
 					</v-card>
 					<v-row
@@ -109,7 +109,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__(payment.mode_of_payment)"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								v-model="payment.amount"
 								:rules="[isNumber]"
@@ -137,10 +137,9 @@
 								size="large"
 								rounded="md"
 								class="payment-method-btn"
-								style="color: #34495e; border-color: #e0e0e0"
 								@click="set_full_amount(payment.idx)"
 							>
-								<v-icon start size="20" color="#00BCD4">mdi-cash</v-icon>
+								<v-icon start size="20" color="primary">mdi-cash</v-icon>
 								{{ payment.mode_of_payment }}
 							</v-btn>
 						</v-col>
@@ -190,29 +189,29 @@
 				</div>
 
 				<v-row
-					class="pyments px-1 py-0"
+					class="pyments loyalty-redemption-row px-1"
 					v-if="invoice_doc && available_pioints_amount > 0 && !invoice_doc.is_return"
 				>
-					<v-col cols="7">
+					<v-col cols="12" sm="7" class="py-1">
 						<v-text-field
 							density="compact"
 							variant="outlined"
 							color="primary"
 							:label="__('Redeem Loyalty Points')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							v-model="loyalty_amount"
 							type="number"
 							:prefix="currencySymbol(invoice_doc.currency)"
 						></v-text-field>
 					</v-col>
-					<v-col cols="5">
+					<v-col cols="12" sm="5" class="py-1">
 						<v-text-field
 							density="compact"
 							variant="outlined"
 							color="primary"
 							:label="__('You can redeem upto')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatFloat(available_pioints_amount)"
 							:prefix="currencySymbol(invoice_doc.currency)"
@@ -237,7 +236,7 @@
 							disabled
 							color="primary"
 							:label="__('Redeemed Customer Credit')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							v-model="redeemed_customer_credit"
 							type="number"
@@ -250,7 +249,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('You can redeem credit upto')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(available_customer_credit)"
 							:prefix="currencySymbol(invoice_doc.currency)"
@@ -267,7 +266,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Net Total')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(invoice_doc.net_total)"
 							readonly
@@ -280,7 +279,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Tax and Charges')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(invoice_doc.total_taxes_and_charges)"
 							readonly
@@ -293,7 +292,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Total Amount')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(invoice_doc.total)"
 							readonly
@@ -306,7 +305,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Discount Amount')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(invoice_doc.discount_amount)"
 							readonly
@@ -320,7 +319,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Delivery Charge')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="
 								formatCurrency(invoice_doc.custom_delivery_charge_rate || 0)
@@ -336,7 +335,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Grand Total')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(invoice_doc.grand_total)"
 							readonly
@@ -349,7 +348,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Rounded Total')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(invoice_doc.rounded_total)"
 							readonly
@@ -374,7 +373,7 @@
 									readonly
 									variant="outlined"
 									density="compact"
-									bg-color="white"
+									bg-color="surface"
 									clearable
 									color="primary"
 									hide-details
@@ -404,7 +403,7 @@
 							:items="addresses"
 							item-title="address_title"
 							item-value="name"
-							bg-color="white"
+							bg-color="surface"
 							no-data-text="Address not found"
 							hide-details
 							:customFilter="addressFilter"
@@ -445,7 +444,7 @@
 							class="pa-0"
 							variant="outlined"
 							density="compact"
-							bg-color="white"
+							bg-color="surface"
 							clearable
 							color="primary"
 							auto-grow
@@ -466,7 +465,7 @@
 								:label="__('Purchase Order')"
 								variant="outlined"
 								density="compact"
-								bg-color="white"
+								bg-color="surface"
 								clearable
 								color="primary"
 								hide-details
@@ -515,8 +514,8 @@
 					>
 						<v-switch
 							v-model="is_write_off_change"
-							:color="is_write_off_change ? '#00BCD4' : '#BDBDBD'"
-							:base-color="is_write_off_change ? '#00BCD4' : '#BDBDBD'"
+							:color="is_write_off_change ? 'primary' : 'grey'"
+							:base-color="is_write_off_change ? 'primary' : 'grey'"
 							inset
 							dense
 							hide-details
@@ -535,8 +534,8 @@
 					>
 						<v-switch
 							v-model="is_credit_sale"
-							:color="is_credit_sale ? '#00BCD4' : '#BDBDBD'"
-							:base-color="is_credit_sale ? '#00BCD4' : '#BDBDBD'"
+							:color="is_credit_sale ? 'primary' : 'grey'"
+							:base-color="is_credit_sale ? 'primary' : 'grey'"
 							inset
 							dense
 							hide-details
@@ -552,8 +551,8 @@
 					<v-col cols="6" v-if="invoice_doc.is_return && pos_profile.use_cashback">
 						<v-switch
 							v-model="is_cashback"
-							:color="is_cashback ? '#00BCD4' : '#BDBDBD'"
-							:base-color="is_cashback ? '#00BCD4' : '#BDBDBD'"
+							:color="is_cashback ? 'primary' : 'grey'"
+							:base-color="is_cashback ? 'primary' : 'grey'"
 							inset
 							dense
 							hide-details
@@ -586,8 +585,8 @@
 					>
 						<v-switch
 							v-model="redeem_customer_credit"
-							:color="redeem_customer_credit ? '#00BCD4' : '#BDBDBD'"
-							:base-color="redeem_customer_credit ? '#00BCD4' : '#BDBDBD'"
+							:color="redeem_customer_credit ? 'primary' : 'grey'"
+							:base-color="redeem_customer_credit ? 'primary' : 'grey'"
 							inset
 							dense
 							hide-details
@@ -620,7 +619,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('Available Credit')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								:model-value="formatCurrency(row.total_credit)"
 								disabled
@@ -633,7 +632,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('Redeem Credit')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								type="number"
 								v-model="row.credit_to_redeem"
@@ -698,7 +697,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('Mobile Number')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								v-model="invoice_doc.contact_mobile"
 								type="number"
@@ -870,9 +869,6 @@ export default {
 				payment.amount = flt(payment.amount);
 				totalPayedAmount += payment.amount;
 			});
-			if (this.invoice_doc.is_return && totalPayedAmount == 0) {
-				this.invoice_doc.is_pos = 0;
-			}
 			if (this.customer_credit_dict.length) {
 				this.customer_credit_dict.forEach((row) => {
 					row.credit_to_redeem = flt(row.credit_to_redeem);
@@ -1675,7 +1671,7 @@ export default {
 /* Section headers styling - scoped to payment page only */
 .section-header .v-card-title {
 	font-weight: 600 !important;
-	color: #34495e !important; /* Deep Slate - Design System */
+	color: var(--pospire-text-primary) !important;
 }
 
 .section-header-title {
@@ -1684,43 +1680,53 @@ export default {
 	padding-left: 0;
 	font-size: 1rem;
 	font-weight: 600;
-	background-color: #eceff1;
-	color: #34495e !important; /* Deep Slate - Design System */
+	background-color: var(--pospire-surface-soft);
+	color: var(--pospire-text-primary) !important;
 }
 
-.section-header-title .v-icon {
-	color: #00bcd4 !important; /* Vibrant Teal - Design System */
-	margin-right: 8px;
-}
+	.section-header-title .v-icon {
+		color: rgb(var(--v-theme-primary)) !important;
+		margin-right: 8px;
+	}
+
+	.section-title-text {
+		color: var(--pospire-text-primary);
+	}
 
 /* Payment Method Buttons - Design System Compliant */
 .payment-method-btn {
-	color: #34495e !important; /* Deep Slate */
-	border: 1px solid #e0e0e0 !important;
-	background-color: #ffffff !important;
+	color: var(--pospire-text-primary) !important;
+	border: 1px solid var(--pospire-border) !important;
+	background-color: var(--pospire-surface) !important;
 	font-weight: 600 !important;
 	text-transform: uppercase !important;
 	letter-spacing: 0.5px !important;
 	transition: all 0.2s ease !important;
 }
 
-.payment-method-btn:hover {
-	border-color: #00bcd4 !important;
-	background-color: rgba(0, 188, 212, 0.05) !important;
-	box-shadow: 0 2px 8px rgba(0, 188, 212, 0.2) !important;
-}
+	.payment-method-btn:hover {
+		border-color: rgb(var(--v-theme-primary)) !important;
+		background-color: color-mix(in srgb, rgb(var(--v-theme-primary)) 10%, transparent) !important;
+		box-shadow: 0 2px 8px rgba(0, 188, 212, 0.2) !important;
+	}
 
 .payment-method-btn:active {
 	transform: scale(0.98) !important;
 }
 
-.payment-method-btn .v-icon {
-	color: #00bcd4 !important; /* Vibrant Teal for icons */
-}
+	.payment-method-btn .v-icon {
+		color: rgb(var(--v-theme-primary)) !important;
+	}
 
 /* Compact toggle switches for payment options */
 .small-switch {
 	transform: scale(0.85);
 	transform-origin: left center;
+}
+
+.loyalty-redemption-row {
+	align-items: flex-start;
+	margin-bottom: 16px;
+	row-gap: 8px;
 }
 </style>

@@ -321,7 +321,10 @@ async function runRead<T>(opts: CallOptions, config: ReadMethodConfig): Promise<
 			const classified = classifyFetchError(err);
 			connectivity.reportRequestOutcome(classified);
 
-			if (classified === "http_4xx") {
+			if (
+				classified === "http_4xx" &&
+				!(config.offline && typeof navigator !== "undefined" && navigator.onLine === false)
+			) {
 				emit({
 					method: opts.method,
 					intent: "read",
@@ -665,7 +668,9 @@ async function safeCacheRead<T>(
 ): Promise<{ data: T; cachedAt: number } | null> {
 	if (!cache) return null;
 	try {
+		console.log("Reading", key);
 		const entry = await cache.read<T>(key);
+		console.log(entry);
 		if (!entry) return null;
 		return { data: entry.data, cachedAt: entry.cachedAt };
 	} catch (err) {

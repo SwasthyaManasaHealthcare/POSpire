@@ -88,7 +88,7 @@
 							hide-details
 							variant="outlined"
 							color="primary"
-							bg-color="white"
+							bg-color="surface"
 							:items="invoiceTypes"
 							:label="__('Type')"
 							v-model="invoiceType"
@@ -108,8 +108,8 @@
 					>
 						<v-switch
 							v-model="inclusive_tax"
-							:color="inclusive_tax ? '#00BCD4' : '#BDBDBD'"
-							:base-color="inclusive_tax ? '#00BCD4' : '#BDBDBD'"
+							:color="inclusive_tax ? 'primary' : 'grey'"
+							:base-color="inclusive_tax ? 'primary' : 'grey'"
 							inset
 							density="compact"
 							hide-details
@@ -170,7 +170,7 @@
 							item-title="name"
 							item-value="name"
 							return-object
-							bg-color="white"
+							bg-color="surface"
 							:no-data-text="__('Charges not found')"
 							hide-details
 							:customFilter="deliveryChargesFilter"
@@ -197,7 +197,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('Delivery Charges Rate')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:model-value="formatCurrency(delivery_charges_rate)"
 							:prefix="currencySymbol(pos_profile.currency)"
@@ -223,7 +223,7 @@
 									readonly
 									variant="outlined"
 									density="compact"
-									bg-color="white"
+									bg-color="surface"
 									clearable
 									color="primary"
 									hide-details
@@ -265,7 +265,7 @@
 								variant="outlined"
 								color="primary"
 								:label="__('')"
-								bg-color="white"
+								bg-color="surface"
 								hide-details
 								:model-value="
 									formatFloat(
@@ -320,7 +320,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:prefix="currencySymbol(pos_profile.currency)"
 							:model-value="formatCurrency(item.rate)"
@@ -345,7 +345,7 @@
 							variant="outlined"
 							color="primary"
 							:label="__('')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							:prefix="
 								invoice_doc.is_return
@@ -382,7 +382,7 @@
 											<v-btn
 												v-bind="props"
 												variant="text"
-												color="black"
+												color="error"
 												size="small"
 												icon
 												:disabled="
@@ -449,7 +449,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Item Code')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										v-model="item.item_code"
 										readonly
@@ -461,7 +461,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('QTY')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:model-value="formatFloat(item.qty)"
 										@change="[
@@ -481,7 +481,7 @@
 								<v-col cols="4">
 									<v-select
 										density="compact"
-										bg-color="white"
+										bg-color="surface"
 										:label="__('UOM')"
 										v-model="item.uom"
 										:items="item.item_uoms"
@@ -507,7 +507,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Rate')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:prefix="currencySymbol(pos_profile.currency)"
 										:model-value="formatCurrency(item.rate)"
@@ -532,7 +532,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Item Total')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:prefix="currencySymbol(pos_profile.currency)"
 										:model-value="formatCurrency(item.qty * item.rate || 0.0)"
@@ -562,7 +562,7 @@
 										variant="outlined"
 										color="primary"
 										label="Discount Percentage"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:rules="[isNumber]"
 										suffix="%"
@@ -588,7 +588,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Discount Amount')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:model-value="formatCurrency(item.discount_amount)"
 										:rules="[isNumber]"
@@ -612,7 +612,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Price list Rate')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:model-value="formatCurrency(item.price_list_rate)"
 										readonly
@@ -625,7 +625,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Available QTY')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:model-value="formatFloat(item.actual_qty)"
 										readonly
@@ -637,7 +637,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Group')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										v-model="item.item_group"
 										readonly
@@ -649,7 +649,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Stock QTY')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:model-value="formatFloat(item.stock_qty)"
 										readonly
@@ -661,7 +661,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Stock UOM')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										v-model="item.stock_uom"
 										readonly
@@ -683,7 +683,7 @@
 											variant="outlined"
 											color="primary"
 											:label="__('Serial No QTY')"
-											bg-color="white"
+											bg-color="surface"
 											hide-details
 											v-model="item.serial_no_selected_count"
 											type="number"
@@ -729,7 +729,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Batch No. Available QTY')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										:model-value="formatFloat(item.actual_batch_qty)"
 										readonly
@@ -741,7 +741,7 @@
 										variant="outlined"
 										color="primary"
 										:label="__('Batch No Expiry Date')"
-										bg-color="white"
+										bg-color="surface"
 										hide-details
 										v-model="item.batch_no_expiry_date"
 										readonly
@@ -882,7 +882,7 @@
 										:items="sales_persons"
 										item-title="sales_person_name"
 										item-value="name"
-										bg-color="white"
+										bg-color="surface"
 										:no-data-text="__('Sales Person not found')"
 										hide-details
 										:customFilter="salesPersonFilter"
@@ -911,7 +911,7 @@
 					<template v-slot:no-data>
 						<div class="empty-cart-state">
 							<div class="empty-cart-icon-wrapper">
-								<v-icon size="72" color="#00BCD4">mdi-cart-plus</v-icon>
+								<v-icon size="72" color="primary">mdi-cart-plus</v-icon>
 							</div>
 							<h3 class="empty-cart-title">{{ __("No items yet") }}</h3>
 							<p class="empty-cart-description">
@@ -919,15 +919,15 @@
 							</p>
 							<div class="empty-cart-hints">
 								<span
-									><v-icon size="14" color="#00BCD4">mdi-magnify</v-icon>
+									><v-icon size="14" color="primary">mdi-magnify</v-icon>
 									{{ __("Search") }}</span
 								>
 								<span
-									><v-icon size="14" color="#00BCD4">mdi-barcode-scan</v-icon>
+									><v-icon size="14" color="primary">mdi-barcode-scan</v-icon>
 									{{ __("Scan") }}</span
 								>
 								<span
-									><v-icon size="14" color="#00BCD4">mdi-gesture-tap</v-icon>
+									><v-icon size="14" color="primary">mdi-gesture-tap</v-icon>
 									{{ __("Click") }}</span
 								>
 							</div>
@@ -936,11 +936,10 @@
 				</v-data-table>
 			</div>
 		</v-card>
-		<v-card
-			class="cards mb-0 py-0 pospire-invoice-footer pos-footer-section"
-			:elevation="0"
-			style="border: 2px solid #00bcd4 !important"
-		>
+			<v-card
+				class="cards mb-0 py-0 pospire-invoice-footer pos-footer-section"
+				:elevation="0"
+			>
 			<v-row no-gutters>
 				<v-col cols="12" sm="6" class="pa-1">
 					<v-row no-gutters class="pa-1 pt-2 pr-1">
@@ -4382,7 +4381,7 @@ export default {
 
 <style scoped>
 .border_line_bottom {
-	border-bottom: 1px solid lightgray;
+	border-bottom: 1px solid var(--pospire-border);
 }
 
 .disable-events {
@@ -4424,24 +4423,24 @@ export default {
 	border: 2px solid var(--pospire-vibrant-teal) !important;
 	border-style: solid !important;
 	border-width: 2px !important;
-	border-color: #00bcd4 !important;
+	border-color: rgb(var(--v-theme-primary)) !important;
 	border-radius: 12px !important;
 	box-shadow: 0 4px 12px rgba(0, 188, 212, 0.15) !important;
 }
 
 /* Override v-card default border */
 :deep(.v-card.pospire-invoice-footer) {
-	border: 2px solid #00bcd4 !important;
+	border: 2px solid rgb(var(--v-theme-primary)) !important;
 	border-radius: 12px !important;
 }
 
 /* Items table styling */
 :deep(.v-data-table thead th) {
-	background: var(--pospire-light-gray) !important;
+	background: var(--pospire-surface-soft) !important;
 	font: var(--pospire-font-body-medium) !important;
-	color: var(--pospire-deep-slate) !important;
+	color: var(--pospire-text-primary) !important;
 	height: 40px !important;
-	border-bottom: 2px solid var(--pospire-border-gray) !important;
+	border-bottom: 2px solid var(--pospire-border) !important;
 }
 
 :deep(.v-data-table tbody tr) {
@@ -4449,11 +4448,11 @@ export default {
 }
 
 :deep(.v-data-table tbody tr:nth-child(even)) {
-	background: #fafafa;
+	background: var(--pospire-surface-soft);
 }
 
 :deep(.v-data-table tbody tr:hover) {
-	background: rgba(0, 188, 212, 0.05) !important;
+	background: var(--pospire-hover-bg) !important;
 }
 
 /* PAY button text styling */

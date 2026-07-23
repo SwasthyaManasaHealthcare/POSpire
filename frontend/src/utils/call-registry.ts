@@ -171,6 +171,17 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		cacheTTLMs: 2 * HOUR,
 	},
+	"pospire.pospire.api.dashboard.get_shift_dashboard": {
+		intent: "read",
+		offline: true,
+	},
+	// Dashboard layout config. Static admin configuration that changes rarely,
+	// so it caches for a long window to keep the dashboard renderable offline.
+	"pospire.pospire.api.dashboard.get_dashboard_layout": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 
 	// -----------------------------------------------------------------------
 	// Reads — LIVE ONLY (P-4: server stays authoritative)
@@ -197,7 +208,6 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "read",
 		offline: false,
 	},
-
 	// Payment entry reads (pay.vue flow)
 	"pospire.pospire.api.payment_entry.get_available_pos_profiles": {
 		intent: "read",

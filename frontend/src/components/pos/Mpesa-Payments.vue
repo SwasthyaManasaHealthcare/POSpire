@@ -10,7 +10,7 @@
 						<v-text-field
 							color="primary"
 							:label="__('Full Name')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							v-model="full_name"
 							density="compact"
@@ -20,7 +20,7 @@
 						<v-text-field
 							color="primary"
 							:label="__('Mobile No')"
-							bg-color="white"
+							bg-color="surface"
 							hide-details
 							v-model="mobile_no"
 							density="compact"

@@ -13,7 +13,7 @@
 									density="compact"
 									color="primary"
 									:label="__('Address Name')"
-									bg-color="white"
+									bg-color="surface"
 									hide-details
 									v-model="address.name"
 								></v-text-field>
@@ -23,7 +23,7 @@
 									density="compact"
 									color="primary"
 									:label="__('Address Line 1')"
-									bg-color="white"
+									bg-color="surface"
 									hide-details
 									v-model="address.address_line1"
 								></v-text-field>
@@ -33,7 +33,7 @@
 									density="compact"
 									color="primary"
 									:label="__('Address Line 2')"
-									bg-color="white"
+									bg-color="surface"
 									hide-details
 									v-model="address.address_line2"
 								></v-text-field>
@@ -43,7 +43,7 @@
 									label="City"
 									density="compact"
 									color="primary"
-									bg-color="white"
+									bg-color="surface"
 									hide-details
 									v-model="address.city"
 								></v-text-field>
@@ -52,7 +52,7 @@
 								<v-text-field
 									label="State"
 									density="compact"
-									bg-color="white"
+									bg-color="surface"
 									hide-details
 									v-model="address.state"
 								></v-text-field>

@@ -26,7 +26,7 @@
 				<v-icon
 					v-if="showActions"
 					class="customer-action-icon mr-1"
-					color="#00BCD4"
+					color="primary"
 					@click.stop="new_customer"
 				>mdi-account-plus</v-icon>
 			</template>
@@ -346,8 +346,8 @@ export default {
 
 .customer-action-icon:hover {
 	transform: scale(1.3);
-	color: #00BCD4 !important;
-	filter: brightness(1.25) drop-shadow(0 0 4px #00BCD4);
+	color: rgb(var(--v-theme-primary)) !important;
+	filter: brightness(1.25) drop-shadow(0 0 4px rgba(var(--v-theme-primary), 0.45));
 }
 
 .customer-action-icon:active {

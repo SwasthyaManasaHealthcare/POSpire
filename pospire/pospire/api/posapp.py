@@ -1352,8 +1352,24 @@ def get_draft_invoices(pos_opening_shift: str) -> list:
 
 @frappe.whitelist()
 def delete_invoice(invoice: str) -> str:
-	if frappe.get_value("Sales Invoice", invoice, "posa_is_printed"):
+	invoice_details = frappe.db.get_value(
+		"Sales Invoice",
+		invoice,
+		["posa_is_printed", "posa_pos_opening_shift"],
+		as_dict=True,
+	)
+	if invoice_details and invoice_details.posa_is_printed:
 		frappe.throw(_("This invoice {0} cannot be deleted").format(invoice))
+	pos_opening_shift = invoice_details.posa_pos_opening_shift if invoice_details else None
+	if pos_opening_shift:
+		frappe.db.sql(
+			"""
+			UPDATE `tabPOS Opening Shift`
+			SET custom_cancelled_count = COALESCE(custom_cancelled_count, 0) + 1
+			WHERE name = %s
+			""",
+			(pos_opening_shift,),
+		)
 	frappe.delete_doc("Sales Invoice", invoice, force=1)
 	return _("Invoice {0} Deleted").format(invoice)
 
