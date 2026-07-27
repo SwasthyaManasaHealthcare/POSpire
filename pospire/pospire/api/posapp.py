@@ -355,6 +355,23 @@ def get_items(
 				item_prices.setdefault(d.item_code, {})
 				item_prices[d.item_code][d.get("uom") or "None"] = d
 
+			# Per-item default tax template, forwarded for offline tax estimation
+			# and item-level re-derivation on sync.
+			item_tax_map = {}
+			for tax_row in frappe.get_all(
+				"Item Tax",
+				fields=["parent", "item_tax_template"],
+				filters=[
+					["parenttype", "=", "Item"],
+					["parent", "in", items],
+					[IfNull(Field("tax_category"), ""), "=", ""],
+					[IfNull(Field("valid_from"), "1900-01-01"), "<=", today],
+				],
+				order_by="valid_from asc",
+			):
+				# ascending order -> latest valid row wins
+				item_tax_map[tax_row.parent] = tax_row.item_tax_template
+
 			for item in items_data:
 				item_code = item.item_code
 				item_price = {}
@@ -428,6 +445,7 @@ def get_items(
 							"batch_no_data": batch_no_data or [],
 							"attributes": attributes or "",
 							"item_attributes": item_attributes or "",
+							"item_tax_template": item_tax_map.get(item_code),
 						}
 					)
 					result.append(row)
@@ -462,6 +480,46 @@ def get_items(
 		return items
 
 	return _get_items(pos_profile, price_list, item_group, search_value, customer)
+
+
+@frappe.whitelist()
+def get_offline_tax_config(pos_profile: str | dict) -> dict:
+	"""Tax config snapshot the client caches for offline tax estimation.
+
+	Returns the POS Profile's invoice-level tax rows plus a map of Item Tax
+	Templates for per-item overrides.
+	"""
+	pos_profile = _load(pos_profile)
+	profile_name = pos_profile.get("name") if isinstance(pos_profile, dict) else pos_profile
+
+	sales_taxes = []
+	template_name = (
+		frappe.get_cached_value("POS Profile", profile_name, "taxes_and_charges") if profile_name else None
+	)
+	if template_name:
+		template = frappe.get_cached_doc("Sales Taxes and Charges Template", template_name)
+		for row in template.taxes:
+			sales_taxes.append(
+				{
+					"account_head": row.account_head,
+					"charge_type": row.charge_type,
+					"rate": flt(row.rate),
+				}
+			)
+
+	item_tax_templates: dict[str, list] = {}
+	for detail in frappe.get_all(
+		"Item Tax Template Detail",
+		fields=["parent", "tax_type", "tax_rate"],
+	):
+		item_tax_templates.setdefault(detail.parent, []).append(
+			{"account_head": detail.tax_type, "rate": flt(detail.tax_rate)}
+		)
+
+	return {
+		"sales_taxes_and_charges": sales_taxes,
+		"item_tax_templates": item_tax_templates,
+	}
 
 
 def get_item_group_condition(pos_profile):
@@ -625,6 +683,31 @@ def add_taxes_from_tax_template(item, parent_doc):
 				if parent_doc.doctype == "Purchase Order":
 					tax_row.update({"category": "Total", "add_deduct_tax": "Add"})
 				tax_row.db_insert()
+
+
+def _expand_offline_taxes(invoice_doc):
+	"""Re-derive the tax table for an offline-origin invoice.
+
+	Offline invoices reach submit_invoice with empty `taxes` (the live-only
+	update_invoice tax step was skipped), so without this they book zero tax.
+	Re-expand from the same sources the online flow uses. No-op when taxes are
+	already present (online) or no tax source is configured.
+	"""
+	if invoice_doc.get("taxes"):
+		return
+	template = None
+	if invoice_doc.get("pos_profile"):
+		template = frappe.get_cached_value("POS Profile", invoice_doc.pos_profile, "taxes_and_charges")
+	if template:
+		invoice_doc.taxes_and_charges = template
+		invoice_doc.set_taxes()
+	for item in invoice_doc.items:
+		add_taxes_from_tax_template(item, invoice_doc)
+	# Inclusive: flag rows so tax is extracted from the price, not added on top.
+	if invoice_doc.get("inclusive_tax"):
+		for tax in invoice_doc.get("taxes") or []:
+			tax.included_in_rate = 1
+			tax.included_in_print_rate = 1
 
 
 @frappe.whitelist()
@@ -1001,6 +1084,9 @@ def submit_invoice(invoice: str | dict, data: str | dict, offline_id: str | None
 				invoice_doc.append("advances", advance_payment)
 				invoice_doc.is_pos = 0
 				is_payment_entry = 1
+
+	# Re-expand taxes for offline-origin invoices (no-op online).
+	_expand_offline_taxes(invoice_doc)
 
 	set_batch_nos_for_bundels(invoice_doc, "warehouse", throw=True)
 
