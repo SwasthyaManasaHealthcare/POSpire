@@ -83,6 +83,7 @@ doctype_js = {
 # after_install = "pospire.install.after_install"
 after_install = "pospire.install.after_install"
 boot_session = "pospire.install.fix_desktop_icon_on_boot"
+extend_bootinfo = ["pospire.boot.filter_core_pos_doctypes_from_bootinfo"]
 # before_uninstall = "pospire.uninstall.before_uninstall"
 after_uninstall = "pospire.uninstall.after_uninstall"
 
