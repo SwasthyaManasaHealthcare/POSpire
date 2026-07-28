@@ -710,6 +710,16 @@ def _expand_offline_taxes(invoice_doc):
 			tax.included_in_print_rate = 1
 
 
+def _preserve_offline_generated_tax_rows(invoice_doc, invoice):
+	"""Keep ERPNext-generated tax rows from being cleared by offline payloads."""
+	if not invoice_doc.get("pos_offline_id") or not isinstance(invoice, dict):
+		return
+
+	for fieldname in ("taxes", "item_wise_tax_details"):
+		if fieldname in invoice and not invoice.get(fieldname):
+			invoice.pop(fieldname, None)
+
+
 @frappe.whitelist()
 def update_invoice_from_order(data: str | dict):
 	data = _load(data)
@@ -1002,6 +1012,7 @@ def submit_invoice(invoice: str | dict, data: str | dict, offline_id: str | None
 	# unaffected.
 	if offline_id and not invoice_doc.get("pos_offline_id"):
 		invoice_doc.pos_offline_id = offline_id
+	_preserve_offline_generated_tax_rows(invoice_doc, invoice)
 	invoice_doc.update(invoice)
 	# Belt-and-braces floor on item rate. The client clamps before sending
 	# (see Invoice.vue::clamp_item_rate), but a stale tab, replayed offline

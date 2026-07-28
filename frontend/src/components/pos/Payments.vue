@@ -1079,6 +1079,16 @@ export default {
 			});
 		},
 		set_rest_amount(idx) {
+			const payment = this.invoice_doc.payments.find((row) => row.idx == idx);
+			if (!payment || payment.amount != 0) {
+				return;
+			}
+
+			if (!this.invoice_doc.name && this.diff_payment <= 0) {
+				this.set_full_amount(idx);
+				return;
+			}
+
 			this.invoice_doc.payments.forEach((payment) => {
 				if (payment.idx == idx && payment.amount == 0 && this.diff_payment > 0) {
 					payment.amount = this.diff_payment;
