@@ -1154,6 +1154,7 @@ import ApprovalDialog from "./ApprovalDialog.vue";
 import { toast } from "vue3-toastify";
 import { datetime } from "@/utils/datetime";
 import connectivity from "@/offline/connectivity";
+import { computeOfflineTax } from "@/offline/tax";
 
 export default {
 	mixins: [format, hardwareUtils],
@@ -1161,6 +1162,9 @@ export default {
 		return {
 			//
 			inclusive_tax: true,
+			// Cached tax config + last offline tax estimate (see @/offline/tax).
+			offline_tax_config: null,
+			offline_tax_supported: true,
 			sales_persons: [],
 			//
 			pos_profile: "",
@@ -2153,6 +2157,39 @@ export default {
 			return old_invoice;
 		},
 
+		async load_offline_tax_config() {
+			if (!this.pos_profile?.name) return;
+			try {
+				const config = await call("pospire.pospire.api.posapp.get_offline_tax_config", {
+					pos_profile: this.pos_profile.name,
+				});
+				if (config) this.offline_tax_config = config;
+			} catch {
+				// Non-fatal: offline tax falls back to the untaxed subtotal seed.
+			}
+		},
+
+		// Estimate cart tax from the cached config. Returns null when it can't be
+		// computed offline (no config / unsupported charge type).
+		compute_offline_taxes() {
+			const lines = this.items.map((item) => ({
+				net: flt(item.qty) * flt(item.rate),
+				item_tax_template: item.item_tax_template || null,
+			}));
+			// Taxable base = item net minus invoice discount (delivery is untaxed).
+			const netTotal = this.flt(
+				this.subtotal - (this.delivery_charges_rate || 0),
+				this.currency_precision,
+			);
+			const result = computeOfflineTax(lines, this.offline_tax_config, {
+				inclusive: this.inclusive_tax,
+				netTotal,
+				precision: this.currency_precision,
+			});
+			this.offline_tax_supported = result.supported;
+			return result.supported ? result : null;
+		},
+
 		get_invoice_doc() {
 			let doc = {};
 			if (this.invoice_doc?.name) {
@@ -2177,19 +2214,26 @@ export default {
 				doc.customer_offline_id = this.customer_offline_id;
 			}
 			doc.items = this.get_invoice_items();
-			doc.total = this.subtotal;
-			// Offline path: server-side `update_invoice` (which normally
-			// computes net_total / grand_total / rounded_total) is bypassed
-			// when we fall back to the local snapshot. Without these fields
-			// Payments.vue line 1466 — `default_payment.amount = rounded_total
-			// || grand_total` — resolves to undefined and the cashier sees a
-			// default of 0, queueing an invoice with `payments[*].amount = 0`.
-			// Seed both from `subtotal` (which already includes discount +
-			// delivery) so the default cash row is pre-populated; the server
-			// recomputes the full chain on submit/sync.
-			doc.grand_total = this.subtotal;
-			doc.rounded_total = this.subtotal;
-			doc.net_total = this.subtotal;
+			// Seed totals locally (update_invoice is bypassed offline) so the
+			// cashier collects the right amount. `doc.taxes` stays empty on
+			// purpose: the server re-expands taxes on sync and stays authoritative.
+			const offlineTax = this.compute_offline_taxes();
+			if (offlineTax) {
+				const delivery = this.flt(this.delivery_charges_rate || 0, this.currency_precision);
+				const grand = this.flt(offlineTax.grand_total + delivery, this.currency_precision);
+				doc.total = offlineTax.net_total;
+				doc.net_total = offlineTax.net_total;
+				doc.total_taxes_and_charges = offlineTax.total_taxes_and_charges;
+				doc.grand_total = grand;
+				doc.rounded_total = grand;
+			} else {
+				// Can't compute tax: fall back to untaxed subtotal. show_payment
+				// blocks this offline for exclusive tax (would undercharge).
+				doc.total = this.subtotal;
+				doc.grand_total = this.subtotal;
+				doc.rounded_total = this.subtotal;
+				doc.net_total = this.subtotal;
+			}
 			doc.discount_amount = flt(this.discount_amount);
 			doc.additional_discount_percentage = flt(this.additional_discount_percentage);
 			doc.custom_delivery_charge_rate = this.delivery_charges_rate || 0;
@@ -2313,6 +2357,8 @@ export default {
 					posa_notes: item.posa_notes,
 					posa_delivery_date: item.posa_delivery_date,
 					price_list_rate: item.price_list_rate,
+					// Forwarded so the server can re-derive item-level taxes on sync.
+					item_tax_template: item.item_tax_template || undefined,
 					// Sales Person
 					custom_sales_person: item.sales_person,
 					// Return item references (for sales returns)
@@ -2358,8 +2404,11 @@ export default {
 
 		get_payments() {
 			const payments = [];
-			this.pos_profile.payments.forEach((payment) => {
+			this.pos_profile.payments.forEach((payment, index) => {
 				payments.push({
+					// Offline rows skip the server, so seed the child-table idx
+					// that Payments.vue's set_full_amount/set_rest_amount key on.
+					idx: index + 1,
 					amount: 0,
 					mode_of_payment: payment.mode_of_payment,
 					default: payment.default,
@@ -2474,6 +2523,20 @@ export default {
 			if (!this.items.length) {
 				toast.error(__("Select items to sell"));
 				return;
+			}
+
+			// Offline + exclusive tax we can't compute: block Pay to avoid
+			// undercharging. Inclusive is safe (price already includes tax).
+			if (!connectivity.isOnline() && !this.inclusive_tax) {
+				this.compute_offline_taxes();
+				if (!this.offline_tax_supported) {
+					toast.error(
+						__(
+							"Tax can't be calculated offline for this tax setup. Reconnect to take this payment.",
+						),
+					);
+					return;
+				}
 			}
 
 			if (!this.validate()) {
@@ -4181,6 +4244,8 @@ export default {
 				this.currency_precision = window.sys_defaults?.currency_precision || 2;
 				this.invoiceType = this.pos_profile.posa_default_sales_order ? "Order" : "Invoice";
 				this.load_approval_config();
+				// Prime the tax config while online so it's cached for offline use.
+				this.load_offline_tax_config();
 		});
 		this.eventBus.on("auto_set_delivery_charge", () => {
 			if (this.delivery_charges.length > 0 && !this.selected_delivery_charge) {

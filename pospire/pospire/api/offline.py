@@ -1247,6 +1247,10 @@ def submit_invoice(
 				}
 			)
 			draft.flags.ignore_permissions = True
+			# Populate POS/tax fields while the document is still new, so ERPNext's
+			# native set_taxes() path appends GST rows before India Compliance
+			# validates the insert. for_validate=True preserves offline payment rows.
+			draft.set_missing_values(for_validate=True)
 			ensure_typed_batches_exist_for_invoice(draft)
 			draft.insert()
 		except frappe.DuplicateEntryError:

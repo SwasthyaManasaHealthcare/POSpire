@@ -171,6 +171,13 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		cacheTTLMs: 2 * HOUR,
 	},
+	// Tax config for offline estimation. Rarely changes (admin tax setup), so a
+	// long window keeps the cart taxable offline for a full shift.
+	"pospire.pospire.api.posapp.get_offline_tax_config": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 	"pospire.pospire.api.dashboard.get_shift_dashboard": {
 		intent: "read",
 		offline: true,
