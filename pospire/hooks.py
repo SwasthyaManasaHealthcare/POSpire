@@ -20,6 +20,8 @@ POSPIRE_MANAGER_PIN_EMAIL_TEMPLATE = "POSpire Manager PIN"
 # app_include_css = "/assets/pospire/css/pos-enhancements.css"
 # app_include_js = ["pospire.bundle.js"]
 
+extend_bootinfo = "pospire.boot.extend_bootinfo"
+
 # Approval workflow desk notifications (runs on all desk pages for managers)
 app_include_js = ["/assets/pospire/js/pos_approval_desk.js"]
 
@@ -208,6 +210,11 @@ scheduler_events = {
 # override_whitelisted_methods = {
 # 	"frappe.desk.doctype.event.event.get_events": "pospire.event.get_events"
 # }
+
+override_whitelisted_methods = {
+    "frappe.desk.desk_page.getpage": "pospire.boot.getpage",
+    "frappe.desk.desktop.get_desktop_page": "pospire.workspace_filter.get_desktop_page",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
