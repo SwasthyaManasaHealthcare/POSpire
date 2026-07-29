@@ -205,10 +205,9 @@ scheduler_events = {
 
 # Overriding Methods
 # ------------------------------
-#
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "pospire.event.get_events"
-# }
+override_whitelisted_methods = {
+	"frappe.desk.desk_page.getpage": "pospire.boot.block_core_pos_page_access",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
