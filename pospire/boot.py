@@ -79,7 +79,7 @@ def extend_bootinfo(bootinfo):
 		bootinfo["workspace_sidebar_item"] = _filter_workspace_sidebar(sidebar)
 
 
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist()
 def getpage(name: str):
 	"""
 	Prevent users from opening ERPNext Core POS page.

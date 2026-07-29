@@ -53,7 +53,7 @@ def _filter_workspace_response(response):
 
 @frappe.whitelist()
 @frappe.read_only()
-def get_desktop_page(page):
+def get_desktop_page(page: str):
 	"""
 	Wrapper around ERPNext get_desktop_page().
 	"""
