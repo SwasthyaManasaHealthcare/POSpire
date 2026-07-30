@@ -23,7 +23,10 @@ POSPIRE_MANAGER_PIN_EMAIL_TEMPLATE = "POSpire Manager PIN"
 extend_bootinfo = "pospire.boot.extend_bootinfo"
 
 # Approval workflow desk notifications (runs on all desk pages for managers)
-app_include_js = ["/assets/pospire/js/pos_approval_desk.js"]
+app_include_js = [
+	"/assets/pospire/js/pos_approval_desk.js",
+	"/assets/pospire/js/pos_core_awesomebar_filter.js",
+]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pospire/css/pospire.css"
@@ -84,6 +87,7 @@ doctype_js = {
 # before_install = "pospire.install.before_install"
 # after_install = "pospire.install.after_install"
 after_install = "pospire.install.after_install"
+after_migrate = "pospire.install.after_migrate"
 boot_session = "pospire.install.fix_desktop_icon_on_boot"
 # before_uninstall = "pospire.uninstall.before_uninstall"
 after_uninstall = "pospire.uninstall.after_uninstall"

@@ -2,23 +2,9 @@ import frappe
 from frappe import _
 from frappe.desk import desk_page
 
-CORE_POS_DOCTYPES = {
-	"POS Invoice",
-	"POS Opening Entry",
-	"POS Closing Entry",
-	"POS Invoice Merge Log",
-	"POS Settings",
-}
+from pospire.pos_core import CORE_POS_DOCTYPES, is_core_pos
 
-CORE_POS_SIDEBAR_ITEMS = {
-	"POS",
-	"POS Profile",
-	"POS Invoice",
-	"POS Opening Entry",
-	"POS Closing Entry",
-	"POS Invoice Merge Log",
-	"POS Settings",
-}
+CORE_POS_DOCTYPES_LIST = sorted(CORE_POS_DOCTYPES)
 
 BLOCKED_PAGES = {
 	"point-of-sale",
@@ -27,27 +13,29 @@ BLOCKED_PAGES = {
 
 def _filter_doctypes(doctypes):
 	"""
-	Remove Core POS DocTypes from bootinfo lists.
+	Remove ERPNext Core POS DocTypes from bootinfo lists.
 	"""
 
-	if not doctypes:
-		return []
+	doctypes = doctypes or []
 
 	return [doctype for doctype in doctypes if doctype not in CORE_POS_DOCTYPES]
 
 
 def _filter_workspace_sidebar(workspace_sidebar):
 	"""
-	Remove Core POS items from Workspace Sidebar.
+	Remove ERPNext Core POS items from the Workspace Sidebar.
+
+	Matches on link_type/link_to instead of label because labels
+	are translated before extend_bootinfo() is executed.
 	"""
 
 	if not workspace_sidebar:
 		return workspace_sidebar
 
-	for _workspace_name, workspace in workspace_sidebar.items():
-		items = workspace.get("items", [])
+	for workspace in workspace_sidebar.values():
+		items = workspace.get("items") or []
 
-		workspace["items"] = [item for item in items if item.get("label") not in CORE_POS_SIDEBAR_ITEMS]
+		workspace["items"] = [item for item in items if not is_core_pos(item)]
 
 	return workspace_sidebar
 
@@ -55,22 +43,22 @@ def _filter_workspace_sidebar(workspace_sidebar):
 def extend_bootinfo(bootinfo):
 	"""
 	Layer 1
-	    - Hide Core POS DocTypes from:
+	    Hide ERPNext Core POS DocTypes from:
 	        * Awesome Bar
 	        * Search
 	        * New
 
 	Layer 2
-	    - Hide Core POS entries from Workspace Sidebar
+	    Hide ERPNext Core POS entries from the Workspace Sidebar.
 	"""
 
 	user = bootinfo.get("user")
 
 	if user:
-		user["can_read"] = _filter_doctypes(user.get("can_read"))
-
+		# NOTE:
+		# Do not filter can_read.
+		# It is consumed by the desk router and other framework internals.
 		user["can_search"] = _filter_doctypes(user.get("can_search"))
-
 		user["can_create"] = _filter_doctypes(user.get("can_create"))
 
 	sidebar = bootinfo.get("workspace_sidebar_item")
@@ -78,11 +66,22 @@ def extend_bootinfo(bootinfo):
 	if sidebar:
 		bootinfo["workspace_sidebar_item"] = _filter_workspace_sidebar(sidebar)
 
+	# NOTE:
+	# The Awesome Bar's get_doctypes() (search_utils.js) checks can_search
+	# for most doctypes, but for Singles (e.g. POS Settings) it checks
+	# can_read + bootinfo.single_types instead, bypassing can_search
+	# entirely. Both of those are left unfiltered above on purpose, so
+	# Singles slip through. pos_core_awesomebar_filter.js filters them out
+	# of the Awesome Bar's results client-side using this list instead.
+	bootinfo["core_pos_doctypes"] = CORE_POS_DOCTYPES_LIST
 
-@frappe.whitelist()
+
+@frappe.whitelist(allow_guest=True)
 def getpage(name: str):
 	"""
-	Prevent users from opening ERPNext Core POS page.
+	Block access to the ERPNext Core Point of Sale page.
+
+	All other desk pages continue to use the standard behaviour.
 	"""
 
 	if name in BLOCKED_PAGES:
@@ -91,6 +90,6 @@ def getpage(name: str):
 			frappe.PermissionError,
 		)
 
-	# Delegate to original implementation
+	# Delegate to the original implementation.
 	doc = desk_page.get(name)
 	frappe.response.docs.append(doc)
