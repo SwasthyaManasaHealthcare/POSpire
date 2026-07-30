@@ -61,17 +61,21 @@ def extend_bootinfo(bootinfo):
 		user["can_search"] = _filter_doctypes(user.get("can_search"))
 		user["can_create"] = _filter_doctypes(user.get("can_create"))
 
+	# Single DocTypes (e.g. POS Settings) bypass can_search entirely in the
+	# Awesome Bar: frappe's search_utils.get_doctypes() matches Single
+	# DocTypes against bootinfo.single_types instead, based only on can_read.
+	bootinfo["single_types"] = _filter_doctypes(bootinfo.get("single_types"))
+
 	sidebar = bootinfo.get("workspace_sidebar_item")
 
 	if sidebar:
 		bootinfo["workspace_sidebar_item"] = _filter_workspace_sidebar(sidebar)
 
 
-# nosemgrep: frappe-semgrep-rules.rules.security.guest-whitelisted-method —
 # `getpage` must remain guest-callable because it overrides the guest-accessible
 # desk page entry point; it only blocks the POS page and delegates all other
 # page handling to the ERPNext implementation.
-@frappe.whitelist(allow_guest=True)
+@frappe.whitelist(allow_guest=True)  # nosemgrep: frappe-semgrep-rules.rules.security.guest-whitelisted-method
 def getpage(name: str):
 	"""
 	Block access to the ERPNext Core Point of Sale page.
