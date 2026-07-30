@@ -66,16 +66,11 @@ def extend_bootinfo(bootinfo):
 	if sidebar:
 		bootinfo["workspace_sidebar_item"] = _filter_workspace_sidebar(sidebar)
 
-	# NOTE:
-	# The Awesome Bar's get_doctypes() (search_utils.js) checks can_search
-	# for most doctypes, but for Singles (e.g. POS Settings) it checks
-	# can_read + bootinfo.single_types instead, bypassing can_search
-	# entirely. Both of those are left unfiltered above on purpose, so
-	# Singles slip through. pos_core_awesomebar_filter.js filters them out
-	# of the Awesome Bar's results client-side using this list instead.
-	bootinfo["core_pos_doctypes"] = CORE_POS_DOCTYPES_LIST
 
-
+# nosemgrep: frappe-semgrep-rules.rules.security.guest-whitelisted-method —
+# `getpage` must remain guest-callable because it overrides the guest-accessible
+# desk page entry point; it only blocks the POS page and delegates all other
+# page handling to the ERPNext implementation.
 @frappe.whitelist(allow_guest=True)
 def getpage(name: str):
 	"""
