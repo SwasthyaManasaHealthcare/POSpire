@@ -2,12 +2,22 @@ import frappe
 from frappe import _
 from frappe.desk import desk_page
 
-from pospire.pos_core import CORE_POS_DOCTYPES, is_core_pos
+from pospire.pos_core import CORE_POS_DOCTYPES, CORE_POS_PAGES, is_core_pos
 
 CORE_POS_DOCTYPES_LIST = sorted(CORE_POS_DOCTYPES)
+CORE_POS_PAGES_LIST = sorted(CORE_POS_PAGES)
 
 BLOCKED_PAGES = {
 	"point-of-sale",
+}
+
+# "pos-invoice" is not a Page — it's Frappe's auto-generated route slug for
+# the "POS Invoice" DocType's list view (frappe.router.setup() builds it from
+# bootinfo.user.can_read, which is deliberately left unfiltered below). DocType
+# routes never call desk_page.getpage(), so BLOCKED_PAGES/getpage() can't
+# block them; pos_core_route_guard.js blocks these client-side instead.
+BLOCKED_DOCTYPE_ROUTES = {
+	"pos-invoice",
 }
 
 
@@ -50,7 +60,18 @@ def extend_bootinfo(bootinfo):
 
 	Layer 2
 	    Hide ERPNext Core POS entries from the Workspace Sidebar.
+
+	Layer 3
+	    Expose Core POS page names so pos_core_awesomebar_filter.js can drop
+	    their "Open <Page>" entries from the Awesome Bar.
+
+	Layer 4
+	    Expose blocked DocType route slugs so pos_core_route_guard.js can
+	    block direct navigation to them (e.g. "pos-invoice").
 	"""
+
+	bootinfo["core_pos_pages"] = CORE_POS_PAGES_LIST
+	bootinfo["core_pos_blocked_routes"] = sorted(BLOCKED_DOCTYPE_ROUTES)
 
 	user = bootinfo.get("user")
 
@@ -85,7 +106,7 @@ def getpage(name: str):
 
 	if name in BLOCKED_PAGES:
 		frappe.throw(
-			_("The ERPNext Point of Sale page has been disabled. Please use POSpire."),
+			_("The page has been disabled. Please use POSpire."),
 			frappe.PermissionError,
 		)
 

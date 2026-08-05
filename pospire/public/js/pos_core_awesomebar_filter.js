@@ -11,22 +11,39 @@
 //
 // Rather than touch those shared bootinfo lists, wrap get_doctypes() itself
 // and drop Core POS results from its output.
+//
+// get_pages() has the same shape of problem: it builds "Open <Page>" entries
+// straight from frappe.boot.page_info, which is populated purely from the
+// Page doctype's role table — unrelated to boot.py's getpage() override that
+// blocks navigation. So Core POS pages (e.g. "point-of-sale") still surface
+// in search even though opening them is already blocked server-side.
 frappe.provide("frappe.search.utils");
 
 $(document).on("app_ready", function () {
-	var hidden = frappe.boot.core_pos_doctypes || [];
+	var hidden_doctypes = frappe.boot.core_pos_doctypes || [];
+	var hidden_pages = frappe.boot.core_pos_pages || [];
 
-	if (!hidden.length || typeof frappe.search.utils.get_doctypes !== "function") {
-		return;
+	if (hidden_doctypes.length && typeof frappe.search.utils.get_doctypes === "function") {
+		var hidden_doctypes_set = new Set(hidden_doctypes);
+		var original_get_doctypes = frappe.search.utils.get_doctypes;
+
+		frappe.search.utils.get_doctypes = function (keywords) {
+			var out = original_get_doctypes.call(frappe.search.utils, keywords);
+			return out.filter(function (option) {
+				return !hidden_doctypes_set.has(option.match);
+			});
+		};
 	}
 
-	var hidden_set = new Set(hidden);
-	var original_get_doctypes = frappe.search.utils.get_doctypes;
+	if (hidden_pages.length && typeof frappe.search.utils.get_pages === "function") {
+		var hidden_pages_set = new Set(hidden_pages);
+		var original_get_pages = frappe.search.utils.get_pages;
 
-	frappe.search.utils.get_doctypes = function (keywords) {
-		var out = original_get_doctypes.call(frappe.search.utils, keywords);
-		return out.filter(function (option) {
-			return !hidden_set.has(option.match);
-		});
-	};
+		frappe.search.utils.get_pages = function (keywords) {
+			var out = original_get_pages.call(frappe.search.utils, keywords);
+			return out.filter(function (option) {
+				return !(option.route && hidden_pages_set.has(option.route[0]));
+			});
+		};
+	}
 });
