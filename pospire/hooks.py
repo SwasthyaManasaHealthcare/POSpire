@@ -20,8 +20,13 @@ POSPIRE_MANAGER_PIN_EMAIL_TEMPLATE = "POSpire Manager PIN"
 # app_include_css = "/assets/pospire/css/pos-enhancements.css"
 # app_include_js = ["pospire.bundle.js"]
 
+extend_bootinfo = "pospire.boot.extend_bootinfo"
+
 # Approval workflow desk notifications (runs on all desk pages for managers)
-app_include_js = ["/assets/pospire/js/pos_approval_desk.js"]
+app_include_js = [
+	"/assets/pospire/js/pos_approval_desk.js",
+	"/assets/pospire/js/pos_core_route_guard.js",
+]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pospire/css/pospire.css"
@@ -82,6 +87,7 @@ doctype_js = {
 # before_install = "pospire.install.before_install"
 # after_install = "pospire.install.after_install"
 after_install = "pospire.install.after_install"
+after_migrate = "pospire.install.after_migrate"
 boot_session = "pospire.install.fix_desktop_icon_on_boot"
 # before_uninstall = "pospire.uninstall.before_uninstall"
 after_uninstall = "pospire.uninstall.after_uninstall"
@@ -208,6 +214,11 @@ scheduler_events = {
 # override_whitelisted_methods = {
 # 	"frappe.desk.doctype.event.event.get_events": "pospire.event.get_events"
 # }
+
+override_whitelisted_methods = {
+	"frappe.desk.desk_page.getpage": "pospire.boot.getpage",
+	"frappe.desk.desktop.get_desktop_page": "pospire.workspace_filter.get_desktop_page",
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
