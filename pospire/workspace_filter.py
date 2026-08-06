@@ -1,4 +1,5 @@
 import frappe
+from frappe import _
 from frappe.desk.desktop import get_desktop_page as original_get_desktop_page
 
 from pospire.pos_core import is_core_pos
@@ -30,41 +31,26 @@ def _filter_workspace_response(response):
 	if cards:
 		filtered_cards = []
 
+		# ERPNext's "Point of Sale" card also holds POS Profile and the two
+		# Loyalty links, so it doesn't go empty once is_core_pos() strips out
+		# the Core POS entries. Drop the whole card by name instead — POS
+		# Profile and the Loyalty links have their own home in the POSpire
+		# workspace. Card labels are translated (unlike item link_type/
+		# link_to), so _() must be called here, per request, not cached at
+		# import time when no user/language context exists yet.
+		dropped_card_labels = {_("Point of Sale")}
+
 		for card in cards.get("items") or []:
+			if card.get("label") in dropped_card_labels:
+				continue
+
 			card["links"] = _filter_items(card.get("links"))
 
 			# Drop cards that become empty after filtering.
-			# This avoids empty "Point of Sale" cards.
 			if card.get("links"):
 				filtered_cards.append(card)
 
 		cards["items"] = filtered_cards
-
-		# KNOWN, ACCEPTED SIDE EFFECT:
-		# ERPNext's "Point of Sale" card in the Selling workspace groups
-		# POS Profile and Loyalty Program / Loyalty Point Entry alongside
-		# POS Settings / POS Opening Entry / POS Closing Entry. Filtering
-		# removes the latter three (Core POS) but leaves POS Profile and
-		# the two Loyalty links behind, under a "Point of Sale" heading
-		# that no longer fully matches its contents.
-		#
-		# We deliberately don't touch this further:
-		#   - POS Profile must stay reachable; POSpire uses it directly
-		#     (see doctype_js hook in hooks.py).
-		#   - Loyalty Program / Loyalty Point Entry aren't Core POS and
-		#     have no reason to be hidden.
-		#   - Relabelling the card here wouldn't work either: the
-		#     workspace's layout (the Workspace doc's `content` blocks)
-		#     references this card by its original label
-		#     ("Point of Sale"). Renaming only the label in this filtered
-		#     response would break that match and the card would silently
-		#     fail to render, leaving a blank slot instead of a relabelled
-		#     one. Fixing that would require also rewriting the Workspace
-		#     doc's `content` field, which is a data-level customization
-		#     of an ERPNext-owned record, out of scope for this filter.
-		#
-		# The remaining links are all valid and working; only the heading
-		# is imprecise.
 
 	#
 	# Shortcuts

@@ -25,7 +25,6 @@ extend_bootinfo = "pospire.boot.extend_bootinfo"
 # Approval workflow desk notifications (runs on all desk pages for managers)
 app_include_js = [
 	"/assets/pospire/js/pos_approval_desk.js",
-	"/assets/pospire/js/pos_core_awesomebar_filter.js",
 	"/assets/pospire/js/pos_core_route_guard.js",
 ]
 

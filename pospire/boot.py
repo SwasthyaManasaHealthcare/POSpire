@@ -1,24 +1,21 @@
+import json
+
 import frappe
 from frappe import _
 from frappe.desk import desk_page
 
-from pospire.pos_core import CORE_POS_DOCTYPES, CORE_POS_PAGES, is_core_pos
-
-CORE_POS_DOCTYPES_LIST = sorted(CORE_POS_DOCTYPES)
-CORE_POS_PAGES_LIST = sorted(CORE_POS_PAGES)
+from pospire.pos_core import CORE_POS_DOCTYPES, CORE_POS_PAGES, is_core_pos, route_slug
 
 BLOCKED_PAGES = {
 	"point-of-sale",
 }
 
-# "pos-invoice" is not a Page — it's Frappe's auto-generated route slug for
-# the "POS Invoice" DocType's list view (frappe.router.setup() builds it from
+# Core POS DocTypes are not Pages — these are Frappe's auto-generated route
+# slugs for each DocType's list view (frappe.router.setup() builds them from
 # bootinfo.user.can_read, which is deliberately left unfiltered below). DocType
 # routes never call desk_page.getpage(), so BLOCKED_PAGES/getpage() can't
 # block them; pos_core_route_guard.js blocks these client-side instead.
-BLOCKED_DOCTYPE_ROUTES = {
-	"pos-invoice",
-}
+BLOCKED_DOCTYPE_ROUTES = {route_slug(doctype) for doctype in CORE_POS_DOCTYPES}
 
 
 def _filter_doctypes(doctypes):
@@ -50,6 +47,36 @@ def _filter_workspace_sidebar(workspace_sidebar):
 	return workspace_sidebar
 
 
+def _remove_workspace_layout_gap(pages):
+	"""
+	Drop the "Point of Sale" card's layout block from workspace content.
+
+	workspace_filter.py already removes the empty card from the desktop
+	response, but the card's position is stored separately in the
+	Workspace doc's `content` field. Without this, the Selling workspace
+	shows an empty gap where the card used to be.
+	"""
+
+	for page in pages or []:
+		content = page.get("content")
+
+		if not content:
+			continue
+
+		try:
+			blocks = json.loads(content)
+		except (TypeError, ValueError):
+			continue
+
+		blocks = [
+			block
+			for block in blocks
+			if not (block.get("type") == "card" and block.get("data", {}).get("card_name") == "Point of Sale")
+		]
+
+		page["content"] = json.dumps(blocks)
+
+
 def extend_bootinfo(bootinfo):
 	"""
 	Layer 1
@@ -62,15 +89,15 @@ def extend_bootinfo(bootinfo):
 	    Hide ERPNext Core POS entries from the Workspace Sidebar.
 
 	Layer 3
-	    Expose Core POS page names so pos_core_awesomebar_filter.js can drop
-	    their "Open <Page>" entries from the Awesome Bar.
+	    Hide the ERPNext Core POS page from the Awesome Bar's "Open <Page>"
+	    results, and remove the layout gap it leaves behind in the Selling
+	    workspace.
 
 	Layer 4
 	    Expose blocked DocType route slugs so pos_core_route_guard.js can
 	    block direct navigation to them (e.g. "pos-invoice").
 	"""
 
-	bootinfo["core_pos_pages"] = CORE_POS_PAGES_LIST
 	bootinfo["core_pos_blocked_routes"] = sorted(BLOCKED_DOCTYPE_ROUTES)
 
 	user = bootinfo.get("user")
@@ -91,6 +118,19 @@ def extend_bootinfo(bootinfo):
 
 	if sidebar:
 		bootinfo["workspace_sidebar_item"] = _filter_workspace_sidebar(sidebar)
+
+	# NOTE:
+	# This also removes the page from frappe.boot.allowed_pages, so a user
+	# who navigates straight to the POS URL gets a plain "not found" instead
+	# of the friendly message in getpage() below.
+	bootinfo["page_info"] = {
+		name: info for name, info in (bootinfo.get("page_info") or {}).items() if name not in CORE_POS_PAGES
+	}
+
+	workspaces = bootinfo.get("workspaces")
+
+	if workspaces:
+		_remove_workspace_layout_gap(workspaces.get("pages"))
 
 
 # `getpage` must remain guest-callable because it overrides the guest-accessible

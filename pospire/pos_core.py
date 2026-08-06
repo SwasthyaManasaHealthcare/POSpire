@@ -18,6 +18,14 @@ CORE_POS_PAGES = {
 }
 
 
+def route_slug(doctype: str) -> str:
+	"""
+	Build the desk route slug Frappe generates for a DocType's list view.
+	"""
+
+	return doctype.lower().replace(" ", "-")
+
+
 def is_core_pos(item: dict) -> bool:
 	"""
 	Return True if a workspace/sidebar item belongs to ERPNext Core POS.
