@@ -465,6 +465,19 @@ export default {
 		new_line() {
 			this.eventBus.emit("set_new_line", this.new_line);
 		},
+		/**
+		 * Mirrors trigger_onscan(): auto-add on any exact barcode/serial/batch
+		 * match so typed or pasted codes work without pressing Enter, same as
+		 * a hardware scanner. enter_event() itself no-ops unless it finds an
+		 * exact match, and clears first_search on a successful add, so this
+		 * can't loop or double-fire on partial/in-progress input.
+		 */
+		first_search(newValue) {
+			if (!newValue) {
+				return;
+			}
+			this.enter_event();
+		},
 	},
 
 	methods: {
