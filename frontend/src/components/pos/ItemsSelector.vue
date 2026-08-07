@@ -1124,7 +1124,6 @@ export default {
 }
 
 /*
- * Scrollable areas for items list/grid
  * Height is handled by flexbox - DO NOT use viewport calc here!
  */
 .items-grid-scroll,
