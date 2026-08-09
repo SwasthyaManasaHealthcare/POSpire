@@ -620,6 +620,25 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				invoice_offline_ids: invoiceOfflineIds,
 			};
 
+			// Anchor the queued closing to its shift.
+			//
+			// Two client-side consumers read this off the queued row:
+			//   - Pos.vue `matchesShift()` (the duplicate-close guard)
+			//   - outbox.ts `readInnerShiftName()` (the strict-closure gate)
+			// Without it, both silently fail for online-opened shifts and the cashier
+			// can enqueue a second closing that the server later rejects.
+			//
+			// Stamp ONLY when the shift was opened online. For an offline-opened shift
+			// `cs.pos_opening_shift` holds the provisional "OFFLINE-OPN-..." name, which
+			// is not a server link and must never be written as one — that case is
+			// already anchored by `shift_offline_id` on the outbox row.
+			//
+			// The server overwrites this field at offline.py:1877 regardless, so
+			// stamping it changes nothing server-side.
+			if (!openingOfflineId && openingServerName) {
+				doc.pos_opening_shift = openingServerName;
+			}
+
 			// Parents the scheduler waits on before sending: the opening shift
 			// (must be synced first so its name resolves) and every invoice in
 			// the shift (strict closure).

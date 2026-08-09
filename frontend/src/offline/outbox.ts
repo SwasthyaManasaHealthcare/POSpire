@@ -45,6 +45,11 @@ import type {
 // Constants
 // ---------------------------------------------------------------------------
 
+/** Matches a UUID v4 string (e.g. an offline_id). Used to distinguish a
+ * provisional offline shift reference from a real server doc name. */
+const UUID_V4_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 /** The 8 valid outbox types (mirrors `OutboxType`). Runtime-guard for the
  * loosely-typed `call-registry.ts` `outboxType: string` field. */
 const VALID_TYPES = new Set<OutboxType>([
@@ -783,10 +788,14 @@ export async function evaluateClosingReadiness(
  * Best-effort extraction of the inner doc's `posa_pos_opening_shift` from
  * an outbox payload. Outbox payloads for offline-capable writes use the
  * wrapper shape `{ data: "<JSON inner doc>", … }`; for non-wrapper shapes
- * (legacy entries) we read the field directly. Returns `null` if neither
- * shape produces a string.
+ * (legacy entries) we read the field directly. Falls back to the wrapper's
+ * `opening_entry_ref` (excluding UUIDs, which anchor offline-opened shifts
+ * via `shift_offline_id` instead) for rows queued before the inner doc
+ * carried the shift name. Returns `null` if nothing usable is found.
+ *
+ * Exported: Task 10 imports this by name from `@/offline/outbox`.
  */
-function readInnerShiftName(payload: unknown): string | null {
+export function readInnerShiftName(payload: unknown): string | null {
 	if (!payload || typeof payload !== "object") return null;
 	const p = payload as Record<string, unknown>;
 	if (typeof p.data === "string") {
@@ -795,15 +804,26 @@ function readInnerShiftName(payload: unknown): string | null {
 			const name =
 				(inner.posa_pos_opening_shift as string | undefined) ??
 				(inner.pos_opening_shift as string | undefined);
-			return typeof name === "string" && name.length > 0 ? name : null;
+			if (typeof name === "string" && name.length > 0) return name;
 		} catch {
-			return null;
+			/* fall through to the wrapper */
 		}
+	} else {
+		const direct =
+			(p.posa_pos_opening_shift as string | undefined) ??
+			(p.pos_opening_shift as string | undefined);
+		if (typeof direct === "string" && direct.length > 0) return direct;
 	}
-	const direct =
-		(p.posa_pos_opening_shift as string | undefined) ??
-		(p.pos_opening_shift as string | undefined);
-	return typeof direct === "string" && direct.length > 0 ? direct : null;
+
+	// Back-compat: rows queued before the stamp landed carry the shift
+	// reference only on the wrapper. A UUID there means an OFFLINE-opened
+	// shift, which is anchored by `shift_offline_id` instead — returning it
+	// here would compare a UUID against a server name and never match.
+	const ref = p.opening_entry_ref;
+	if (typeof ref === "string" && ref.length > 0 && !UUID_V4_PATTERN.test(ref)) {
+		return ref;
+	}
+	return null;
 }
 
 // ---------------------------------------------------------------------------
