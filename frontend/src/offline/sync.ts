@@ -1519,16 +1519,28 @@ function classifySendError(
 }
 
 /**
- * Pull `missing_offline_ids` off a server dependency error. The server sends
- * it on siblings_not_ready (offline.py:1607-1611) so the reconciliation
- * workspace can show the cashier exactly which invoices a close is waiting
- * on. Absent on older server builds — an empty array is fine.
+ * Pull `missing_offline_ids` off a server dependency error so the
+ * reconciliation workspace can show the cashier exactly which invoices a
+ * close is waiting on.
+ *
+ * `_throw` (offline.py) puts structured fields under `details`, so that is
+ * where this normally lives; the top-level read is a cheap fallback for any
+ * build that flattens the payload. Same two-shape handling as
+ * `extractServerDocName` above.
  */
 function extractMissingOfflineIds(err: unknown): string[] {
 	if (!err || typeof err !== "object") return [];
-	const raw = (err as Record<string, unknown>).missing_offline_ids;
-	if (!Array.isArray(raw)) return [];
-	return raw.filter((v): v is string => typeof v === "string" && v.length > 0);
+	const e = err as Record<string, unknown>;
+	const fromTop = e.missing_offline_ids;
+	if (Array.isArray(fromTop)) {
+		return fromTop.filter((v): v is string => typeof v === "string" && v.length > 0);
+	}
+	const details = e.details as Record<string, unknown> | undefined;
+	const fromDetails = details?.missing_offline_ids;
+	if (Array.isArray(fromDetails)) {
+		return fromDetails.filter((v): v is string => typeof v === "string" && v.length > 0);
+	}
+	return [];
 }
 
 /**
