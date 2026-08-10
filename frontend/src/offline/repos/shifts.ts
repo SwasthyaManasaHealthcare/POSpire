@@ -179,6 +179,26 @@ export async function listAllShifts(): Promise<ShiftRow[]> {
 	return Promise.all(stored.map(fromStored));
 }
 
+/**
+ * Look a shift up by its server doc name without decrypting the whole
+ * table. `opening_server_name` is a plaintext scalar on `StoredShiftRow`
+ * but is NOT part of the v1 Dexie index (`"offline_id, device_id,
+ * status"`), so this is a linear `.filter()`, not a `.where()` — still far
+ * cheaper than `listAllShifts()`, which does `Promise.all(rows.map(fromStored))`
+ * and both decrypts every row in the table on every call AND throws the
+ * whole lookup if any unrelated row is missing its opening-cash envelope
+ * (corruption). Here `fromStored` only ever runs on the single matched row.
+ */
+export async function getShiftByOpeningServerName(
+	serverName: string,
+): Promise<ShiftRow | undefined> {
+	const stored = await db.shifts
+		.filter((row) => row.opening_server_name === serverName)
+		.first();
+	if (!stored) return undefined;
+	return fromStored(stored);
+}
+
 // ---------------------------------------------------------------------------
 // Write helpers
 // ---------------------------------------------------------------------------

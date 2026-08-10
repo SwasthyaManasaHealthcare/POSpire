@@ -267,13 +267,21 @@ export default {
 			const shift = snapshot?.pos_opening_shift;
 			if (!shift) return;
 			try {
-				// Pos.vue's mounted() can apply a cached opening snapshot
-				// before App.vue's mounted() finishes initOfflineStorage()
-				// (children mount before their parent in Vue's lifecycle,
-				// and App's init is async). initOfflineStorage() is
-				// idempotent — this either joins the in-flight init or
-				// no-ops if it already finished — so the write below never
-				// races the Dexie open / crypto key setup it depends on.
+				// initOfflineStorage() is already kicked off by App.vue's
+				// mounted() well before Pos.vue exists (routes are
+				// lazy-loaded and app.mount() does not await
+				// router.isReady()), so init has normally already STARTED
+				// by the time this fires. The real hazard is that it can
+				// still be IN FLIGHT: Dexie's db.open() and the crypto key
+				// bootstrap are real IndexedDB / Web Crypto round trips.
+				// initOfflineStorage() is idempotent (cached `initialised`
+				// flag + cached `initPromise`), so awaiting it here just
+				// joins whichever init is already running rather than
+				// starting a second db.open() or re-key — the write below
+				// can never race the storage it depends on. It also
+				// guarantees seedDeviceId() (which runs first inside init)
+				// has already run, so readDeviceId() below returns a real
+				// id instead of "unknown-device".
 				const { initOfflineStorage } = await import("@/offline/db");
 				await initOfflineStorage();
 				const { registerOpenedShift } = await import(
@@ -283,19 +291,65 @@ export default {
 				(shift.balance_details || []).forEach((row) => {
 					openingCashByMop[row.mode_of_payment] = Number(row.amount) || 0;
 				});
-				this.shiftLifecycleId = await registerOpenedShift({
-					openingServerName: shift.pos_offline_id ? null : shift.name || null,
+				const lifecycleId = await registerOpenedShift({
+					// `pos_offline_id` is a PERSISTED server custom field: it
+					// stays set forever once an offline-opened shift syncs,
+					// so it cannot distinguish "unsynced" from "synced".
+					// `pospire_pending_sync` is the client-side flag the
+					// onSynced handler actually clears; the server never
+					// returns this field at all, so a genuinely
+					// online-opened shift is also (correctly) falsy here.
+					openingServerName: shift.pospire_pending_sync
+						? null
+						: shift.name || null,
 					posProfile: snapshot.pos_profile || {},
 					openingCashByMop,
 					cashierUser: shift.user || window.user || "",
 					deviceId: readDeviceId(),
+					// Durable identity for the unsynced-offline case, where
+					// openingServerName above is null and there is nothing
+					// else stable to dedupe on across reloads.
+					lifecycleId: shift.pos_offline_id || undefined,
 				});
-				// Task 9's lock reads this off the in-memory shift.
-				if (this.pos_opening_shift) {
-					this.pos_opening_shift.pospire_lifecycle_id = this.shiftLifecycleId;
+				this.shiftLifecycleId = lifecycleId;
+				// Task 9's lock reads this off the in-memory shift. Guard
+				// against a second, differently-shifted call (cached
+				// snapshot vs. live response race in check_opening_entry)
+				// resolving out of order and stamping this shift's UUID onto
+				// whatever shift is now current.
+				if (this.pos_opening_shift === shift) {
+					shift.pospire_lifecycle_id = lifecycleId;
+					this.restampOpeningSnapshotCache(shift, lifecycleId);
 				}
 			} catch (err) {
 				console.warn("[Pos] registerShiftLifecycle failed", err);
+			}
+		},
+		// `persistOpeningSnapshot` runs synchronously right after
+		// `registerShiftLifecycle` is fired (fire-and-forget), so the
+		// cached snapshot is always written BEFORE the async lookup above
+		// resolves and stamps `pospire_lifecycle_id` in memory. Without
+		// this, the id would never survive a reload — exactly when Task 9
+		// needs to read it back. Patches the cache in place the same way
+		// the onSynced handler further below already does.
+		restampOpeningSnapshotCache(shift, lifecycleId) {
+			try {
+				const raw = localStorage.getItem("pospire.opening_shift_snapshot");
+				if (!raw) return;
+				const cached = JSON.parse(raw);
+				const cachedShift = cached?.pos_opening_shift;
+				if (!cachedShift) return;
+				const sameShift = shift.pos_offline_id
+					? cachedShift.pos_offline_id === shift.pos_offline_id
+					: cachedShift.name === shift.name;
+				if (!sameShift) return;
+				cachedShift.pospire_lifecycle_id = lifecycleId;
+				localStorage.setItem(
+					"pospire.opening_shift_snapshot",
+					JSON.stringify(cached),
+				);
+			} catch {
+				/* localStorage parse failure is non-fatal */
 			}
 		},
 		create_opening_voucher() {
