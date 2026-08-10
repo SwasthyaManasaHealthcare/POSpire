@@ -41,12 +41,24 @@ export async function clearAllTables(): Promise<void> {
 	try {
 		await db.transaction(
 			"rw",
-			[db.items, db.customers, db.shifts, db.outbox, db.metadata, db._health],
+			[
+				db.items,
+				db.customers,
+				db.shifts,
+				db.outbox,
+				db.metadata,
+				db._health,
+				db.contributions,
+			],
 			async () => {
 				await db.items.clear();
 				await db.customers.clear();
 				await db.shifts.clear();
 				await db.outbox.clear();
+				// Added in schema v2. Left out, contribution rows leak between
+				// test cases and the first test written against the ledger
+				// passes for the wrong reason.
+				await db.contributions.clear();
 				// Keep the crypto key rows alive — the active key was registered at
 				// init; wiping metadata would leave the module with a stale key id.
 				// We delete everything else by key.

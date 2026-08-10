@@ -722,6 +722,7 @@
 <script>
 import { call } from "@/utils/call";
 import { OfflineReturnDeferredError } from "@/utils/call-registry";
+import { uuidV4 } from "@/offline/db";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { toast } from "vue3-toastify"; // <-- make sure this is imported
@@ -734,6 +735,7 @@ export default {
 		loading: false,
 		submittingPayment: false,
 		pos_profile: "",
+		pos_opening_shift: "",
 		invoice_doc: "",
 		loyalty_amount: 0,
 		today_date: datetime.now_date(),
@@ -758,6 +760,44 @@ export default {
 	}),
 
 		methods: {
+			// Run a contribution-ledger operation with a hard deadline.
+			//
+			// Every sale now touches IndexedDB on its critical path, which an
+			// ONLINE sale never did before the ledger existed. Dexie queues
+			// every operation behind `db.open()`, and an open can block
+			// INDEFINITELY rather than fail: a second POS tab still holding the
+			// previous schema version blocks the `version(2)` upgrade until it
+			// closes, and iOS/Safari stall IndexedDB on their own. A promise
+			// that never settles cannot be caught — the awaiting sale would
+			// simply stop, `submittingPayment` would never reset in a `finally`
+			// that never runs, and the Pay button would be dead until reload.
+			// The till must not freeze on a healthy network because of a
+			// bookkeeping write, so a timeout is treated exactly like any other
+			// ledger failure: warn, skip the contribution, sell.
+			async runLedgerOp(label, run) {
+				let timer = null;
+				const TIMEOUT = Symbol("ledger-timeout");
+				try {
+					const outcome = await Promise.race([
+						run(),
+						new Promise((resolve) => {
+							timer = setTimeout(() => resolve(TIMEOUT), 2000);
+						}),
+					]);
+					if (outcome === TIMEOUT) {
+						console.warn(
+							`[Payments] ${label} timed out; contribution skipped`,
+						);
+						return false;
+					}
+					return true;
+				} catch (err) {
+					console.warn(`[Payments] ${label} failed`, err);
+					return false;
+				} finally {
+					if (timer !== null) clearTimeout(timer);
+				}
+			},
 			parseSubmitData(raw) {
 				if (!raw) return {};
 				if (typeof raw === "object") return raw;
@@ -890,6 +930,85 @@ export default {
 			// customer, and substitutes the real name. forceQueue is a no-op
 			// when the registry entry isn't offline-capable.
 			const hasOfflineCustomer = !!this.invoice_doc?.customer_offline_id;
+
+			// One id for the whole sale. `call()` would generate this itself,
+			// but the ledger needs it BEFORE the request so the contribution
+			// can be staged first. Passing it as offlineIdempotencyKey makes
+			// the outbox row, the server's pos_offline_id, and the ledger key
+			// all the same value on both the live and queued paths.
+			const invoiceOfflineId = uuidV4();
+
+			// Stage the contribution before submitting. If the app dies between
+			// here and the confirm, the row survives as `pending` and the
+			// startup reconciliation resolves it against the server.
+			// Never let a ledger failure block the sale.
+			//
+			// Resolved at sale time rather than trusted off whichever
+			// `pos_opening_shift` object this component currently holds:
+			// `register_pos_profile` has emitters beyond Pos.vue's own stamped
+			// snapshot — App.vue's boot-time bootstrapPosProfileForNavbar, and
+			// Pos.vue's `pos_profile_updated` / `pendingProfileData` replays —
+			// that hand out a live `check_opening_shift` response the server
+			// never echoes `pospire_lifecycle_id` on and that never passes
+			// through `registerShiftLifecycle`. On a common warm-boot ordering
+			// one of those fires last, leaving `pospire_lifecycle_id` undefined
+			// on the object this component ends up holding even though a
+			// stamped durable row exists. `pos_offline_id` is the same id
+			// pre-sync, so it covers an offline-opened shift whose stamp just
+			// hasn't landed on this object; failing that, look the durable row
+			// up by server name — that goes straight to Dexie and is correct
+			// regardless of which transient object is in memory here.
+			let shiftLifecycleId =
+				this.pos_opening_shift?.pospire_lifecycle_id ||
+				this.pos_opening_shift?.pos_offline_id ||
+				null;
+			if (!shiftLifecycleId && this.pos_opening_shift?.name) {
+				// Also deadline-bounded: this is a Dexie read on the same
+				// critical path, with the same never-settles failure mode as
+				// the staging write below.
+				await this.runLedgerOp("findShiftByServerName", async () => {
+					const { findShiftByServerName } = await import("@/offline/shift-lifecycle");
+					const row = await findShiftByServerName(this.pos_opening_shift.name);
+					shiftLifecycleId = row?.offline_id || null;
+				});
+			}
+			if (!shiftLifecycleId) {
+				// No lifecycle id resolvable by any route. Skip rather than
+				// writing a row keyed to no shift: it would count toward
+				// nothing and could never be pruned. The close dialog falls
+				// back to the Phase 1 outbox scan for this shift.
+				console.warn(
+					"[Payments] no shift lifecycle id; skipping contribution staging",
+				);
+			} else {
+				await this.runLedgerOp("stageContribution", async () => {
+					const { stageContribution } = await import("@/offline/contribution-ledger");
+					await stageContribution({
+						invoiceOfflineId,
+						shiftLifecycleId,
+						invoice: this.invoice_doc,
+						cashMode:
+							(this.pos_profile && this.pos_profile.posa_cash_mode_of_payment) ||
+							"Cash",
+						precision: Number(window.sys_defaults?.currency_precision || 2),
+					});
+				});
+			}
+
+			// Un-stage on any failure exit below. `deriveExpectedByMop` sums
+			// pending rows into the shift total, so a row staged ahead of a
+			// submit that never landed would overstate the cashier's expected
+			// figure forever — reconciliation only ever confirms rows the
+			// server has, it never removes ones it doesn't. Safe to call even
+			// when staging was skipped or never ran: deleting a missing key is
+			// a no-op.
+			const discardStagedContribution = async () => {
+				await this.runLedgerOp("discardContribution", async () => {
+					const { discardContribution } = await import("@/offline/contribution-ledger");
+					await discardContribution(invoiceOfflineId);
+				});
+			};
+
 			let r = null;
 			try {
 				r = await call({
@@ -900,8 +1019,10 @@ export default {
 					},
 					intent: "write",
 					forceQueue: hasOfflineCustomer,
+					offlineIdempotencyKey: invoiceOfflineId,
 				});
 			} catch (err) {
+				await discardStagedContribution();
 				if (err instanceof OfflineReturnDeferredError) {
 					toast.warning(
 						__("Sales Return requires an online connection in this phase."),
@@ -912,6 +1033,7 @@ export default {
 				return;
 			}
 			if (!r) {
+				await discardStagedContribution();
 				toast.error("Error submitting invoice");
 				return;
 			}
@@ -931,6 +1053,11 @@ export default {
 				vm.invoice_doc.pospire_pending_sync = true;
 				vm.invoice_doc.pospire_offline_id = r.offline_id;
 
+				await vm.runLedgerOp("confirmContribution", async () => {
+					const { confirmContribution } = await import("@/offline/contribution-ledger");
+					await confirmContribution(invoiceOfflineId);
+				});
+
 				if (print) {
 					vm.handleProvisionalPrint(vm.invoice_doc);
 				}
@@ -940,7 +1067,7 @@ export default {
 					vm.pos_profile && vm.pos_profile.use_cashback == 1 ? true : false;
 				vm.sales_person = "";
 				vm.eventBus.emit("set_last_invoice", provisionalName);
-				toast.info(`Queued ${provisionalName} — will sync when online`);
+				toast.info(`Queued ${provisionalName}. Will sync when online`);
 				playSound("submit");
 				vm.addresses = [];
 				vm.invoice_doc = "";
@@ -948,6 +1075,11 @@ export default {
 				vm.back_to_invoice();
 				return;
 			}
+
+			await vm.runLedgerOp("confirmContribution", async () => {
+				const { confirmContribution } = await import("@/offline/contribution-ledger");
+				await confirmContribution(invoiceOfflineId);
+			});
 
 			if (print) {
 				vm.handlePrint(vm.invoice_doc.name);
@@ -1502,6 +1634,16 @@ export default {
 			});
 			this.eventBus.on("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
+				// Best-effort only: `register_pos_profile` has emitters (App.vue's
+				// boot-time bootstrapPosProfileForNavbar, Pos.vue's
+				// pos_profile_updated / pendingProfileData replays) that hand out
+				// a live check_opening_shift response never stamped with
+				// pospire_lifecycle_id, and any of them can be the last one to
+				// fire before a sale. submit_invoice does NOT trust this object's
+				// `pospire_lifecycle_id` alone — it falls back to `pos_offline_id`
+				// and then to a durable-row lookup by server name. Kept here only
+				// because pos_profile / cashback / mpesa below still need it.
+				this.pos_opening_shift = data.pos_opening_shift;
 				// Initialize is_cashback based on POS Profile setting
 				// If use_cashback is disabled (0), set is_cashback to false
 				// If use_cashback is enabled (1), keep it true (default)

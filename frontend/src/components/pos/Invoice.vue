@@ -2835,7 +2835,7 @@ export default {
 			this.clear_invoice();
 			this.eventBus.emit("cart_emptied");
 			toast.info(
-				__("Draft saved offline — load it from 'Load Draft Sale' while offline."),
+				__("Draft saved offline. Load it from 'Load Draft Sale' while offline."),
 				{ autoClose: 4000 },
 			);
 			return draft;
@@ -4305,7 +4305,7 @@ export default {
 			if (await this.isShiftLocked()) {
 				toast.warning(
 					__(
-						"This shift is closing — its closing entry is queued. Open a new shift before ringing up another sale.",
+						"This shift is closing. Its closing entry is queued. Open a new shift before ringing up another sale.",
 					),
 					{ autoClose: 5000 },
 				);

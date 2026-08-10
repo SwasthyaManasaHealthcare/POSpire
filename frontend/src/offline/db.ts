@@ -45,6 +45,7 @@ import type {
 	ItemRow,
 	JournalRow,
 	MetadataRow,
+	StoredContributionRow,
 	StoredCustomerRow,
 	StoredOutboxEntry,
 	StoredShiftRow,
@@ -76,6 +77,7 @@ export class PospireOfflineDB extends Dexie {
 	outbox!: Table<StoredOutboxEntry, string>;
 	metadata!: Table<MetadataRow, string>;
 	_health!: Table<HealthProbeRow, string>;
+	contributions!: Table<StoredContributionRow, string>;
 
 	constructor() {
 		super(DB_NAME_PRIMARY);
@@ -106,6 +108,20 @@ export class PospireOfflineDB extends Dexie {
 			metadata: "key",
 			_health: "id",
 		});
+
+		// v2 — per-invoice contribution ledger (Phase 2).
+		//
+		// Purely ADDITIVE: no existing table's schema changes, so Dexie needs
+		// no upgrade function. Devices holding queued invoices and shift rows
+		// keep them; Dexie replays v1 then applies v2's new store.
+		//
+		// Indexed on `shift_lifecycle_id` (every read is shift-scoped) and
+		// `status` (the startup reconciliation scans pending rows). `by_mop`
+		// is deliberately NOT indexed — it is encrypted, and indexing it would
+		// leak amounts into the unencrypted index.
+		this.version(2).stores({
+			contributions: "offline_id, shift_lifecycle_id, status",
+		});
 	}
 }
 
@@ -128,6 +144,22 @@ export class PospireJournalDB extends Dexie {
 
 export const db = new PospireOfflineDB();
 export const journalDb = new PospireJournalDB();
+
+// LOGGING ONLY. `blocked` fires when this tab's version upgrade cannot proceed
+// because another tab still holds an older connection open. Dexie does not
+// reject the open in that case — it simply waits, so the symptom is "every
+// IndexedDB call in this tab hangs forever" with nothing in the console to
+// explain it. Callers on the sale path defend themselves with their own
+// deadline; this only makes the cause visible.
+//
+// Deliberately NO `versionchange` handler: Dexie's default closes the
+// connection so the OTHER tab's upgrade can complete, and overriding it would
+// turn a transient block into a permanent one.
+db.on("blocked", () => {
+	console.warn(
+		"[offline-db] IndexedDB upgrade is blocked by another open tab; operations in this tab will not settle until it closes",
+	);
+});
 
 // ---------------------------------------------------------------------------
 // Safe mode — state machine flag surfaced to the UI when corruption / storage

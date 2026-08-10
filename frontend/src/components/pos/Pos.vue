@@ -269,6 +269,55 @@ export default {
 			}
 		},
 
+		/**
+		 * Reconciliation-path contribution prune — DISTINCT from the live
+		 * `onSynced` `closing_entry` prune further below. Do NOT fold these
+		 * two into one: they cover different windows.
+		 *
+		 * A closing can land in `released` here WITHOUT `onSynced` ever
+		 * having fired for it, because that live callback needs a
+		 * subscriber running at the moment the sync happens:
+		 *   - the `onSynced` prune itself threw (it is warn-only and does
+		 *     not retry, so the row would otherwise survive forever);
+		 *   - another tab drained the outbox while this tab was on a
+		 *     different route and `Pos.vue` was unmounted;
+		 *   - the outbox row was vacuumed to a tombstone before this tab
+		 *     observed the sync.
+		 * In every one of those, this reconciliation pass is the ONLY
+		 * remaining place that ever learns the closing landed, so it must
+		 * carry its own prune rather than relying on `onSynced` to have
+		 * already done it.
+		 *
+		 * `deleteContributionsForShift` is idempotent (deletes are a no-op
+		 * on an already-empty shift), so this and the `onSynced` prune can
+		 * never conflict — the common case prunes once via `onSynced` and
+		 * this call simply finds nothing left to do on the next boot.
+		 *
+		 * `released` ONLY, same as `dropSnapshotForReleasedShifts` — never
+		 * `reopened`. A reopened shift's closing was voided, so the shift
+		 * is still sellable and its takings must still be there.
+		 *
+		 * Fire-and-forget by design: called without `await` from the
+		 * reconciliation chain, which must boot the POS regardless of
+		 * whether pruning succeeds. Failure is caught here and only
+		 * warned — it must never reject into that chain.
+		 */
+		pruneReleasedShiftContributions(releasedIds) {
+			if (!Array.isArray(releasedIds) || !releasedIds.length) return;
+			import("@/offline/contribution-ledger")
+				.then(({ deleteContributionsForShift }) =>
+					Promise.all(
+						releasedIds.map((id) => deleteContributionsForShift(id)),
+					),
+				)
+				.catch((err) => {
+					console.warn(
+						"[Pos] reconciliation contribution prune failed",
+						err,
+					);
+				});
+		},
+
 		openingSnapshotDiffers(cached, live) {
 			if (!cached) return true;
 			if (
@@ -303,6 +352,11 @@ export default {
 			// online-opened ones included. Fire-and-forget: a Dexie failure
 			// must never block the POS from loading.
 			this.registerShiftLifecycle(snapshot);
+			// Resolve any contribution left `pending` by a crash between the
+			// stage and the confirm. Fire-and-forget: nothing during boot reads
+			// this, and a failure just leaves rows pending, which still count
+			// toward the displayed total.
+			this.reconcileContributions(snapshot);
 			this.get_offers(this.pos_profile.name);
 			this.eventBus.emit("register_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
@@ -435,6 +489,59 @@ export default {
 			}
 		},
 		/**
+		 * Resolve contributions left `pending` by a crash between staging and
+		 * confirming (see contribution-ledger.ts). Fire-and-forget and
+		 * non-fatal by construction: nothing during boot depends on this
+		 * having run, so it must never delay or throw into
+		 * `check_opening_entry`.
+		 *
+		 * Needs the shift's lifecycle id BEFORE `registerShiftLifecycle` (also
+		 * fired above, also un-awaited) has necessarily stamped it anywhere:
+		 * `this.shiftLifecycleId` was just nulled out synchronously by
+		 * `applyOpeningSnapshot` and is only reassigned once
+		 * `registerShiftLifecycle`'s internal awaits resolve, which can
+		 * happen after this method's own synchronous portion has already run.
+		 * So this uses the same per-sale fallback chain Payments.vue uses
+		 * rather than trusting `this.shiftLifecycleId` or
+		 * `pospire_lifecycle_id` alone: the in-memory stamp, then the
+		 * pre-sync offline id, then a direct Dexie lookup by server name. A
+		 * brand-new shift (nothing to reconcile yet) can race
+		 * `registerShiftLifecycle`'s write of the durable row, but a resumed
+		 * shift's row was already written in an earlier session, so the
+		 * lookup that matters in practice never races it.
+		 */
+		async reconcileContributions(snapshot) {
+			const shift = snapshot?.pos_opening_shift;
+			if (!shift) return;
+			try {
+				let shiftLifecycleId =
+					shift.pospire_lifecycle_id || shift.pos_offline_id || null;
+				if (!shiftLifecycleId && shift.name) {
+					const { findShiftByServerName } = await import(
+						"@/offline/shift-lifecycle"
+					);
+					const row = await findShiftByServerName(shift.name);
+					shiftLifecycleId = row?.offline_id || null;
+				}
+				if (!shiftLifecycleId) return;
+				const { reconcilePendingContributions } = await import(
+					"@/offline/contribution-ledger"
+				);
+				await reconcilePendingContributions({
+					shiftLifecycleId,
+					// Same `pospire_pending_sync` discriminator registerShiftLifecycle
+					// uses: `pos_offline_id` is a persisted server field that
+					// survives sync, so it cannot tell "unsynced" from "synced".
+					openingServerName: shift.pospire_pending_sync
+						? null
+						: shift.name || null,
+					openingOfflineId: shift.pos_offline_id || null,
+				});
+			} catch (err) {
+				console.warn("[Pos] reconcileContributions failed", err);
+			}
+		},
+		/**
 		 * Do these two shift objects describe the SAME shift?
 		 *
 		 * Value predicate, deliberately not `===`: the cached snapshot and the
@@ -516,36 +623,164 @@ export default {
 			// the server keeps full precision.
 			const precision = window.sys_defaults?.currency_precision || 2;
 
-			// Stopgap — offline-queued sales only. Does NOT recover takings
-			// from earlier in the shift while online; that needs the Phase 2
-			// contribution ledger. The dialog labels the result provisional
-			// precisely because of this gap.
+			// Phase 2: totals come from the contribution ledger, which
+			// records EVERY sale — online and offline — so the figure is no
+			// longer missing the pre-outage takings.
+			//
+			// Resolve the lifecycle id with the SAME fallback chain
+			// Payments.vue's submit_invoice and reconcileContributions use,
+			// so this reads the same row the sales were staged against. NOT
+			// `this.shiftLifecycleId` — `applyOpeningSnapshot` nulls it
+			// synchronously before the un-awaited `registerShiftLifecycle`
+			// can re-stamp it, so it can read `null` here even though a
+			// durable row exists.
+			let lifecycleId =
+				opening.pospire_lifecycle_id || opening.pos_offline_id || null;
+			if (!lifecycleId && opening.name) {
+				try {
+					const { findShiftByServerName } = await import(
+						"@/offline/shift-lifecycle"
+					);
+					const row = await findShiftByServerName(opening.name);
+					lifecycleId = row?.offline_id || null;
+				} catch (err) {
+					console.warn("[Pos] findShiftByServerName failed", err);
+				}
+			}
+
+			// Fall back to the Phase 1 outbox scan when no lifecycle id is
+			// resolvable at all (an upgrade-day snapshot predating the
+			// stamp). An offline-only figure is worse than the ledger's but
+			// far better than a blank one. The banner wording differs between
+			// the two — only the scan branch is blind to online sales — so the
+			// stub carries a discriminator, not just `pospire_offline_stub`.
 			let queued = { byMop: {}, uncertainCount: 0 };
+			let source = "scan";
 			try {
-				const { sumQueuedPaymentsByMop } = await import(
-					"@/offline/shift-lifecycle"
-				);
-				// BOTH anchors, always — sumQueuedPaymentsByMop matches on
-				// either. A shift opened offline and synced mid-shift has
-				// invoices on both sides of the sync: the pre-sync ones are
-				// stamped with `shift_offline_id` (= the lifecycle id, since
-				// the row is keyed by the opening's outbox id) and the
-				// post-sync ones carry only the server name. Passing just one
-				// anchor dropped a whole half of the shift's takings.
-				// `pospire_lifecycle_id` is the offline id's stand-in after the
-				// sync handler clears `pos_offline_id`; on an online-opened
-				// shift it is a UUID no outbox row carries, which simply
-				// matches nothing and leaves the server-name clause to do the
-				// work.
-				queued = await sumQueuedPaymentsByMop({
-					openingServerName: opening.name || null,
-					shiftOfflineId:
-						opening.pos_offline_id || opening.pospire_lifecycle_id || null,
-					cashMode,
-					precision,
-				});
+				if (lifecycleId) {
+					const [
+						{ deriveExpectedByMop },
+						{ scanQueuedContributionsByInvoice },
+					] = await Promise.all([
+						import("@/offline/contribution-ledger"),
+						import("@/offline/shift-lifecycle"),
+					]);
+					const derived = await deriveExpectedByMop(lifecycleId, precision);
+					// Keyed off whether the ledger actually HAS rows, not off
+					// whether an id resolved. An upgrade-day shift resolves an id
+					// but has no contributions at all, and its figure then comes
+					// entirely from the outbox — which is blind to online sales,
+					// so the Phase 1 caveat is still the truthful banner there.
+					if (derived.offlineIds.length > 0) source = "ledger";
+					// Assign from the ledger FIRST, before the scan even runs.
+					// `contributionForInvoice`/`resolveChangeAmount` (which the
+					// scan below calls per row) are unguarded on payload shape —
+					// unlike `listInvoiceRowsAcrossStatuses`, which is
+					// deliberately written so one poison row cannot "silently
+					// zero the cashier's entire expected-amount figure". A scan
+					// throw below must therefore only cost the outbox-side
+					// additions, never the ledger figure already computed here.
+					queued = {
+						byMop: derived.byMop,
+						// `skippedCount` is money that DECRYPTED NOWHERE: an
+						// undecryptable row's amount is simply absent from
+						// `byMop`, so without this the dialog would show a short
+						// number with no hint that anything went missing.
+						uncertainCount: derived.pendingCount + derived.skippedCount,
+					};
+
+					// Run the Phase 1 scan alongside the ledger EVEN THOUGH an id
+					// resolved. Two live cases need it:
+					//  - Upgrade day: a shift stamped with a lifecycle id but
+					//    opened before Phase 2 shipped has queued sales and NO
+					//    contributions at all. Branching only on "did an id
+					//    resolve" left this case showing opening amounts only —
+					//    strictly worse than the Phase 1 stopgap it replaced.
+					//  - A permanent gap: a sale where staging was skipped (no
+					//    lifecycle id at sale time, Dexie in safe mode, the
+					//    staging timeout in Payments.vue firing) is invisible to
+					//    the ledger forever, but the scan still catches it if it
+					//    was queued.
+					// Wrapped in its own try/catch — see the comment above
+					// `queued`'s assignment: a scan failure must not undo it.
+					let scan = { byMop: {}, uncertainCount: 0, byInvoice: new Map() };
+					try {
+						scan = await scanQueuedContributionsByInvoice({
+							openingServerName: opening.name || null,
+							shiftOfflineId: lifecycleId,
+							cashMode,
+							precision,
+						});
+					} catch (err) {
+						console.warn(
+							"[Pos] outbox scan failed; queued-only sales may be missing from the figure",
+							err,
+						);
+					}
+
+					// UNION the two stores, per invoice. Both key on the same
+					// invoice `offline_id` (`call()` passes it as
+					// `offlineIdempotencyKey`; `enqueue` stores it verbatim), so
+					// "in the ledger" and "in the outbox" is an exact test and
+					// the union is exactly computable: every ledger contribution,
+					// PLUS every outbox invoice the ledger never saw.
+					//
+					// Earlier revisions computed the scan and then threw its
+					// money away, folding it into a bare count. That understated
+					// the drawer by the full value of any sale whose staging was
+					// skipped — on upgrade day, by the whole pre-upgrade shift.
+					// Neither store is a superset of the other (the scan can't
+					// see online sales; the ledger can't see sales staged before
+					// it existed or when staging was skipped), so taking either
+					// one alone is wrong.
+					const ledgerIds = new Set(derived.offlineIds);
+					const byMop = { ...derived.byMop };
+					const f = 10 ** precision;
+					let gapCount = 0;
+					for (const [offlineId, contribution] of scan.byInvoice) {
+						if (ledgerIds.has(offlineId)) continue; // already counted — never twice.
+						gapCount += 1;
+						for (const [mop, amount] of Object.entries(contribution)) {
+							byMop[mop] =
+								Math.round(((byMop[mop] || 0) + amount) * f) / f;
+						}
+					}
+					queued = {
+						byMop,
+						// Combine every signal the ledger's own pendingCount
+						// misses: contributions still pending (stage/confirm not
+						// resolved) PLUS rows that would not decrypt PLUS outbox
+						// invoices this shift has in needs_review/handed_off
+						// (server rejected or handed the sale off) PLUS the
+						// invoices the ledger never recorded at all.
+						// `confirmContribution` fires on the enqueue ack, before
+						// either outbox outcome is known, so a later-rejected
+						// sale stays "confirmed" and would otherwise raise no
+						// flag at all.
+						uncertainCount:
+							derived.pendingCount +
+							derived.skippedCount +
+							scan.uncertainCount +
+							gapCount,
+					};
+				} else {
+					const { sumQueuedPaymentsByMop } = await import(
+						"@/offline/shift-lifecycle"
+					);
+					queued = await sumQueuedPaymentsByMop({
+						openingServerName: opening.name || null,
+						// The two fields `lifecycleId` above is derived from
+						// (`pospire_lifecycle_id`, `pos_offline_id`) are both
+						// already known falsy by the time this branch is
+						// reachable — that's what made `lifecycleId` null — so
+						// there is nothing left to pass here.
+						shiftOfflineId: null,
+						cashMode,
+						precision,
+					});
+				}
 			} catch (err) {
-				console.warn("[Pos] queued payment sum failed", err);
+				console.warn("[Pos] expected-amount derivation failed", err);
 			}
 
 			const seen = new Set();
@@ -592,6 +827,11 @@ export default {
 				denomination_details: opening.denomination_details || [],
 				pospire_offline_stub: true,
 				pospire_uncertain_count: queued.uncertainCount,
+				// "ledger" | "scan" — which store the expected amounts came
+				// from. The dialog needs it because only the scan branch is
+				// structurally blind to sales made earlier while ONLINE, and
+				// that caveat must not be shown when it is false.
+				pospire_source: source,
 			};
 		},
 		async submit_closing_pos(data) {
@@ -917,6 +1157,11 @@ export default {
 					// what used to strand them in the opening dialog and get a
 					// second shift opened against the first.
 					this.dropSnapshotForReleasedShifts(result?.released);
+					// Reconciliation-path contribution prune (see the method's
+					// doc comment). Deliberately NOT awaited: this whole chain
+					// exists to unblock `check_opening_entry()` in `.finally`
+					// below, and pruning must never delay or fail that boot.
+					this.pruneReleasedShiftContributions(result?.released);
 				})
 				.catch((err) => {
 					console.warn("[Pos] pending-closure reconciliation failed", err);
@@ -1123,6 +1368,27 @@ export default {
 							return;
 						}
 						if (!resolved) return;
+
+						// The close has landed server-side, so this shift's
+						// contributions can go. Deliberately NOT done at close
+						// time: a queued close can sit unsynced for hours and
+						// the dialog may be reopened in the meantime.
+						//
+						// LIVE-SYNC prune — DISTINCT from the reconciliation-path
+						// prune in `pruneReleasedShiftContributions` (called from
+						// the `mounted` reconciliation chain). Do NOT merge these
+						// two: this one only ever fires while a subscriber is
+						// running at the moment the sync happens (see that
+						// method's doc comment for the cases it misses and why
+						// the other hook exists to catch them).
+						try {
+							const { deleteContributionsForShift } = await import(
+								"@/offline/contribution-ledger"
+							);
+							await deleteContributionsForShift(resolved.shiftLifecycleId);
+						} catch (err) {
+							console.warn("[Pos] contribution prune failed", err);
+						}
 
 						if (this.pendingClosingOfflineId === event.offline_id) {
 							this.pendingClosingOfflineId = null;

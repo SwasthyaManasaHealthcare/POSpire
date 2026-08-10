@@ -501,7 +501,7 @@ export default {
 							// concrete handle.
 							toast.error(
 								__(
-									"Customer create failed AND rollback failed — local storage may be unhealthy. Contact support; reference offline_id {0}.",
+									"Customer create failed AND rollback failed. Local storage may be unhealthy. Contact support; reference offline_id {0}.",
 									[r.offline_id],
 								),
 								{ autoClose: 8000 },
@@ -512,7 +512,7 @@ export default {
 					}
 
 					toast.info(
-						__("Customer queued offline — will sync when online."),
+						__("Customer queued offline. It will sync when online."),
 						{ autoClose: 3000 },
 					);
 					playSound("submit");

@@ -135,7 +135,7 @@
 				variant="tonal"
 				class="mx-6 mb-2"
 			>
-				{{ __("POS configuration could not be loaded on this device. If you are offline, connect once to load it; if you are online, the server refused the request — check that your account has POS access, then reopen this dialog.") }}
+				{{ __("POS configuration could not be loaded on this device. If you are offline, connect once to load it; if you are online, the server refused the request. Check that your account has POS access, then reopen this dialog.") }}
 			</v-alert>
 			<v-alert
 				v-else-if="config_is_stale"
@@ -515,7 +515,7 @@ export default {
 				if (previous && this.pos_profile !== previous) {
 					toast.warning(
 						this.pos_profile
-							? __("The POS Profile you had selected is no longer available. A different profile has been selected — re-check the opening amounts before submitting.")
+							? __("The POS Profile you had selected is no longer available. A different profile has been selected. Re-check the opening amounts before submitting.")
 							: __("The POS Profile you had selected is no longer available and this company has no other profile. Contact your manager before opening a shift."),
 						{ autoClose: 8000 },
 					);
@@ -721,7 +721,7 @@ export default {
 					if ((outbox.unsyncedOpeningCount ?? 0) >= 3) {
 						this.is_loading = false;
 						toast.error(
-							__("Cannot open another shift offline — 3 shifts are already waiting to sync. Reconnect to clear them first."),
+							__("Cannot open another shift offline: 3 shifts are already waiting to sync. Reconnect to clear them first."),
 							{ autoClose: 7000 },
 						);
 						return;
@@ -799,7 +799,7 @@ export default {
 					this.eventBus.emit("register_pos_data", data);
 					this.eventBus.emit("set_company", data.company);
 					toast.info(
-						__("Shift opened offline — will sync when online."),
+						__("Shift opened offline. It will sync when online."),
 						{ autoClose: 4000 },
 					);
 					this.close_opening_dialog();

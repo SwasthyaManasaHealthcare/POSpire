@@ -274,7 +274,7 @@ export default {
 
 	computed: {
 		actionLabel() {
-			return this.itemName ? `${this.actionType} — ${this.itemName}` : this.actionType;
+			return this.itemName ? `${this.actionType}: ${this.itemName}` : this.actionType;
 		},
 		resultTitle() {
 			if (this.result === "Approved") return __("Approved");
