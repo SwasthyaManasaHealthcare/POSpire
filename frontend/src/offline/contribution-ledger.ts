@@ -14,6 +14,7 @@
 
 import {
 	buildStoredContribution,
+	deleteContribution,
 	deleteContributionsForShift,
 	getStoredContribution,
 	listContributionsForShift,
@@ -73,6 +74,23 @@ export async function confirmContribution(
 	invoiceOfflineId: string,
 ): Promise<void> {
 	await markContributionConfirmed(invoiceOfflineId, Date.now());
+}
+
+/**
+ * Un-stage a contribution for a sale that never landed. `deriveExpectedByMop`
+ * sums pending rows into the shift total (deliberately — cash physically
+ * taken counts even before sync), so a row staged ahead of a submit that then
+ * failed (4xx validation, a deferred return, any other error exit) would
+ * overstate the figure the cashier signs off on forever: reconciliation only
+ * ever confirms rows the server has, it never removes ones it doesn't. Call
+ * this on every failure exit after `stageContribution` ran. Safe to call on a
+ * row that was never staged (or already removed) — deleting a missing key is
+ * a no-op.
+ */
+export async function discardContribution(
+	invoiceOfflineId: string,
+): Promise<void> {
+	await deleteContribution(invoiceOfflineId);
 }
 
 export interface DerivedExpected {

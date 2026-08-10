@@ -904,13 +904,40 @@ export default {
 			// here and the confirm, the row survives as `pending` and the
 			// startup reconciliation resolves it against the server.
 			// Never let a ledger failure block the sale.
-			const shiftLifecycleId = this.pos_opening_shift?.pospire_lifecycle_id;
+			//
+			// Resolved at sale time rather than trusted off whichever
+			// `pos_opening_shift` object this component currently holds:
+			// `register_pos_profile` has emitters beyond Pos.vue's own stamped
+			// snapshot — App.vue's boot-time bootstrapPosProfileForNavbar, and
+			// Pos.vue's `pos_profile_updated` / `pendingProfileData` replays —
+			// that hand out a live `check_opening_shift` response the server
+			// never echoes `pospire_lifecycle_id` on and that never passes
+			// through `registerShiftLifecycle`. On a common warm-boot ordering
+			// one of those fires last, leaving `pospire_lifecycle_id` undefined
+			// on the object this component ends up holding even though a
+			// stamped durable row exists. `pos_offline_id` is the same id
+			// pre-sync, so it covers an offline-opened shift whose stamp just
+			// hasn't landed on this object; failing that, look the durable row
+			// up by server name — that goes straight to Dexie and is correct
+			// regardless of which transient object is in memory here.
+			let shiftLifecycleId =
+				this.pos_opening_shift?.pospire_lifecycle_id ||
+				this.pos_opening_shift?.pos_offline_id ||
+				null;
+			if (!shiftLifecycleId && this.pos_opening_shift?.name) {
+				try {
+					const { findShiftByServerName } = await import("@/offline/shift-lifecycle");
+					const row = await findShiftByServerName(this.pos_opening_shift.name);
+					shiftLifecycleId = row?.offline_id || null;
+				} catch (err) {
+					console.warn("[Payments] findShiftByServerName failed", err);
+				}
+			}
 			if (!shiftLifecycleId) {
-				// No lifecycle id means an upgrade-day snapshot that predates
-				// the Phase 1 stamp. Skip rather than writing a row keyed to
-				// no shift: it would count toward nothing and could never be
-				// pruned. The close dialog falls back to the Phase 1 outbox
-				// scan for this shift.
+				// No lifecycle id resolvable by any route. Skip rather than
+				// writing a row keyed to no shift: it would count toward
+				// nothing and could never be pruned. The close dialog falls
+				// back to the Phase 1 outbox scan for this shift.
 				console.warn(
 					"[Payments] no shift lifecycle id; skipping contribution staging",
 				);
@@ -924,12 +951,28 @@ export default {
 						cashMode:
 							(this.pos_profile && this.pos_profile.posa_cash_mode_of_payment) ||
 							"Cash",
-						precision: Number(window.sys_defaults?.currency_precision ?? 2),
+						precision: Number(window.sys_defaults?.currency_precision || 2),
 					});
 				} catch (err) {
 					console.warn("[Payments] stageContribution failed", err);
 				}
 			}
+
+			// Un-stage on any failure exit below. `deriveExpectedByMop` sums
+			// pending rows into the shift total, so a row staged ahead of a
+			// submit that never landed would overstate the cashier's expected
+			// figure forever — reconciliation only ever confirms rows the
+			// server has, it never removes ones it doesn't. Safe to call even
+			// when staging was skipped or never ran: deleting a missing key is
+			// a no-op.
+			const discardStagedContribution = async () => {
+				try {
+					const { discardContribution } = await import("@/offline/contribution-ledger");
+					await discardContribution(invoiceOfflineId);
+				} catch (err) {
+					console.warn("[Payments] discardContribution failed", err);
+				}
+			};
 
 			let r = null;
 			try {
@@ -944,6 +987,7 @@ export default {
 					offlineIdempotencyKey: invoiceOfflineId,
 				});
 			} catch (err) {
+				await discardStagedContribution();
 				if (err instanceof OfflineReturnDeferredError) {
 					toast.warning(
 						__("Sales Return requires an online connection in this phase."),
@@ -954,6 +998,7 @@ export default {
 				return;
 			}
 			if (!r) {
+				await discardStagedContribution();
 				toast.error("Error submitting invoice");
 				return;
 			}
@@ -1558,9 +1603,15 @@ export default {
 			});
 			this.eventBus.on("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
-				// Same object reference Pos.vue/Invoice.vue hold — later
-				// in-place stamps of `pospire_lifecycle_id` (registerShiftLifecycle,
-				// sync ack handlers) stay visible here without a re-emit.
+				// Best-effort only: `register_pos_profile` has emitters (App.vue's
+				// boot-time bootstrapPosProfileForNavbar, Pos.vue's
+				// pos_profile_updated / pendingProfileData replays) that hand out
+				// a live check_opening_shift response never stamped with
+				// pospire_lifecycle_id, and any of them can be the last one to
+				// fire before a sale. submit_invoice does NOT trust this object's
+				// `pospire_lifecycle_id` alone — it falls back to `pos_offline_id`
+				// and then to a durable-row lookup by server name. Kept here only
+				// because pos_profile / cashback / mpesa below still need it.
 				this.pos_opening_shift = data.pos_opening_shift;
 				// Initialize is_cashback based on POS Profile setting
 				// If use_cashback is disabled (0), set is_cashback to false

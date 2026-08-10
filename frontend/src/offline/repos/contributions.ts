@@ -179,6 +179,18 @@ export async function markContributionConfirmed(
 	});
 }
 
+/**
+ * Drop a single staged contribution. For un-staging a sale that never landed
+ * (a 4xx validation error, a deferred return, or any other failure exit after
+ * `stageContribution` ran) — the row must not survive to be summed by
+ * `deriveExpectedByMop`. Bare delete: no crypto, no transaction, since the
+ * row (envelope and all) is simply gone afterward.
+ */
+export async function deleteContribution(offlineId: string): Promise<void> {
+	assertWritable();
+	await db.contributions.delete(offlineId);
+}
+
 /** Drop a shift's contributions once they are no longer needed. */
 export async function deleteContributionsForShift(
 	shiftLifecycleId: string,
