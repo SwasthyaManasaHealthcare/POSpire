@@ -18,7 +18,11 @@
  * name exists, and the online-opened case is precisely the one that breaks.
  */
 
-import { listClosingEntryStatuses } from "./outbox";
+import {
+	listClosingEntryStatuses,
+	listInvoiceRowsAcrossStatuses,
+	readInnerShiftName,
+} from "./outbox";
 import {
 	buildStoredShift,
 	getShiftById,
@@ -245,4 +249,119 @@ export async function reconcilePendingClosuresFromOutbox(): Promise<{
 		released.push(row.offline_id);
 	}
 	return { stillPending, released };
+}
+
+// ---------------------------------------------------------------------------
+// Task 10 — stopgap expected-amount aggregation for the offline close dialog
+// ---------------------------------------------------------------------------
+
+export interface QueuedPaymentSum {
+	byMop: Record<string, number>;
+	/** Invoices in needs_review / handed_off — included, but flagged. */
+	uncertainCount: number;
+}
+
+/**
+ * Sum queued invoice payments for a shift, by mode of payment.
+ *
+ * Mirrors the server aggregation (`_aggregate_closing_from_invoices`) so the
+ * cashier reconciles against the same arithmetic the synced record will use:
+ * cash net of change, every other MOP at face value, site precision applied
+ * before summing. Diverging here would show one number at close time and a
+ * different one on the saved record.
+ *
+ * needs_review / handed_off invoices ARE included: the figure estimates what
+ * the cashier physically holds, and that money was taken whether or not the
+ * record reached the server. Excluding it would manufacture a false shortfall.
+ * The count is returned so the UI can say how much of the total is unconfirmed.
+ *
+ * This is a STOPGAP for offline-queued sales only (Issue 3, Task 10). Sales
+ * made earlier in the shift while online leave no trace in the outbox and are
+ * NOT recovered here — that needs the Phase 2 per-invoice contribution
+ * ledger. Callers must label whatever they build from this figure provisional.
+ */
+export async function sumQueuedPaymentsByMop(input: {
+	openingServerName: string | null;
+	shiftOfflineId: string | null;
+	cashMode: string;
+	precision: number;
+}): Promise<QueuedPaymentSum> {
+	const buckets: OutboxStatus[] = [
+		"enqueued",
+		"in_flight",
+		"retry_pending",
+		"needs_review",
+		"handed_off",
+		"synced",
+	];
+	// Uses the corrupt-row-resilient scan rather than composing `listByStatus`
+	// calls: `listByStatus` decrypts every row in a bucket via a single
+	// `Promise.all` and rejects the WHOLE bucket if any one row fails to
+	// decrypt. Composed across six buckets under this function's own
+	// aggregation, a single poison invoice anywhere would throw all the way
+	// out to Pos.vue's try/catch and silently zero the cashier's entire
+	// expected-amount figure — not just the bad invoice's share of it.
+	const { rows, corruptCount } = await listInvoiceRowsAcrossStatuses(buckets);
+	if (corruptCount > 0) {
+		// Not surfaced to the cashier (would require widening the return
+		// shape and the dialog's UI beyond this stopgap's scope) but must not
+		// vanish silently either — this is the one signal an operator has
+		// that the total is short by an unknown, undecryptable invoice.
+		console.warn(
+			`[shift-lifecycle] sumQueuedPaymentsByMop: skipped ${corruptCount} outbox row(s) that failed to decrypt`,
+		);
+	}
+
+	const seen = new Set<string>();
+	const byMop: Record<string, number> = {};
+	let uncertainCount = 0;
+
+	for (const row of rows) {
+		if (row.status === "voided") continue;
+		if (seen.has(row.offline_id)) continue;
+
+		if (input.shiftOfflineId) {
+			if (row.shift_offline_id !== input.shiftOfflineId) continue;
+		} else {
+			if (row.shift_offline_id) continue;
+			if (readInnerShiftName(row.payload) !== input.openingServerName) continue;
+		}
+
+		seen.add(row.offline_id);
+		if (row.status === "needs_review" || row.status === "handed_off") {
+			uncertainCount += 1;
+		}
+
+		const inner = parseInnerDoc(row.payload);
+		if (!inner) continue;
+		const change = Number(inner.change_amount) || 0;
+		for (const p of (inner.payments as Array<Record<string, unknown>>) || []) {
+			const mop = String(p.mode_of_payment ?? "");
+			if (!mop) continue;
+			const raw = Number(p.amount) || 0;
+			const net = mop === input.cashMode ? raw - change : raw;
+			byMop[mop] = round(
+				(byMop[mop] ?? 0) + round(net, input.precision),
+				input.precision,
+			);
+		}
+	}
+
+	return { byMop, uncertainCount };
+}
+
+function parseInnerDoc(payload: unknown): Record<string, unknown> | null {
+	if (!payload || typeof payload !== "object") return null;
+	const p = payload as Record<string, unknown>;
+	if (typeof p.data !== "string") return p;
+	try {
+		return JSON.parse(p.data) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
+}
+
+function round(value: number, precision: number): number {
+	const f = 10 ** precision;
+	return Math.round(value * f) / f;
 }

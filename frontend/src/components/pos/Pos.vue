@@ -438,24 +438,66 @@ export default {
 				);
 			} catch (err) {
 				console.warn("[Pos] make_closing_shift offline fallback", err);
-				r = this.buildOfflineClosingStub();
+				r = await this.buildOfflineClosingStub();
 			}
 			if (r) {
 				this.eventBus.emit("open_ClosingDialog", r);
 			}
 		},
-		buildOfflineClosingStub() {
+		async buildOfflineClosingStub() {
 			const opening = this.pos_opening_shift || {};
 			const balance = Array.isArray(opening.balance_details)
 				? opening.balance_details
 				: [];
-			const payment_reconciliation = balance.map((row) => ({
-				mode_of_payment: row.mode_of_payment,
-				opening_amount: row.amount || 0,
-				expected_amount: row.amount || 0,
-				closing_amount: 0,
-				difference: 0,
-			}));
+			const cashMode =
+				(this.pos_profile && this.pos_profile.posa_cash_mode_of_payment) || "Cash";
+
+			// Stopgap — offline-queued sales only. Does NOT recover takings
+			// from earlier in the shift while online; that needs the Phase 2
+			// contribution ledger. The dialog labels the result provisional
+			// precisely because of this gap.
+			let queued = { byMop: {}, uncertainCount: 0 };
+			try {
+				const { sumQueuedPaymentsByMop } = await import(
+					"@/offline/shift-lifecycle"
+				);
+				queued = await sumQueuedPaymentsByMop({
+					openingServerName: opening.pos_offline_id ? null : opening.name || null,
+					shiftOfflineId: opening.pos_offline_id || null,
+					cashMode,
+					precision: 2,
+				});
+			} catch (err) {
+				console.warn("[Pos] queued payment sum failed", err);
+			}
+
+			const seen = new Set();
+			const payment_reconciliation = balance.map((row) => {
+				seen.add(row.mode_of_payment);
+				const opening_amount = row.amount || 0;
+				return {
+					mode_of_payment: row.mode_of_payment,
+					opening_amount,
+					expected_amount:
+						opening_amount + (queued.byMop[row.mode_of_payment] || 0),
+					closing_amount: 0,
+					difference: 0,
+				};
+			});
+			// A MOP taken on an invoice but absent from balance_details gets
+			// its own row, mirroring the server's seen_mops handling. Dropping
+			// it would silently lose the amount.
+			Object.entries(queued.byMop).forEach(([mode_of_payment, amount]) => {
+				if (seen.has(mode_of_payment)) return;
+				payment_reconciliation.push({
+					mode_of_payment,
+					opening_amount: 0,
+					expected_amount: amount,
+					closing_amount: 0,
+					difference: 0,
+				});
+			});
+
 			return {
 				name: "",
 				pos_opening_shift: opening.name || "",
@@ -472,6 +514,7 @@ export default {
 				taxes: [],
 				denomination_details: opening.denomination_details || [],
 				pospire_offline_stub: true,
+				pospire_uncertain_count: queued.uncertainCount,
 			};
 		},
 		async submit_closing_pos(data) {

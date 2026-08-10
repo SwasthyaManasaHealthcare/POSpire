@@ -925,6 +925,17 @@ export async function listByStatus<T = unknown>(
 	return outboxRepo.listByStatus<T>(status);
 }
 
+/**
+ * Invoice rows across several statuses, resilient to a single corrupt row —
+ * see `repos/outbox.listInvoiceRowsAcrossStatuses` for why this exists
+ * instead of composing `listByStatus` calls.
+ */
+export async function listInvoiceRowsAcrossStatuses(
+	statuses: OutboxStatus[],
+): ReturnType<typeof outboxRepo.listInvoiceRowsAcrossStatuses> {
+	return outboxRepo.listInvoiceRowsAcrossStatuses(statuses);
+}
+
 export async function countPending(): Promise<number> {
 	return outboxRepo.countPending();
 }
