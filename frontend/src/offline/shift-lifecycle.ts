@@ -264,16 +264,64 @@ export interface QueuedPaymentSum {
 /**
  * Sum queued invoice payments for a shift, by mode of payment.
  *
- * Mirrors the server aggregation (`_aggregate_closing_from_invoices`) so the
- * cashier reconciles against the same arithmetic the synced record will use:
- * cash net of change, every other MOP at face value, site precision applied
- * before summing. Diverging here would show one number at close time and a
- * different one on the saved record.
+ * Every MOP is summed at face value EXCEPT the profile's cash MOP, which is
+ * netted of change. Change is NOT read from `inner.change_amount` — that
+ * field is computed server-side, at submit time, by ERPNext's
+ * `calculate_change_amount()` (erpnext/controllers/taxes_and_totals.py) and
+ * does not exist on a queued-but-not-yet-submitted invoice payload. Instead
+ * this reads `posa_submit_data.total_change`, the client-computed change
+ * value `Payments.vue` already carries alongside the payment (see its
+ * `submit_invoice()`: `total_change = !is_return ? -diff_payment : 0`), and
+ * re-applies ERPNext's own guards before trusting it:
+ *   - not a return (`calculate_change_amount`'s `not self.doc.is_return`);
+ *   - a cash payment was actually tendered (mirrors
+ *     `any(d.type == "Cash" for d in self.doc.payments)`). ERPNext's guard
+ *     reads each payment row's `type`, fetched from the linked Mode of
+ *     Payment (`Sales Invoice Payment.type`, `fetch_from:
+ *     mode_of_payment.type`) — but that field is populated server-side at
+ *     `.save()`/`.insert()` (see `posapp.py`'s `update_invoice`), so a queued
+ *     invoice that never round-tripped through a server save while online
+ *     (the exact case this stopgap exists for) never gets it written.
+ *     Trusting `payments[].type` here would make the guard permanently
+ *     false for genuinely offline invoices and defeat the fix it's meant to
+ *     enable. Use the signal the rest of this codebase already relies on for
+ *     the same purpose instead: `_aggregate_closing_from_invoices` nets
+ *     change purely by `mode_of_payment == cash_mode`, with no `type` check
+ *     at all — so "a cash-type payment was tendered" becomes "the profile's
+ *     cash-mode row is present on this invoice with a positive amount";
+ *   - the value is positive (mirrors `self.doc.paid_amount > grand_total`;
+ *     a partial-payment invoice can have total_change negative and must not
+ *     be "netted" into a bonus).
+ * `parseInnerDoc`/`parseSubmitData` never throw on malformed JSON — a bad
+ * payload just yields no change for that invoice, not an aborted scan.
+ *
+ * This mirrors the server's CLOSING-time aggregation
+ * (`_aggregate_closing_from_invoices` in pospire/pospire/api/offline.py),
+ * NOT the live opening-to-closing builder — the live builder has a quirk
+ * where the first invoice of a MOP absent from `balance_details` never nets
+ * change, which `_aggregate_closing_from_invoices` (and this function) does
+ * not reproduce. Diverging from `_aggregate_closing_from_invoices` here
+ * would show one number at close time and a different one on the record
+ * that eventually syncs.
+ *
+ * One deliberate divergence: the server's summation (`pay_expected[...] +=
+ * amount`, a bare `flt` add with no intermediate rounding) applies NO
+ * rounding until the field is saved. This function rounds each net payment
+ * to `input.precision` before accumulating, and rounds the running total
+ * again after each add. That is NOT the server's algorithm — it is a
+ * defensive per-payment clamp so a queued payload with excess float noise
+ * (e.g. `19.999999999998`) can't drift the display. At 2 decimal places (or
+ * whatever `precision` the caller passes — see the site's
+ * `currency_precision`, not a hardcoded constant) the difference against the
+ * server's unrounded-until-save total is not observable in practice, but a
+ * currency with unusual rounding behavior could show a hairline discrepancy.
  *
  * needs_review / handed_off invoices ARE included: the figure estimates what
  * the cashier physically holds, and that money was taken whether or not the
  * record reached the server. Excluding it would manufacture a false shortfall.
  * The count is returned so the UI can say how much of the total is unconfirmed.
+ * Invoices whose inner doc fails to parse are NOT counted here — they contribute
+ * no money and are a distinct failure mode (unreadable, not merely unconfirmed).
  *
  * This is a STOPGAP for offline-queued sales only (Issue 3, Task 10). Sales
  * made earlier in the shift while online leave no trace in the outbox and are
@@ -286,6 +334,15 @@ export async function sumQueuedPaymentsByMop(input: {
 	cashMode: string;
 	precision: number;
 }): Promise<QueuedPaymentSum> {
+	// Without an anchor, `row.shift_offline_id` falsy AND
+	// `readInnerShiftName(row.payload) === null` would match EVERY unanchored
+	// invoice in the outbox — including other shifts' — because `null ===
+	// null`. Refuse to aggregate rather than silently pull in other shifts'
+	// money.
+	if (!input.shiftOfflineId && !input.openingServerName) {
+		return { byMop: {}, uncertainCount: 0 };
+	}
+
 	const buckets: OutboxStatus[] = [
 		"enqueued",
 		"in_flight",
@@ -328,14 +385,17 @@ export async function sumQueuedPaymentsByMop(input: {
 		}
 
 		seen.add(row.offline_id);
+
+		const inner = parseInnerDoc(row.payload);
+		if (!inner) continue; // unparseable: contributes nothing, not "uncertain" money — see doc comment.
+
 		if (row.status === "needs_review" || row.status === "handed_off") {
 			uncertainCount += 1;
 		}
 
-		const inner = parseInnerDoc(row.payload);
-		if (!inner) continue;
-		const change = Number(inner.change_amount) || 0;
-		for (const p of (inner.payments as Array<Record<string, unknown>>) || []) {
+		const payments = (inner.payments as Array<Record<string, unknown>>) || [];
+		const change = resolveChangeAmount(inner, payments, input.cashMode);
+		for (const p of payments) {
 			const mop = String(p.mode_of_payment ?? "");
 			if (!mop) continue;
 			const raw = Number(p.amount) || 0;
@@ -348,6 +408,49 @@ export async function sumQueuedPaymentsByMop(input: {
 	}
 
 	return { byMop, uncertainCount };
+}
+
+/**
+ * Client-side stand-in for ERPNext's `calculate_change_amount()`. Reads the
+ * change value `Payments.vue` already computed (`posa_submit_data.total_change`)
+ * rather than `change_amount` (a server-only, post-submit field — see the
+ * doc comment above `sumQueuedPaymentsByMop`), and applies the same three
+ * guards the server checks before trusting it (see that doc comment for why
+ * the "cash payment present" guard is checked via `cashMode` rather than
+ * `payments[].type`). Returns 0 — meaning "net nothing" — whenever any guard
+ * fails, exactly like the server leaving `change_amount` at its `0.0` default.
+ */
+function resolveChangeAmount(
+	inner: Record<string, unknown>,
+	payments: Array<Record<string, unknown>>,
+	cashMode: string,
+): number {
+	if (inner.is_return) return 0; // `not self.doc.is_return`
+	const cashPayment = payments.find(
+		(p) => String(p.mode_of_payment ?? "") === cashMode,
+	);
+	if (!cashPayment || !(Number(cashPayment.amount) > 0)) return 0; // `any(d.type == "Cash" ...)` proxy
+	const submitData = parseSubmitData(inner.posa_submit_data);
+	const totalChange = Number(submitData.total_change) || 0;
+	// `self.doc.paid_amount > grand_total` — a partial-payment invoice can
+	// have total_change negative; treat anything <= 0 as "no change given".
+	return totalChange > 0 ? totalChange : 0;
+}
+
+/**
+ * Mirrors `Payments.vue`'s / `Invoice.vue`'s own `parseSubmitData` — the
+ * wrapper stores `posa_submit_data` as either a JSON string or (for older
+ * queued rows) an already-parsed object. Never throws.
+ */
+function parseSubmitData(raw: unknown): Record<string, unknown> {
+	if (!raw) return {};
+	if (typeof raw === "object") return raw as Record<string, unknown>;
+	if (typeof raw !== "string") return {};
+	try {
+		return JSON.parse(raw) as Record<string, unknown>;
+	} catch {
+		return {};
+	}
 }
 
 function parseInnerDoc(payload: unknown): Record<string, unknown> | null {

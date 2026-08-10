@@ -451,6 +451,12 @@ export default {
 				: [];
 			const cashMode =
 				(this.pos_profile && this.pos_profile.posa_cash_mode_of_payment) || "Cash";
+			// Same source `utils/format.js` reads at mount (`this.currency_precision`)
+			// — Pos.vue doesn't mix that helper in, so read the site value directly
+			// rather than hardcoding 2. A 3-decimal currency (KWD, BHD, OMR) would
+			// otherwise get every queued payment silently rounded to 2dp here while
+			// the server keeps full precision.
+			const precision = window.sys_defaults?.currency_precision || 2;
 
 			// Stopgap — offline-queued sales only. Does NOT recover takings
 			// from earlier in the shift while online; that needs the Phase 2
@@ -465,7 +471,7 @@ export default {
 					openingServerName: opening.pos_offline_id ? null : opening.name || null,
 					shiftOfflineId: opening.pos_offline_id || null,
 					cashMode,
-					precision: 2,
+					precision,
 				});
 			} catch (err) {
 				console.warn("[Pos] queued payment sum failed", err);
