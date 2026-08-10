@@ -567,21 +567,55 @@ export async function sumQueuedPaymentsByMop(input: {
 			uncertainCount += 1;
 		}
 
-		const payments = (inner.payments as Array<Record<string, unknown>>) || [];
-		const change = resolveChangeAmount(inner, payments);
-		for (const p of payments) {
-			const mop = String(p.mode_of_payment ?? "");
-			if (!mop) continue;
-			const raw = Number(p.amount) || 0;
-			const net = mop === input.cashMode ? raw - change : raw;
-			byMop[mop] = round(
-				(byMop[mop] ?? 0) + round(net, input.precision),
-				input.precision,
-			);
+		const contribution = contributionForInvoice(
+			inner,
+			input.cashMode,
+			input.precision,
+		);
+		for (const [mop, amount] of Object.entries(contribution)) {
+			byMop[mop] = round((byMop[mop] ?? 0) + amount, input.precision);
 		}
 	}
 
 	return { byMop, uncertainCount };
+}
+
+/**
+ * Net contribution of ONE invoice, by mode of payment.
+ *
+ * The single source of the per-invoice arithmetic. `sumQueuedPaymentsByMop`
+ * (the Phase 1 outbox-scanning stopgap) and the Phase 2 contribution ledger
+ * both call this, so the two paths cannot drift: cash net of derived change,
+ * every other MOP at face value, each net rounded to the site's precision
+ * before it is accumulated.
+ *
+ * `inner` is the invoice doc itself (already unwrapped from any outbox
+ * payload envelope), so this works identically for a queued sale and for one
+ * being submitted live.
+ *
+ * Every rule here — including the guards, the loyalty term, the
+ * `rounded_total || grand_total` fallback and the clamp at zero — is
+ * documented in full in the doc comments on `sumQueuedPaymentsByMop` and
+ * `resolveChangeAmount`. Read those before changing anything in this
+ * function; it is verified against the server's
+ * `_aggregate_closing_from_invoices`.
+ */
+export function contributionForInvoice(
+	inner: Record<string, unknown>,
+	cashMode: string,
+	precision: number,
+): Record<string, number> {
+	const payments = (inner.payments as Array<Record<string, unknown>>) || [];
+	const change = resolveChangeAmount(inner, payments);
+	const byMop: Record<string, number> = {};
+	for (const p of payments) {
+		const mop = String(p.mode_of_payment ?? "");
+		if (!mop) continue;
+		const raw = Number(p.amount) || 0;
+		const net = mop === cashMode ? raw - change : raw;
+		byMop[mop] = round((byMop[mop] ?? 0) + round(net, precision), precision);
+	}
+	return byMop;
 }
 
 /**
