@@ -18,11 +18,11 @@
  * name exists, and the online-opened case is precisely the one that breaks.
  */
 
-import { runInTransaction, db } from "./db";
 import {
+	buildStoredShift,
 	getShiftById,
 	getShiftByOpeningServerName,
-	putShift,
+	putShiftIfAbsent,
 } from "./repos/shifts";
 import type { ShiftRow } from "./types";
 
@@ -60,45 +60,44 @@ export interface OpenedShiftInput {
  * — it never overwrites, since by the time of a re-registration Task 9's
  * closing flow may already have advanced this row past `open`.
  *
- * The find-then-put is wrapped in a single `runInTransaction` because two
- * `applyOpeningSnapshot` calls for the same shift (cached snapshot + live
- * response) can race each other; without the transaction both could pass
- * the "not found" check before either writes, producing two rows.
+ * The row is encrypted (`buildStoredShift`) BEFORE the transactional
+ * dedupe-then-put (`putShiftIfAbsent`), never inside it. `crypto.subtle`
+ * returns native, non-Dexie promises; awaiting one inside a Dexie
+ * transaction's callback lets IndexedDB auto-commit the transaction out
+ * from under it (`PrematureCommitError`), which silently defeats both the
+ * dedupe check AND the write on every single call — this was tried in an
+ * earlier revision and reproduced against this exact function in review.
+ * Encrypting a row that turns out to be a duplicate (the dedupe-hit path)
+ * is wasted work, but that's a rare path and a cheap price for the
+ * transaction actually working.
  */
 export async function registerOpenedShift(
 	input: OpenedShiftInput,
 ): Promise<string> {
-	return runInTransaction("rw", [db.shifts], async () => {
-		if (input.openingServerName) {
-			const existing = await findShiftByServerName(input.openingServerName);
-			if (existing) return existing.offline_id;
-		} else if (input.lifecycleId) {
-			const existing = await getShiftById(input.lifecycleId);
-			if (existing) return existing.offline_id;
-		}
-
-		const offlineId = input.lifecycleId ?? crypto.randomUUID();
-		const row: ShiftRow = {
-			offline_id: offlineId,
-			device_id: input.deviceId,
-			cashier_user: input.cashierUser,
-			pos_profile: input.posProfile,
-			opening_cash_by_mop: input.openingCashByMop,
-			opened_at: Date.now(),
-			opening_server_name: input.openingServerName,
-			closing_cash_by_mop: null,
-			expected_closing_by_mop: null,
-			variance_at_close: null,
-			variance_at_sync: null,
-			closing_notes: null,
-			closed_at: null,
-			closing_server_name: null,
-			pending_closing_offline_id: null,
-			status: "open",
-			manager_approval_required: false,
-		};
-		await putShift(row);
-		return offlineId;
+	const offlineId = input.lifecycleId ?? crypto.randomUUID();
+	const row: ShiftRow = {
+		offline_id: offlineId,
+		device_id: input.deviceId,
+		cashier_user: input.cashierUser,
+		pos_profile: input.posProfile,
+		opening_cash_by_mop: input.openingCashByMop,
+		opened_at: Date.now(),
+		opening_server_name: input.openingServerName,
+		closing_cash_by_mop: null,
+		expected_closing_by_mop: null,
+		variance_at_close: null,
+		variance_at_sync: null,
+		closing_notes: null,
+		closed_at: null,
+		closing_server_name: null,
+		pending_closing_offline_id: null,
+		status: "open",
+		manager_approval_required: false,
+	};
+	const stored = await buildStoredShift(row);
+	return putShiftIfAbsent(stored, {
+		openingServerName: input.openingServerName,
+		lifecycleId: input.lifecycleId,
 	});
 }
 

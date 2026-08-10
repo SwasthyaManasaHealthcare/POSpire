@@ -20,7 +20,7 @@
  * table.
  */
 
-import { assertWritable, db } from "../db";
+import { assertWritable, db, runInTransaction } from "../db";
 import { decrypt, encrypt, getActiveKey } from "../crypto";
 import type {
 	EncryptedEnvelope,
@@ -207,6 +207,52 @@ export async function putShift(row: ShiftRow): Promise<void> {
 	assertWritable();
 	const stored = await toStored(row);
 	await db.shifts.put(stored);
+}
+
+/**
+ * Encrypt a candidate `ShiftRow` into its on-disk shape WITHOUT persisting
+ * it. Exported directly (not via `_internal`, which is documented as
+ * test/tooling-only) because `registerOpenedShift` (shift-lifecycle.ts)
+ * needs to encrypt a row BEFORE opening a Dexie transaction: `toStored`
+ * awaits `crypto.subtle`, a native, non-Dexie promise, and IndexedDB
+ * auto-commits a transaction the instant one of those is awaited inside
+ * its scope (PrematureCommitError — reproduced against this exact function
+ * in review). Encrypting up front and only conditionally `put`-ing inside
+ * `putShiftIfAbsent` keeps the transaction body 100% Dexie-native.
+ */
+export { toStored as buildStoredShift };
+
+/**
+ * Atomically register a PRE-ENCRYPTED stored row, deduping on either the
+ * server name or a caller-supplied durable id (`lifecycleId`) — without
+ * decrypting anything. `stored` must already be the output of
+ * `buildStoredShift`, produced OUTSIDE any transaction.
+ *
+ * Both dedupe checks compare plaintext scalars already present on
+ * `StoredShiftRow` (`opening_server_name`, the `offline_id` primary key),
+ * so the whole callback below is pure Dexie operations — `.filter().first()`,
+ * `.get()`, `.put()` — none of which is a non-Dexie promise, so the
+ * transaction can't prematurely commit the way a decrypt/encrypt call
+ * inside it would.
+ */
+export async function putShiftIfAbsent(
+	stored: StoredShiftRow,
+	dedupe: { openingServerName: string | null; lifecycleId?: string },
+): Promise<string> {
+	assertWritable();
+	return runInTransaction("rw", [db.shifts], async () => {
+		if (dedupe.openingServerName) {
+			const existing = await db.shifts
+				.filter((row) => row.opening_server_name === dedupe.openingServerName)
+				.first();
+			if (existing) return existing.offline_id;
+		} else if (dedupe.lifecycleId) {
+			const existing = await db.shifts.get(dedupe.lifecycleId);
+			if (existing) return existing.offline_id;
+		}
+		await db.shifts.put(stored);
+		return stored.offline_id;
+	});
 }
 
 /**
