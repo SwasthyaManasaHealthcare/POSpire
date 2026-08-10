@@ -15,7 +15,7 @@
 
 import { assertWritable, db, runInTransaction } from "../db";
 import { decrypt, encrypt, getActiveKey } from "../crypto";
-import { assertOfflineEnabled } from "../kill-switch";
+import { isOfflineEnabledSync, OfflineDisabledError } from "../kill-switch";
 import type {
 	ContributionRow,
 	EncryptedEnvelope,
@@ -73,12 +73,35 @@ async function fromStored(
  * never source from them (the server owns the figure) and nothing would prune
  * them. Throws `OfflineDisabledError`; the sale path treats that like any other
  * staging failure — warn and continue.
+ *
+ * The SYNCHRONOUS read, deliberately, not `assertOfflineEnabled()`. This runs on
+ * the critical path of EVERY sale, and the async path re-fetches from the server
+ * whenever its 60s cache is stale — which during normal ONLINE selling is about
+ * once a minute, because the drain loop that would otherwise keep the cache warm
+ * idles when the outbox is empty. That round trip sits inside the caller's 2s
+ * staging deadline: exceed it on a congested link and the contribution is
+ * skipped, while the sale itself succeeded online and so leaves no outbox row
+ * either — the amount would then be missing from the total, from the gap count
+ * and from the uncertainty count, with the banner still claiming "ledger".
+ * Silent understatement, which is the exact failure class this ledger exists to
+ * remove. The fetch buys nothing here anyway: `fetchKillSwitch` never treats an
+ * error or a missing value as "disabled", so a stale-but-true reading and a
+ * fresh one differ only in latency.
  */
 export async function putContribution(
 	stored: StoredContributionRow,
 ): Promise<void> {
 	assertWritable();
-	await assertOfflineEnabled();
+	if (!isOfflineEnabledSync()) {
+		// `assertOfflineEnabled` logs "blocking enqueue" — wrong noun for a
+		// ledger write, and it would report `outboxType: null`. Say what this
+		// actually is so the console points at the right subsystem.
+		console.warn(
+			"[contributions] offline disabled by administrator; refusing contribution write",
+			{ offline_id: stored.offline_id },
+		);
+		throw new OfflineDisabledError("invoice");
+	}
 	await db.contributions.put(stored);
 }
 
