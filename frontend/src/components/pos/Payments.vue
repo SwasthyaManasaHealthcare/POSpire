@@ -1067,7 +1067,7 @@ export default {
 					vm.pos_profile && vm.pos_profile.use_cashback == 1 ? true : false;
 				vm.sales_person = "";
 				vm.eventBus.emit("set_last_invoice", provisionalName);
-				toast.info(`Queued ${provisionalName} — will sync when online`);
+				toast.info(`Queued ${provisionalName}. Will sync when online`);
 				playSound("submit");
 				vm.addresses = [];
 				vm.invoice_doc = "";

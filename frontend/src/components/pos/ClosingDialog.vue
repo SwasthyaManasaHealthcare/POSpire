@@ -28,7 +28,7 @@
 					density="compact"
 					class="mb-3"
 				>
-					{{ __("Expected amounts are provisional — computed on this device and not yet confirmed by the server.") }}
+					{{ __("Expected amounts are provisional: computed on this device and not yet confirmed by the server.") }}
 				</v-alert>
 				<v-alert
 					v-else-if="dialog_data.pospire_offline_stub"
@@ -37,7 +37,7 @@
 					density="compact"
 					class="mb-3"
 				>
-					{{ __("Expected amounts are provisional — computed on this device and not yet confirmed by the server. Sales made earlier while online are not included.") }}
+					{{ __("Expected amounts are provisional: computed on this device and not yet confirmed by the server. Sales made earlier while online are not included.") }}
 				</v-alert>
 				<v-alert
 					v-if="dialog_data.pospire_uncertain_count"

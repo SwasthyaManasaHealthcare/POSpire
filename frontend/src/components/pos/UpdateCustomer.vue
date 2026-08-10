@@ -512,7 +512,7 @@ export default {
 					}
 
 					toast.info(
-						__("Customer queued offline — will sync when online."),
+						__("Customer queued offline. It will sync when online."),
 						{ autoClose: 3000 },
 					);
 					playSound("submit");

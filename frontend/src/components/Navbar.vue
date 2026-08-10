@@ -77,7 +77,7 @@
           variant="tonal"
           color="error"
           size="small"
-          :title="__('You are offline — sales continue locally')"
+          :title="__('You are offline. Sales continue locally')"
         >
           <v-icon start size="small">mdi-cloud-off-outline</v-icon>
           {{ __('Offline') }}
@@ -88,7 +88,7 @@
           variant="tonal"
           color="warning"
           size="small"
-          :title="__('Connectivity unstable — saving locally')"
+          :title="__('Connectivity unstable. Saving locally')"
         >
           <v-icon start size="small">mdi-access-point-network-off</v-icon>
           {{ __('Unstable') }}

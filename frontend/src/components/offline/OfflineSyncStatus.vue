@@ -269,7 +269,7 @@
               </v-chip>
             </v-list-item-title>
             <v-list-item-subtitle>
-              {{ __('Awaiting handoff — will retry on next online cycle.') }}
+              {{ __('Awaiting handoff. Will retry on next online cycle.') }}
             </v-list-item-subtitle>
           </v-list-item>
         </v-list>

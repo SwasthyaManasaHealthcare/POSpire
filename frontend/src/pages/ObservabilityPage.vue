@@ -143,7 +143,7 @@
               </tr>
               <tr v-if="!outlets.length">
                 <td colspan="6" class="observability-page__empty">
-                  {{ __('No beacons yet — devices report every 5 minutes.') }}
+                  {{ __('No beacons yet. Devices report every 5 minutes.') }}
                 </td>
               </tr>
             </tbody>
@@ -174,7 +174,7 @@
               </v-list-item>
             </v-list>
             <p class="observability-page__hint" v-if="buildHashes.length > 1">
-              {{ __('Multiple builds in flight — likely a staged rollout. Three or more usually means a device fleet stuck on stale code.') }}
+              {{ __('Multiple builds in flight. Likely a staged rollout. Three or more usually means a device fleet stuck on stale code.') }}
             </p>
           </v-card-text>
         </v-card>

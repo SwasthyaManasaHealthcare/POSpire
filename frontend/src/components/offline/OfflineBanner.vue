@@ -84,7 +84,7 @@ export default defineComponent({
       try {
         const ok = await connectivityModule.forcePingNow();
         if (!ok) {
-          toast.warning(__("Still offline — server unreachable"), { autoClose: 3000 });
+          toast.warning(__("Still offline: server unreachable"), { autoClose: 3000 });
         }
         // On success the connectivity transition fires; banner auto-hides.
       } finally {
