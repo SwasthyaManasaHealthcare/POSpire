@@ -17,10 +17,13 @@
  *   - Request batching / response transformation.
  */
 
-// This file is the ONE exception to the `no-restricted-imports` ban on
-// `frappe-ui`. See eslint.config.js override.
-import { call as frappeUiCall } from "frappe-ui";
-
+// liveFetch() below performs its own fetch() rather than importing frappe-ui's
+// `call()` — see the function for why (structured server error fields need to
+// survive the request). This file no longer needs a frappe-ui import as a
+// result, but the `no-restricted-imports` override for it in eslint.config.js
+// is left in place: it still legitimately covers call-registry.ts, and a
+// future change here that needs a frappe-ui helper directly is expected to
+// use it rather than re-litigate the boundary.
 import {
 	getMethodConfig,
 	isReadConfig,
@@ -626,28 +629,154 @@ function getDeviceId(): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Invoke frappe-ui's `call` with the right shape. On success, mark the
- * connectivity detector with a recent-success; classification of errors is
- * handled by the caller so read/write paths can apply their own policy.
+ * Perform the live HTTP request. Mirrors frappe-ui's `call.js` request shape
+ * (path, method, headers, body, CSRF header gating) exactly, so session auth
+ * keeps working — but does its OWN fetch instead of delegating to frappe-ui.
+ *
+ * Why: frappe-ui's `call()` reads the error body with `.text()`, parses out
+ * only `exc_type`/`exc`/`messages`/`status`, and discards the parsed object —
+ * the body can't be re-read afterwards. The server's `error_code`, `details`,
+ * and `http_status_code` (set by `_throw` in offline.py) never survive that
+ * trip, which left every `error_code`-based branch in `sync.ts`'s replay
+ * router permanently dead (see task-11 brief). Owning the fetch here lets us
+ * attach the structured fields to the thrown Error while keeping frappe-ui's
+ * exact success/error message semantics for everything else.
+ *
+ * On success, marks the connectivity detector with a recent-success. On
+ * failure, throws and does NOT report an outcome — callers (runRead/runWrite)
+ * classify the error and report failure themselves; reporting here too would
+ * double-count it.
  */
 async function liveFetch<T>(opts: CallOptions): Promise<T> {
-	// frappe-ui's `call` resolves to the response `message` body for 2xx,
-	// and rejects with an object carrying HTTP details for non-2xx.
-	// We don't try to unify that here — we just classify in classifyFetchError.
-	// NOTE: abortSignal is accepted on the options but frappe-ui's call
-	// signature is (method, args). AbortSignal wiring lands with Agent 3
-	// once frappe-ui's request layer is replaced by a fetch-abortable client.
-	const result = (await frappeUiCall(opts.method, opts.args ?? {})) as T;
-	connectivity.reportRequestOutcome("success");
-	return result;
+	const path = opts.method.startsWith("/") ? opts.method : `/api/method/${opts.method}`;
+
+	const headers: Record<string, string> = {
+		Accept: "application/json",
+		"Content-Type": "application/json; charset=utf-8",
+		"X-Frappe-Site-Name": window.location.hostname,
+	};
+	// window.csrf_token isn't declared on lib.dom's Window type; frappe-ui
+	// itself reads it the same untyped way (it ships as plain JS).
+	const csrfToken = (window as Window & { csrf_token?: string }).csrf_token;
+	if (csrfToken && csrfToken !== "{{ csrf_token }}") {
+		headers["X-Frappe-CSRF-Token"] = csrfToken;
+	}
+
+	const response = await fetch(path, {
+		method: "POST",
+		headers,
+		body: JSON.stringify(opts.args ?? {}),
+		signal: opts.abortSignal,
+	});
+
+	if (response.ok) {
+		const data = (await response.json()) as { message?: T };
+		connectivity.reportRequestOutcome("success");
+		return data.message as T;
+	}
+
+	throw await buildLiveFetchError(opts.method, response);
 }
 
-/** Classify an error thrown by frappe-ui's `call`. */
+/**
+ * Build the Error thrown for a non-2xx response. Reproduces frappe-ui's
+ * `call.js` message/`messages` construction (around its lines 53-84) so
+ * downstream consumers reading `e.messages` see the same shape as before,
+ * then attaches the structured fields frappe-ui dropped.
+ *
+ * The body is read via `.text()` exactly once — a `Response` body stream can
+ * only be consumed a single time, so `.json()` and `.text()` can never both
+ * be called on it. A non-JSON body (e.g. an HTML 502 from a proxy) is a
+ * `JSON.parse` failure we catch, not a crash: `parsed` stays `undefined` and
+ * every field sourced from it is correctly `undefined` rather than throwing.
+ */
+async function buildLiveFetchError(
+	method: string,
+	response: Response,
+): Promise<Error & Record<string, unknown>> {
+	const raw = await response.text();
+	let parsed: Record<string, unknown> | undefined;
+	try {
+		parsed = JSON.parse(raw) as Record<string, unknown>;
+	} catch {
+		// Non-JSON error body (proxy HTML, gateway timeout page). The structured
+		// fields simply won't be there; everything else must still work.
+	}
+
+	const excType = parsed?.exc_type as string | undefined;
+	const errorMessage = parsed?._error_message as string | undefined;
+	const e = new Error([method, excType, errorMessage].filter(Boolean).join(" ")) as Error &
+		Record<string, unknown>;
+
+	e.exc_type = excType;
+
+	// frappe-ui: `exc` is JSON-parsed and its first element taken — but only
+	// when it actually parses to an array. A stray parse failure (or a body
+	// that JSON-parses to something else) must not escape as a thrown error.
+	let exc: unknown = parsed?.exc;
+	if (typeof exc === "string") {
+		try {
+			const parsedExc: unknown = JSON.parse(exc);
+			exc = Array.isArray(parsedExc) ? parsedExc[0] : parsedExc;
+		} catch {
+			// Leave `exc` as the raw (unparsed) string, same as frappe-ui.
+		}
+	}
+	e.exc = exc;
+
+	e.status = response.status;
+	e.response = response;
+
+	let messages: unknown[] = [];
+	if (typeof parsed?._server_messages === "string") {
+		try {
+			messages = JSON.parse(parsed._server_messages) as unknown[];
+		} catch {
+			messages = [];
+		}
+	}
+	messages = messages.concat(parsed?.message as unknown);
+	messages = messages
+		.map((m) => {
+			if (typeof m !== "string") return m;
+			try {
+				return (JSON.parse(m) as { message?: unknown })?.message;
+			} catch {
+				return m;
+			}
+		})
+		.filter(Boolean);
+	if (!messages.length) {
+		messages = errorMessage ? [errorMessage] : ["Internal Server Error"];
+	}
+	e.messages = messages;
+
+	// New: fields `_throw` (pospire/api/offline.py) sets on the response that
+	// frappe-ui's call() parsed out of the body and then dropped. `sync.ts`'s
+	// replay router reads these to decide retry/park/fail — see task-11 brief.
+	e.error_code = parsed?.error_code;
+	e.details = parsed?.details;
+	e.http_status_code = (parsed?.http_status_code as number | undefined) ?? response.status;
+
+	return e;
+}
+
+/**
+ * Classify an error thrown by `liveFetch`/`buildLiveFetchError` above.
+ *
+ * `status`/`response` are now set by code in THIS module (not frappe-ui's
+ * `frappeRequest.js`), so both are reliable: `status` is always the real
+ * numeric HTTP status, and `response.status` is the same value read off the
+ * actual `Response`. The `response` check is kept first regardless, since it
+ * is the more direct source of truth when both are present.
+ */
 function classifyFetchError(err: unknown): "network_error" | "http_4xx" | "http_5xx" {
-	// frappe-ui rejects with various shapes — defensive parsing.
+	// Defensive parsing — a rejected fetch() (e.g. `TypeError: Failed to
+	// fetch`, or an AbortError) won't have any of these fields.
 	if (!err || typeof err !== "object") return "network_error";
 	const e = err as Record<string, unknown>;
-	const statusCandidates = [e.status, e.statusCode, e.httpStatus];
+	const response = e.response as { status?: unknown } | undefined;
+	const statusCandidates = [response?.status, e.status, e.statusCode, e.httpStatus];
 	for (const s of statusCandidates) {
 		if (typeof s === "number") {
 			if (s >= 500 && s < 600) return "http_5xx";
