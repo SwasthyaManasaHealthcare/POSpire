@@ -292,19 +292,35 @@ export interface QueuedPaymentSum {
  * server actually books, rather than being derived from the same two
  * numbers the server uses.
  *
- * Instead, this derives change exactly the way ERPNext does:
- * `change = paid_amount - (rounded_total or grand_total)`, clamped to >= 0.
- * `paid_amount` is summed directly from `payments[].amount` (mirrors
- * ERPNext's own `calculate_paid_amount()`, not `posa_submit_data`), and
- * `rounded_total` / `grand_total` are read straight off the inner doc.
- * Both are reliably present on a genuinely-offline queued invoice —
+ * Instead, this derives change exactly the way ERPNext's
+ * `calculate_paid_amount()` + `calculate_change_amount()` do:
+ * `paid_amount = sum(payments[].amount) + (loyalty_amount / conversion_rate
+ * if redeem_loyalty_points else 0)`, `change = paid_amount - (rounded_total
+ * or grand_total)`, clamped to >= 0. The loyalty term matters: it is a real,
+ * measured divergence, not a hypothetical — a customer selected while
+ * online (so loyalty points/`conversion_factor` are known) followed by a
+ * connectivity drop before submit queues an invoice with
+ * `redeem_loyalty_points` + `loyalty_amount` stamped straight onto the doc
+ * by `Payments.vue`'s watcher, flowing through the adapter unchanged.
+ * Omitting it understated `paid_amount` and overstated cash by exactly the
+ * loyalty-funded change (grand_total 100, loyalty 30, cash 100: server nets
+ * change 30 and books 70; omitting loyalty here would book the full 100).
+ * `conversion_rate` is guarded against 0/missing (`|| 1`) so a bad or absent
+ * rate can't divide-by-zero into `NaN` and poison the whole aggregation —
+ * `Number(NaN)` is falsy, so a genuinely garbage `loyalty_amount` is also
+ * naturally skipped by the `redeem_loyalty_points && Number(loyalty_amount)`
+ * guard before it ever reaches a division.
+ *
+ * `rounded_total` / `grand_total` are read straight off the inner doc; both
+ * are reliably PRESENT on a genuinely-offline queued invoice —
  * `Invoice.vue`'s `get_invoice_doc()` (lines ~2226-2241) stamps
- * `rounded_total` equal to `grand_total` unconditionally, client-side, with
- * no server round-trip required, even when the POS Profile disables
- * rounding. The `rounded_total || grand_total` fallback (matching Python's
- * `or`, where a falsy 0/absent value falls through) is kept anyway as a
- * defensive match to the server's own condition, in case a future payload
- * shape ever omits one.
+ * `rounded_total` client-side with no server round-trip required. The
+ * `rounded_total || grand_total` fallback matches Python's `or` exactly
+ * (server's `set_rounded_total` sets `rounded_total = 0` outright when
+ * rounding is disabled, so the falls-through-to-grand_total behavior here is
+ * BY DESIGN, not a guess). What is NOT reproduced: `get_invoice_doc()`
+ * stamps `rounded_total = grand_total` VERBATIM, with no currency rounding
+ * applied — see the rounding divergence called out below.
  *
  * Guards applied, mirroring `calculate_change_amount`'s conditions:
  *   - not a return (`not self.doc.is_return`) — see the `is_return` check
@@ -322,17 +338,33 @@ export interface QueuedPaymentSum {
  * is populated server-side only when an invoice round-trips through
  * `posapp.py`'s `update_invoice()` (`.save()`) while online — exactly the
  * condition a genuinely offline invoice never meets — so it is unusable
- * client-side. Two known, deliberate divergences follow from omitting it:
+ * client-side.
+ *
+ * Known, deliberate divergences from the server that remain after the
+ * above (measured, not hypothetical — exhaustive as of this writing):
  *   (1) a cash MOP whose underlying `Mode of Payment.type` is not "Cash":
- *       the server's guard fails and nets nothing; this function still
- *       nets the change.
- *   (2) a zero-amount cash-mode payment row alongside over-tender on a
- *       different MOP: the server nets the change against that (zero)
- *       cash row and can drive its expected amount negative; this
- *       function's per-invoice change is the same value, applied the same
- *       way, so in the cases where the two arithmetically diverge the
- *       client figure is arguably the physically correct one anyway — this
- *       is exactly what the dialog's "provisional" label exists to cover.
+ *       the server's `any(type=="Cash")` guard fails and nets nothing;
+ *       this function still nets the change (since it doesn't check
+ *       `type` at all — see above).
+ *   (2) currency rounding: `get_invoice_doc()` never applies currency
+ *       rounding to `rounded_total`, but the server recomputes it on save
+ *       via `round_based_on_smallest_currency_fraction` — for currencies
+ *       with no smallest-fraction denomination (many do: INR, AED, SAR,
+ *       GBP, AUD — USD is a notable exception) this rounds to the nearest
+ *       whole unit. Example: grand_total 99.60, cash 100 -> this function
+ *       nets change 0.40 (books cash 99.60); the server sees
+ *       `rounded_total` snap to 100, `paid_amount(100) > 100` is false, no
+ *       change, books the full 100. Drift is bounded (well under 1 unit
+ *       per over-tendered cash sale) but accumulates across a shift's
+ *       invoices. Not something this stopgap can close without
+ *       reimplementing ERPNext's rounding table client-side — the client
+ *       figure is arguably the physically correct one anyway, which is
+ *       exactly what the dialog's "provisional" label exists to cover.
+ * (A zero-amount cash-mode row alongside over-tender elsewhere is NOT a
+ * divergence, despite an earlier revision of this comment claiming
+ * otherwise: that row still satisfies the server's `any(type=="Cash")`
+ * guard, so both sides net the same change against the same row and reach
+ * the same number.)
  * `parseInnerDoc` never throws on malformed JSON — a bad payload just
  * yields no change for that invoice, not an aborted scan.
  *
@@ -452,15 +484,17 @@ export async function sumQueuedPaymentsByMop(input: {
 }
 
 /**
- * Client-side stand-in for ERPNext's `calculate_change_amount()`. Derives
- * change from `payments[].amount` and `rounded_total`/`grand_total` — the
- * same two quantities the server computes it from — rather than from
- * `posa_submit_data`, a parallel client calculation that measurably drifts
- * from the server's numbers (see the doc comment above
- * `sumQueuedPaymentsByMop` for the two reproduced failure modes, and for the
- * `payments[].type` guard this deliberately does NOT attempt to mirror).
- * Returns 0 — meaning "net nothing" — whenever a guard fails, exactly like
- * the server leaving `change_amount` at its `0.0` default.
+ * Client-side stand-in for ERPNext's `calculate_paid_amount()` +
+ * `calculate_change_amount()`. Derives change from `payments[].amount`
+ * (plus loyalty redemption, converted the same way the server does) and
+ * `rounded_total`/`grand_total` — the same quantities the server computes it
+ * from — rather than from `posa_submit_data`, a parallel client calculation
+ * that measurably drifts from the server's numbers (see the doc comment
+ * above `sumQueuedPaymentsByMop` for the reproduced failure modes, the
+ * `payments[].type` guard this deliberately does NOT attempt to mirror, and
+ * the divergences that remain). Returns 0 — meaning "net nothing" —
+ * whenever a guard fails, exactly like the server leaving `change_amount`
+ * at its `0.0` default.
  */
 function resolveChangeAmount(
 	inner: Record<string, unknown>,
@@ -474,10 +508,25 @@ function resolveChangeAmount(
 	// return support ever reaches this function.
 	if (inner.is_return) return 0;
 
-	const paidAmount = payments.reduce(
+	let paidAmount = payments.reduce(
 		(sum, p) => sum + (Number(p.amount) || 0),
 		0,
 	);
+	// `if self.doc.redeem_loyalty_points and self.doc.loyalty_amount:
+	//      paid_amount += self.doc.loyalty_amount / flt(self.doc.conversion_rate)`
+	// (calculate_paid_amount, taxes_and_totals.py). Both fields are stamped
+	// straight onto invoice_doc by Payments.vue's loyalty_amount watcher and
+	// flow through the adapter unchanged — see the doc comment above
+	// sumQueuedPaymentsByMop for why this is a real, measured gap and not a
+	// defensive nicety. `Number(inner.loyalty_amount)` being falsy (0,
+	// missing, or NaN from a garbage value) short-circuits before any
+	// division, and `|| 1` on conversion_rate guards the division itself —
+	// a 0 or missing rate must not divide-by-zero into a NaN that would
+	// poison every payment in this invoice's contribution.
+	if (inner.redeem_loyalty_points && Number(inner.loyalty_amount)) {
+		const conversionRate = Number(inner.conversion_rate) || 1;
+		paidAmount += Number(inner.loyalty_amount) / conversionRate;
+	}
 	// `self.doc.rounded_total or self.doc.grand_total`. Both fields are
 	// reliably present on the client's own queued doc — see the doc comment
 	// above `sumQueuedPaymentsByMop`. The `||` chain matches Python's `or`
