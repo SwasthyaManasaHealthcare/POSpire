@@ -310,13 +310,29 @@ export default {
 			},
 
 			/**
-			 * INVARIANT: this dialog must never present zero enabled controls.
-			 * It is `persistent`, so there is no click-away or Esc; both exits
-			 * (header X, Cancel) call the same `go_desk()`, and Submit is
-			 * disabled whenever `config_unavailable` — which is precisely the
-			 * offline-with-a-cold-cache case that follows an offline close. So
-			 * the closing-pending gate is lifted the moment Submit is
-			 * unusable: the cashier keeps a way forward, or a way out, always.
+			 * Submit is bound to `:disabled="is_loading || config_unavailable"`,
+			 * but `submit_dialog` ALSO returns silently on this condition — so
+			 * the button can be enabled yet inert. Mirrored here (not merged
+			 * into the binding) so the two stay visibly paired: if that guard
+			 * ever changes, this is the line to change with it.
+			 */
+			submit_is_inert() {
+				return (
+					!this.payments_methods.length || !this.company || !this.pos_profile
+				);
+			},
+
+			/**
+			 * INVARIANT: this dialog must never present zero USABLE controls.
+			 * It is `persistent`, so there is no click-away or Esc, and both
+			 * exits (header X, Cancel) call the same `go_desk()`. So the
+			 * closing-pending gate is lifted the moment Submit cannot get the
+			 * cashier out of here — whether because it is disabled
+			 * (`config_unavailable`, i.e. offline with a cold config cache,
+			 * precisely the case that follows an offline close) or because it
+			 * is enabled but would no-op (`submit_is_inert`, config fetched but
+			 * carrying no usable profile). Either way the cashier keeps a way
+			 * forward or a way out, always.
 			 *
 			 * `is_loading` deliberately does NOT lift the gate: it is transient,
 			 * self-clearing in submit_dialog's `finally`, and entered only by
@@ -324,7 +340,9 @@ export default {
 			 * on every submit would be worse.
 			 */
 			can_exit_dialog() {
-				return !this.closingPending || this.config_unavailable;
+				return (
+					!this.closingPending || this.config_unavailable || this.submit_is_inert
+				);
 			},
 
 	},

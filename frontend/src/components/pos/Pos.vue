@@ -276,6 +276,17 @@ export default {
 
 		applyOpeningSnapshot(snapshot) {
 			if (!snapshot?.pos_profile) return;
+			// Symmetric with the `register_pos_data` handler, and for the same
+			// reason: this is the OTHER door a shift change comes through
+			// (check_opening_entry when openingSnapshotDiffers), and it can
+			// carry a DIFFERENT shift than the one currently registered.
+			// `shiftLifecycleId` is only re-assigned tens of ms later by the
+			// async registerShiftLifecycle() below; during that gap a stale id
+			// would still satisfy the onSynced routing guard and wipe the shift
+			// just applied. Placed after the early return, not before it — a
+			// rejected snapshot changes no shift, so clearing the id there
+			// would blind the routing guard for a shift that is still current.
+			this.shiftLifecycleId = null;
 			this.pos_profile = snapshot.pos_profile;
 			this.pos_opening_shift = snapshot.pos_opening_shift;
 			// Every shift gets a durable row and a local lifecycle UUID,
