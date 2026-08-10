@@ -19,7 +19,7 @@
 					density="compact"
 					class="mb-3"
 				>
-					{{ __("Expected amounts are provisional — totals could not be confirmed with the server. Sales made earlier while online are not included.") }}
+					{{ __("Expected amounts are provisional — computed on this device and not yet confirmed by the server.") }}
 				</v-alert>
 				<v-alert
 					v-if="dialog_data.pospire_uncertain_count"
@@ -28,7 +28,7 @@
 					density="compact"
 					class="mb-3"
 				>
-					{{ __("Some queued invoices could not be confirmed with the server. Affected invoices:") }}
+					{{ __("Some contributions are not yet confirmed against the server. Affected invoices:") }}
 					{{ dialog_data.pospire_uncertain_count }}
 				</v-alert>
 				<v-data-table

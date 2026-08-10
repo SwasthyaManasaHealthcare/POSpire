@@ -574,36 +574,72 @@ export default {
 			// the server keeps full precision.
 			const precision = window.sys_defaults?.currency_precision || 2;
 
-			// Stopgap — offline-queued sales only. Does NOT recover takings
-			// from earlier in the shift while online; that needs the Phase 2
-			// contribution ledger. The dialog labels the result provisional
-			// precisely because of this gap.
+			// Phase 2: totals come from the contribution ledger, which
+			// records EVERY sale — online and offline — so the figure is no
+			// longer missing the pre-outage takings.
+			//
+			// Resolve the lifecycle id with the SAME fallback chain
+			// Payments.vue's submit_invoice and reconcileContributions use,
+			// so this reads the same row the sales were staged against. NOT
+			// `this.shiftLifecycleId` — `applyOpeningSnapshot` nulls it
+			// synchronously before the un-awaited `registerShiftLifecycle`
+			// can re-stamp it, so it can read `null` here even though a
+			// durable row exists.
+			let lifecycleId =
+				opening.pospire_lifecycle_id || opening.pos_offline_id || null;
+			if (!lifecycleId && opening.name) {
+				try {
+					const { findShiftByServerName } = await import(
+						"@/offline/shift-lifecycle"
+					);
+					const row = await findShiftByServerName(opening.name);
+					lifecycleId = row?.offline_id || null;
+				} catch (err) {
+					console.warn("[Pos] findShiftByServerName failed", err);
+				}
+			}
+
+			// Fall back to the Phase 1 outbox scan when no lifecycle id is
+			// resolvable at all (an upgrade-day snapshot predating the
+			// stamp). An offline-only figure is worse than the ledger's but
+			// far better than a blank one.
 			let queued = { byMop: {}, uncertainCount: 0 };
 			try {
-				const { sumQueuedPaymentsByMop } = await import(
-					"@/offline/shift-lifecycle"
-				);
-				// BOTH anchors, always — sumQueuedPaymentsByMop matches on
-				// either. A shift opened offline and synced mid-shift has
-				// invoices on both sides of the sync: the pre-sync ones are
-				// stamped with `shift_offline_id` (= the lifecycle id, since
-				// the row is keyed by the opening's outbox id) and the
-				// post-sync ones carry only the server name. Passing just one
-				// anchor dropped a whole half of the shift's takings.
-				// `pospire_lifecycle_id` is the offline id's stand-in after the
-				// sync handler clears `pos_offline_id`; on an online-opened
-				// shift it is a UUID no outbox row carries, which simply
-				// matches nothing and leaves the server-name clause to do the
-				// work.
-				queued = await sumQueuedPaymentsByMop({
-					openingServerName: opening.name || null,
-					shiftOfflineId:
-						opening.pos_offline_id || opening.pospire_lifecycle_id || null,
-					cashMode,
-					precision,
-				});
+				if (lifecycleId) {
+					const { deriveExpectedByMop } = await import(
+						"@/offline/contribution-ledger"
+					);
+					const derived = await deriveExpectedByMop(lifecycleId, precision);
+					queued = {
+						byMop: derived.byMop,
+						uncertainCount: derived.pendingCount,
+					};
+				} else {
+					const { sumQueuedPaymentsByMop } = await import(
+						"@/offline/shift-lifecycle"
+					);
+					// BOTH anchors, always — sumQueuedPaymentsByMop matches on
+					// either. A shift opened offline and synced mid-shift has
+					// invoices on both sides of the sync: the pre-sync ones are
+					// stamped with `shift_offline_id` (= the lifecycle id, since
+					// the row is keyed by the opening's outbox id) and the
+					// post-sync ones carry only the server name. Passing just one
+					// anchor dropped a whole half of the shift's takings.
+					// `pospire_lifecycle_id` is the offline id's stand-in after the
+					// sync handler clears `pos_offline_id`; on an online-opened
+					// shift it is a UUID no outbox row carries, which simply
+					// matches nothing and leaves the server-name clause to do the
+					// work.
+					queued = await sumQueuedPaymentsByMop({
+						openingServerName: opening.name || null,
+						shiftOfflineId:
+							opening.pos_offline_id || opening.pospire_lifecycle_id || null,
+						cashMode,
+						precision,
+					});
+				}
 			} catch (err) {
-				console.warn("[Pos] queued payment sum failed", err);
+				console.warn("[Pos] expected-amount derivation failed", err);
 			}
 
 			const seen = new Set();
