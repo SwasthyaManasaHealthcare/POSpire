@@ -135,7 +135,7 @@
 				variant="tonal"
 				class="mx-6 mb-2"
 			>
-				{{ __("POS configuration is not available on this device yet. Connect to the network once to load it, then reopen this dialog.") }}
+				{{ __("POS configuration could not be loaded on this device. If you are offline, connect once to load it; if you are online, the server refused the request — check that your account has POS access, then reopen this dialog.") }}
 			</v-alert>
 			<v-alert
 				v-else-if="config_is_stale"
@@ -224,6 +224,17 @@ export default {
 			config_is_stale: false,
 			config_unavailable: false,
 			unsubConnectivity: null,
+			/**
+			 * Inputs to `submit_can_never_succeed` that live outside Vue's
+			 * reactivity (a connectivity module, localStorage). Refreshed by
+			 * `refresh_submit_gate()` on create and on every connectivity
+			 * change — the only two moments either can change while this
+			 * dialog is on screen. The outbox store is reactive on its own,
+			 * so it is read directly in the computed instead.
+			 */
+			is_online: true,
+			snapshot_usable: true,
+			outbox_store: null,
 		};
 	},
 	watch: {
@@ -311,15 +322,50 @@ export default {
 
 			/**
 			 * Submit is bound to `:disabled="is_loading || config_unavailable"`,
-			 * but `submit_dialog` ALSO returns silently on this condition — so
-			 * the button can be enabled yet inert. Mirrored here (not merged
-			 * into the binding) so the two stay visibly paired: if that guard
-			 * ever changes, this is the line to change with it.
+			 * but `submit_dialog` has its OWN refuse-conditions that leave the
+			 * button enabled and simply return — so the button can be enabled
+			 * yet guaranteed to get the cashier nowhere. Every such condition
+			 * has to be mirrored here, because `can_exit_dialog` below is what
+			 * stops that turning into a locked-in dialog.
+			 *
+			 * Named for the property that matters (`can never succeed`), not
+			 * for how it fails: two of the three are toast-and-return, not
+			 * silent no-ops, but a toast the cashier can do nothing about is
+			 * not a way forward.
+			 *
+			 * The three, in `submit_dialog`'s own order:
+			 *   1. no usable form (no payment rows / no company / no profile)
+			 *      — the original `submit_is_inert`;
+			 *   2. offline with the chained-shift cap reached (>= 3 unsynced
+			 *      openings). Reachable by a supported flow: open offline,
+			 *      close offline, three times over. Only reconnecting clears
+			 *      it, which is precisely what a trapped cashier cannot do
+			 *      from inside a `persistent` dialog;
+			 *   3. offline with no usable opening snapshot — same shape,
+			 *      narrower trigger.
+			 * Conditions 2 and 3 are gated on `is_online` because
+			 * `submit_dialog` only evaluates them on the offline branch.
+			 *
+			 * NOT mirrored: the two validation toasts (negative denomination
+			 * quantity, invalid amount). Those describe input the cashier can
+			 * correct in this dialog, so Submit CAN succeed after a fix — they
+			 * are feedback, not a dead end.
+			 *
+			 * The `?? 0` on the outbox count mirrors `submit_dialog`'s own
+			 * fail-open behaviour when the store is unavailable: if the gate
+			 * would not fire, this must not claim it would.
 			 */
-			submit_is_inert() {
-				return (
-					!this.payments_methods.length || !this.company || !this.pos_profile
-				);
+			submit_can_never_succeed() {
+				if (
+					!this.payments_methods.length ||
+					!this.company ||
+					!this.pos_profile
+				) {
+					return true;
+				}
+				if (this.is_online) return false;
+				if ((this.outbox_store?.unsyncedOpeningCount ?? 0) >= 3) return true;
+				return !this.snapshot_usable;
 			},
 
 			/**
@@ -330,9 +376,10 @@ export default {
 			 * cashier out of here — whether because it is disabled
 			 * (`config_unavailable`, i.e. offline with a cold config cache,
 			 * precisely the case that follows an offline close) or because it
-			 * is enabled but would no-op (`submit_is_inert`, config fetched but
-			 * carrying no usable profile). Either way the cashier keeps a way
-			 * forward or a way out, always.
+			 * is enabled but guaranteed to refuse (`submit_can_never_succeed`
+			 * — no usable profile, the chained-shift cap, or no opening
+			 * snapshot). Either way the cashier keeps a way forward or a way
+			 * out, always.
 			 *
 			 * `is_loading` deliberately does NOT lift the gate: it is transient,
 			 * self-clearing in submit_dialog's `finally`, and entered only by
@@ -341,7 +388,9 @@ export default {
 			 */
 			can_exit_dialog() {
 				return (
-					!this.closingPending || this.config_unavailable || this.submit_is_inert
+					!this.closingPending ||
+					this.config_unavailable ||
+					this.submit_can_never_succeed
 				);
 			},
 
@@ -349,6 +398,56 @@ export default {
 	methods: {
 		close_opening_dialog() {
 			this.eventBus.emit("close_opening_dialog");
+		},
+		/** The opening snapshot Pos.vue persists, or null. Never throws. */
+		read_opening_snapshot() {
+			try {
+				const raw = localStorage.getItem("pospire.opening_shift_snapshot");
+				return raw ? JSON.parse(raw) : null;
+			} catch {
+				return null;
+			}
+		},
+		/**
+		 * Is the cached opening snapshot rich enough to synthesise the
+		 * `register_pos_data` payload from after an offline enqueue?
+		 *
+		 * ONE predicate, used by three call sites that used to disagree: the
+		 * pre-call offline guard checked only `pos_profile && company` while
+		 * the post-ack handler additionally required `pos_profile.name` and a
+		 * resolvable company name. A snapshot in between (say `pos_profile:
+		 * {}`) passed the guard, queued an opening entry, and only THEN
+		 * failed — leaving an orphan opening in the outbox on every attempt.
+		 * Now the strict form gates both, so nothing is queued that cannot be
+		 * registered, and `submit_can_never_succeed` can mirror the guard
+		 * exactly instead of approximately.
+		 *
+		 * The post-ack check still stands as well: on the online path the
+		 * pre-call guard is skipped entirely, and `call()` can still decide to
+		 * enqueue mid-flight (forceQueue, or a blip after the probe).
+		 */
+		snapshot_is_usable(snapshot) {
+			return !!(
+				snapshot &&
+				snapshot.pos_profile &&
+				typeof snapshot.pos_profile === "object" &&
+				snapshot.pos_profile.name &&
+				snapshot.company &&
+				(typeof snapshot.company === "object"
+					? snapshot.company.name
+					: snapshot.company)
+			);
+		},
+		/**
+		 * Re-read the two non-reactive inputs to `submit_can_never_succeed`.
+		 * Connectivity lives in a plain module and the snapshot in
+		 * localStorage, so neither notifies Vue on its own.
+		 */
+		refresh_submit_gate() {
+			this.is_online = connectivity.isOnline();
+			this.snapshot_usable = this.snapshot_is_usable(
+				this.read_opening_snapshot(),
+			);
 		},
 		/**
 		 * Single source of truth for populating the dialog from a
@@ -403,8 +502,23 @@ export default {
 				this.pos_profiles = this.pos_profiles_data
 					.filter((p) => p.company === this.company)
 					.map((p) => p.name);
+				const previous = this.pos_profile;
 				if (!this.pos_profile || !this.pos_profiles.includes(this.pos_profile)) {
 					this.pos_profile = this.pos_profiles[0] || "";
+				}
+				// The re-selection above changes the denomination grid out from
+				// under the cashier — possibly mid-count, possibly removing it
+				// entirely. `refresh_dialog_config` bails as soon as the profile
+				// changed (the watcher chain has already rebuilt everything), so
+				// this is the only place that can say why. Without it the grid
+				// just vanishes with no explanation at all.
+				if (previous && this.pos_profile !== previous) {
+					toast.warning(
+						this.pos_profile
+							? __("The POS Profile you had selected is no longer available. A different profile has been selected — re-check the opening amounts before submitting.")
+							: __("The POS Profile you had selected is no longer available and this company has no other profile. Contact your manager before opening a shift."),
+						{ autoClose: 8000 },
+					);
 				}
 			}
 
@@ -593,13 +707,7 @@ export default {
 			// snapshot was only read in the `offline` branch, the
 			// offline-ack handler downstream would dereference a null
 			// snapshot when running through an "online but enqueued" path.
-			let snapshot = null;
-			try {
-				const raw = localStorage.getItem("pospire.opening_shift_snapshot");
-				if (raw) snapshot = JSON.parse(raw);
-			} catch {
-				snapshot = null;
-			}
+			const snapshot = this.read_opening_snapshot();
 
 			const offline = !connectivity.isOnline();
 			if (offline) {
@@ -626,7 +734,7 @@ export default {
 					console.warn("[OpeningDialog] chained-shifts gate skipped", err);
 				}
 
-				if (!snapshot || !snapshot.pos_profile || !snapshot.company) {
+				if (!this.snapshot_is_usable(snapshot)) {
 					this.is_loading = false;
 					toast.warning(
 						__("Opening a shift offline needs a recent online session on this device. Reconnect and open one shift online first."),
@@ -660,16 +768,7 @@ export default {
 					// components expect (pos_profile.payments, company doc
 					// fields). Surface a clear error instead of crashing on
 					// `snapshot.pos_profile.name`.
-					const okSnapshot =
-						snapshot &&
-						snapshot.pos_profile &&
-						typeof snapshot.pos_profile === "object" &&
-						snapshot.pos_profile.name &&
-						snapshot.company &&
-						(typeof snapshot.company === "object"
-							? snapshot.company.name
-							: snapshot.company);
-					if (!okSnapshot) {
+					if (!this.snapshot_is_usable(snapshot)) {
 						this.is_loading = false;
 						toast.error(
 							__("Shift queued offline but the cached profile is missing. Reload while online to refresh the snapshot before opening another shift."),
@@ -712,6 +811,19 @@ export default {
 					this.eventBus.emit("set_company", r.company);
 					this.close_opening_dialog();
 				}
+			} catch (err) {
+				// A live rejection (permission error, validation failure, 500)
+				// used to have no handler at all: `finally` reset the spinner
+				// and the rejection escaped as an unhandled promise rejection,
+				// so the cashier saw the button un-press and nothing else. That
+				// is bad on its own; with the exits hidden during a queued
+				// close it is silent AND exit-less.
+				console.error("[OpeningDialog] create_opening_voucher failed", err);
+				toast.error(
+					(err && err.message) ||
+						__("Could not open the shift. Please try again."),
+					{ autoClose: 7000 },
+				);
 			} finally {
 				this.is_loading = false;
 			}
@@ -721,16 +833,36 @@ export default {
 		},
 	},
 	created: function () {
+		// Before the first paint: `can_exit_dialog` reads this, and defaulting
+		// to "online, snapshot fine" for a tick would flash the exits away on
+		// a dialog that is genuinely exit-worthy.
+		this.refresh_submit_gate();
 		this.$nextTick(function () {
 			this.get_opening_dialog_data();
 		});
 	},
 	mounted() {
+		// Dynamic, and tolerant of failure, for the same reason submit_dialog's
+		// own chained-shifts gate is: the store may not be initialised yet.
+		// `submit_can_never_succeed` fails open on a null store, matching what
+		// submit_dialog itself does when the import fails.
+		import("@/stores/outbox")
+			.then(({ useOutboxStore }) => {
+				this.outbox_store = useOutboxStore();
+			})
+			.catch((err) => {
+				console.warn("[OpeningDialog] outbox store unavailable", err);
+			});
 		// isOnline() needs THRESHOLD_ONLINE = 3 consecutive successful pings
 		// before it flips back, and any offline:false read throws without
 		// touching the network during that window. A dialog opened in the
 		// gap would otherwise stay on stale config for its whole lifetime.
 		this.unsubConnectivity = connectivity.onChange(() => {
+			// Unconditional, and before the early returns below: connectivity
+			// is one of the two inputs to the never-trap gate, and going
+			// offline (which takes neither branch below) is exactly when the
+			// exits need to come back.
+			this.refresh_submit_gate();
 			if (!connectivity.isOnline()) return;
 			if (!this.config_is_stale && !this.config_unavailable) return;
 			this.refresh_dialog_config();

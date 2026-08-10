@@ -25,6 +25,7 @@ import {
 } from "./outbox";
 import {
 	buildStoredShift,
+	countShiftsByStatus,
 	getShiftById,
 	getShiftByOpeningServerName,
 	listPendingClosingShifts,
@@ -47,13 +48,20 @@ export interface OpenedShiftInput {
 	cashierUser: string;
 	deviceId: string;
 	/**
-	 * Durable identity for a shift that has no server name yet (i.e. an
-	 * unsynced offline-opened shift) — its outbox `offline_id`
-	 * (`pos_offline_id` on the in-memory/provisional shift object).
+	 * Durable identity of this shift's row: its outbox `offline_id`
+	 * (`pos_offline_id` on an unsynced offline-opened shift) or, once that
+	 * has been cleared by the sync handler, the `pospire_lifecycle_id`
+	 * stamped back onto the shift object / snapshot.
+	 *
 	 * Without this, every reload of an unsynced offline shift would
 	 * `crypto.randomUUID()` a brand-new row, breaking `getOpenShift()`'s
-	 * "at most one open shift per device" invariant. Leave undefined for
-	 * the online path, where `openingServerName` is the dedupe key.
+	 * "at most one open shift per device" invariant.
+	 *
+	 * Callers SHOULD pass it on the online path too, not just the offline
+	 * one: a shift opened offline and synced mid-shift arrives here with a
+	 * server name AND a lifecycle id, and the two dedupe keys are checked in
+	 * that order (see `putShiftIfAbsent`). Supplying both means the row is
+	 * still found even if `opening_server_name` never made it onto the row.
 	 */
 	lifecycleId?: string;
 }
@@ -61,11 +69,17 @@ export interface OpenedShiftInput {
 /**
  * Record a newly opened shift and return its local lifecycle UUID.
  *
- * Idempotent on `openingServerName` when present (online path / synced
- * shift), otherwise on `lifecycleId` (unsynced offline path). Either way,
- * re-registering an existing shift returns its EXISTING row's id unchanged
- * — it never overwrites, since by the time of a re-registration Task 9's
- * closing flow may already have advanced this row past `open`.
+ * Idempotent on `openingServerName` FIRST and then on `lifecycleId` — both
+ * are tried, never one or the other. A shift opened offline and synced
+ * mid-shift carries both keys but its row may still be keyed only by the
+ * lifecycle id (the row learns its server name from
+ * `attachOpeningServerName`, which is best-effort and can be missed if the
+ * tab is closed the instant the opening syncs). Checking a single key was
+ * enough to miss that row and create a SECOND `open` one, which silently
+ * dropped the closing-pending lock. Either way, re-registering an existing
+ * shift returns its EXISTING row's id unchanged — it never overwrites,
+ * since by the time of a re-registration Task 9's closing flow may already
+ * have advanced this row past `open`.
  *
  * The row is encrypted (`buildStoredShift`) BEFORE the transactional
  * dedupe-then-put (`putShiftIfAbsent`), never inside it. `crypto.subtle`
@@ -119,6 +133,45 @@ export async function findShiftByServerName(
 ): Promise<ShiftRow | undefined> {
 	if (!serverName) return undefined;
 	return getShiftByOpeningServerName(serverName);
+}
+
+/**
+ * Give an offline-opened shift its durable server identity, once its opening
+ * entry has synced.
+ *
+ * WHY THIS EXISTS: an offline-opened shift's row is created with
+ * `opening_server_name: null` and keyed only by its outbox id. When the
+ * opening syncs mid-shift, the sync handler clears `pos_offline_id` and
+ * `pospire_pending_sync` in memory and in the localStorage snapshot — so on
+ * the NEXT reload the shift presents itself as an ordinary server-named
+ * shift. Before this function existed, nothing ever wrote
+ * `opening_server_name` onto the row, so that reload's dedupe found nothing,
+ * created a SECOND `open` row, and the first row's `closed_pending_sync`
+ * lock silently stopped applying to the shift the cashier was actually on.
+ *
+ * The row's CURRENT status is preserved deliberately: by the time an opening
+ * syncs, the cashier may already have queued the close, and resetting a
+ * `closed_pending_sync` row to `open` here would unlock selling on a shift
+ * that is on its way out.
+ *
+ * Returns whether the row now carries the name. Refuses (returns false) when
+ * a DIFFERENT row already claims that server name rather than creating a
+ * duplicate claim — `getShiftByOpeningServerName` returns the first match,
+ * so two rows sharing a name would make the lookup non-deterministic.
+ */
+export async function attachOpeningServerName(
+	lifecycleId: string,
+	openingServerName: string,
+): Promise<boolean> {
+	if (!lifecycleId || !openingServerName) return false;
+	const claimed = await findShiftByServerName(openingServerName);
+	if (claimed) return claimed.offline_id === lifecycleId;
+	const row = await getShiftById(lifecycleId);
+	if (!row) return false;
+	await updateShiftStatus(lifecycleId, row.status, {
+		opening_server_name: openingServerName,
+	});
+	return true;
 }
 
 /** Re-export so callers never reach past this module into the repo. */
@@ -210,17 +263,27 @@ export async function isSellingBlocked(
  *
  * The outbox is the durable command log and therefore the reconciliation
  * source; `db.shifts` is what the running app reads. Any shift whose queued
- * closing has already left the unsynced set is RELEASED here — it landed (or
- * was voided) while the app was closed.
+ * closing has already left the unsynced set stops being closing-pending here
+ * — it landed, or was voided, while the app was closed. Those two outcomes
+ * are NOT the same and are reported separately below.
  *
- * Returns both halves. `released` is not bookkeeping: the caller must
+ * Returns three buckets. `released` is not bookkeeping: the caller must
  * invalidate any cached opening snapshot naming a released shift, or an
  * offline boot re-applies that snapshot and rings sales against a shift that
  * is closed server-side.
+ *
+ * `reopened` is the OPPOSITE case and must NOT be treated like `released`:
+ * a VOIDED closing means the shift was never closed at all — server-side it
+ * is still Open — so its snapshot has to survive and the row has to become
+ * usable again. Voiding a queued closing is an offered recovery action in
+ * the reconciliation workspace, and marking the shift terminal on a void
+ * turned that recovery into a trap: the cashier landed in the opening dialog
+ * and opened a SECOND shift against a first one that was never closed.
  */
 export async function reconcilePendingClosuresFromOutbox(): Promise<{
 	stillPending: string[];
 	released: string[];
+	reopened: string[];
 }> {
 	const closingStatusById = new Map(
 		(await listClosingEntryStatuses()).map((row) => [
@@ -231,6 +294,7 @@ export async function reconcilePendingClosuresFromOutbox(): Promise<{
 
 	const stillPending: string[] = [];
 	const released: string[] = [];
+	const reopened: string[] = [];
 	for (const row of await listPendingClosingShifts()) {
 		const pendingId = row.pending_closing_offline_id;
 		if (!pendingId) continue;
@@ -239,16 +303,36 @@ export async function reconcilePendingClosuresFromOutbox(): Promise<{
 			stillPending.push(row.offline_id);
 			continue;
 		}
+		if (closingStatus === "voided") {
+			// The close was withdrawn, so this shift is genuinely still open —
+			// drop the close timestamp along with the pending link.
+			//
+			// It only goes back to `open` when nothing else is: chained offline
+			// shifts are supported, so the cashier may already have opened a
+			// successor while this closing sat in the queue. Two `open` rows
+			// would break `getOpenShift()`'s "at most one open shift per device"
+			// invariant, so the older one lands in `needs_review` instead —
+			// honest (a human really does have two open shifts to sort out),
+			// non-terminal, and NOT `closed_pending_sync`, so it never blocks
+			// selling on the shift the cashier is actually using.
+			const anotherIsOpen = (await countShiftsByStatus("open")) > 0;
+			await updateShiftStatus(
+				row.offline_id,
+				anotherIsOpen ? "needs_review" : "open",
+				{ pending_closing_offline_id: null, closed_at: null },
+			);
+			reopened.push(row.offline_id);
+			continue;
+		}
+		// Synced, or an absent row (vacuumed tombstone) that tells us nothing
+		// either way — treated as landed, which is the safe direction: it stops
+		// the shift being sellable.
 		await updateShiftStatus(row.offline_id, "synced", {
 			pending_closing_offline_id: null,
-			// A voided closing means the shift was never closed at all, so it
-			// must not keep carrying a close timestamp. An absent row (vacuumed
-			// tombstone) tells us nothing either way, so leave `closed_at` be.
-			...(closingStatus === "voided" ? { closed_at: null } : {}),
 		});
 		released.push(row.offline_id);
 	}
-	return { stillPending, released };
+	return { stillPending, released, reopened };
 }
 
 // ---------------------------------------------------------------------------
@@ -450,12 +534,29 @@ export async function sumQueuedPaymentsByMop(input: {
 		if (row.status === "voided") continue;
 		if (seen.has(row.offline_id)) continue;
 
-		if (input.shiftOfflineId) {
-			if (row.shift_offline_id !== input.shiftOfflineId) continue;
-		} else {
-			if (row.shift_offline_id) continue;
-			if (readInnerShiftName(row.payload) !== input.openingServerName) continue;
-		}
+		// Both anchors are tried, never one or the other. A shift opened
+		// offline and synced MID-SHIFT has invoices on both sides of the
+		// sync: the earlier ones carry `shift_offline_id`, the later ones
+		// carry only the server name on the inner doc. The previous
+		// if/else picked the server-name branch as soon as
+		// `shiftOfflineId` was absent (which is exactly what the synced
+		// shift looks like, since the sync handler clears
+		// `pos_offline_id`) and skipped every row carrying a
+		// `shift_offline_id` — silently dropping the entire pre-sync half
+		// of the shift's takings from the expected amount.
+		//
+		// Neither clause can widen into another shift's money: the first
+		// demands an exact id match, and the second is gated on a non-null
+		// `openingServerName` so the `null === null` trap that the guard
+		// at the top of this function exists to prevent stays closed.
+		const matchesOfflineId =
+			!!input.shiftOfflineId &&
+			row.shift_offline_id === input.shiftOfflineId;
+		const matchesServerName =
+			!row.shift_offline_id &&
+			!!input.openingServerName &&
+			readInnerShiftName(row.payload) === input.openingServerName;
+		if (!matchesOfflineId && !matchesServerName) continue;
 
 		seen.add(row.offline_id);
 

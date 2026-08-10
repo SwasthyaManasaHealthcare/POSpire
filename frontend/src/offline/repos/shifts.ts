@@ -251,10 +251,17 @@ export async function putShift(row: ShiftRow): Promise<void> {
 export { toStored as buildStoredShift };
 
 /**
- * Atomically register a PRE-ENCRYPTED stored row, deduping on either the
- * server name or a caller-supplied durable id (`lifecycleId`) — without
+ * Atomically register a PRE-ENCRYPTED stored row, deduping on the server
+ * name AND then on a caller-supplied durable id (`lifecycleId`) — without
  * decrypting anything. `stored` must already be the output of
  * `buildStoredShift`, produced OUTSIDE any transaction.
+ *
+ * BOTH keys are tried, in that order, rather than one or the other. A shift
+ * opened offline and synced mid-shift presents both: a server name (which
+ * its row may or may not have learned yet — `attachOpeningServerName` is
+ * best-effort) and its original outbox id. Checking only the server name
+ * missed that row and inserted a duplicate `open` one, which quietly
+ * detached the shift from its own `closed_pending_sync` state.
  *
  * Both dedupe checks compare plaintext scalars already present on
  * `StoredShiftRow` (`opening_server_name`, the `offline_id` primary key),
@@ -274,7 +281,8 @@ export async function putShiftIfAbsent(
 				.filter((row) => row.opening_server_name === dedupe.openingServerName)
 				.first();
 			if (existing) return existing.offline_id;
-		} else if (dedupe.lifecycleId) {
+		}
+		if (dedupe.lifecycleId) {
 			const existing = await db.shifts.get(dedupe.lifecycleId);
 			if (existing) return existing.offline_id;
 		}

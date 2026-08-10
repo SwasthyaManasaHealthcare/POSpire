@@ -2510,8 +2510,10 @@ export default {
 			// H4: shift is closing-pending — refuse Pay so a new invoice
 			// can't slip in under a closed shift. The cashier should open a
 			// new shift (or void the closing in reconciliation if they
-			// changed their mind). Durable check, not the in-session flag:
-			// after a reload no event has fired.
+			// changed their mind — reconcilePendingClosuresFromOutbox returns
+			// a voided shift to `open` and keeps its snapshot, so that really
+			// is a route back and not just a suggestion). Durable check, not
+			// the in-session flag: after a reload no event has fired.
 			if (await this.isShiftLocked()) {
 				toast.error(
 					__(
