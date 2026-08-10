@@ -294,13 +294,59 @@ export default {
 		 *
 		 * Assigns `companies` (does NOT push) so re-running this on refresh
 		 * doesn't duplicate entries.
+		 *
+		 * Selection is STICKY: an already-valid `company`/`pos_profile` is
+		 * kept rather than forced back to index 0. In a multi-company setup
+		 * where the cashier's company isn't first in the list, unconditionally
+		 * reassigning `companies[0]` on a steady-state reconnect fired the
+		 * `company` -> `pos_profile` watcher chain, which rebuilds
+		 * `denomination_rows` with `quantity: 0` — silently wiping an
+		 * in-progress cash count out from under the cashier mid-count. Only
+		 * fall back to the first entry when the current pick no longer
+		 * resolves (cold start, or the pick vanished from the refreshed list).
 		 */
 		applyDialogData(r) {
 			this.companies = (r.companies || []).map((element) => element.name);
-			this.company = this.companies[0];
+			const companySticky = Boolean(this.company) && this.companies.includes(this.company);
+			if (!companySticky) {
+				this.company = this.companies[0];
+			}
+
 			this.pos_profiles_data = r.pos_profiles_data || [];
 			this.payments_method_data = r.payments_method || [];
 			this.denomination_config = r.denomination_config || {};
+
+			// The `company` watcher below only re-derives `pos_profiles` /
+			// `pos_profile` when `company` itself CHANGES value, so it does
+			// NOT fire on a sticky company. If `pos_profiles_data` changed
+			// under a sticky company (e.g. an admin disabled the cashier's
+			// selected profile while this device was offline), a stale
+			// `pos_profile` would be left pointing at nothing —
+			// `denomination_config[this.pos_profile]` resolves to `undefined`
+			// and the grid silently disappears with no toast. Re-validate
+			// explicitly here, mirroring the watcher's own fallback (keep the
+			// current pick if it's still valid, else take `pos_profiles[0]`).
+			// Only needed for the sticky-company branch: when company DID
+			// change, the watcher already covers this correctly on its own —
+			// adding this unconditionally would just duplicate that work.
+			if (companySticky) {
+				this.pos_profiles = this.pos_profiles_data
+					.filter((p) => p.company === this.company)
+					.map((p) => p.name);
+				if (!this.pos_profile || !this.pos_profiles.includes(this.pos_profile)) {
+					this.pos_profile = this.pos_profiles[0] || "";
+				}
+			}
+
+			// Tell the caller whether `pos_profile` was (re)validated
+			// SYNCHRONOUSLY above, as opposed to being left for the `company`
+			// watcher to resolve on Vue's next microtask flush. Callers that
+			// need to know the FINAL `pos_profile` right after calling this
+			// method (see `refresh_dialog_config`) can only trust a
+			// before/after comparison when `companySticky` is true — a
+			// non-sticky company change hasn't actually updated `pos_profile`
+			// yet at this point, it's merely been scheduled to.
+			return { companySticky };
 		},
 		async get_opening_dialog_data() {
 			// Durable read-cache. The registry marks this method offline:true
@@ -351,19 +397,33 @@ export default {
 			if (!fresh) return;
 
 			this.config_unavailable = false;
-			// `previousProfile` lets us tell whether `applyDialogData` just
-			// drove the `company` → `pos_profile` watcher chain from a blank
-			// selection (cold-boot-offline reconnect): in that case the
-			// `pos_profile` watcher below already built payments_methods AND
-			// denomination_rows from scratch, so re-deriving them again here
-			// would both duplicate work and double the misconfiguration
-			// toast. When the profile selection is UNCHANGED, neither
-			// watcher fires (Vue only calls a watcher when the value
-			// actually changes), so payments_methods/denomination_rows are
-			// left exactly as the cashier last saw them — which is what
-			// preserves typed quantities across a reconnect.
+			// `previousProfile` lets us tell whether the profile selection
+			// actually changed vs. staying exactly as the cashier left it —
+			// only in the latter case do neither the `company` nor
+			// `pos_profile` watcher fire (Vue only calls a watcher when the
+			// value actually changes), leaving payments_methods /
+			// denomination_rows untouched, which is what preserves typed
+			// quantities across a reconnect. When the profile DID change,
+			// the watcher chain already rebuilt everything from scratch (a
+			// cold start has nothing to preserve; a vanished profile has
+			// nothing valid left to preserve), so re-deriving it again below
+			// would just duplicate that work and double any toast.
+			//
+			// This before/after comparison is only trustworthy when
+			// `companySticky` is true. `applyDialogData` settles
+			// `pos_profile` SYNCHRONOUSLY in that branch (see its comment),
+			// so reading `this.pos_profile` immediately afterward reflects
+			// the real outcome. When the company was NOT sticky,
+			// `pos_profile` is left for the async `company` watcher to
+			// resolve on Vue's next microtask flush (`flush: 'pre'`, the
+			// default) — reading it synchronously here would still show the
+			// OLD value, making the comparison a false negative. Bail out
+			// via `companySticky` instead of trying to read a value that
+			// hasn't been written yet. (If any watcher on this component is
+			// ever declared `flush: 'sync'`, re-check this reasoning.)
 			const previousProfile = this.pos_profile;
-			this.applyDialogData(fresh);
+			const { companySticky } = this.applyDialogData(fresh);
+			if (!companySticky) return;
 			if (this.pos_profile !== previousProfile) return;
 
 			// Re-derive the grid for the selected profile WITHOUT resetting
