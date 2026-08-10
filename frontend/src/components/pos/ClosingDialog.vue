@@ -12,6 +12,25 @@
 
 			<v-divider></v-divider>
 			<v-card-text class="px-6 py-4 overflow-y-auto" style="max-height:65vh;">
+				<v-alert
+					v-if="dialog_data.pospire_offline_stub"
+					type="warning"
+					variant="tonal"
+					density="compact"
+					class="mb-3"
+				>
+					{{ __("Expected amounts are provisional — totals could not be confirmed with the server. Sales made earlier while online are not included.") }}
+				</v-alert>
+				<v-alert
+					v-if="dialog_data.pospire_uncertain_count"
+					type="info"
+					variant="tonal"
+					density="compact"
+					class="mb-3"
+				>
+					{{ __("Some queued invoices could not be confirmed with the server. Affected invoices:") }}
+					{{ dialog_data.pospire_uncertain_count }}
+				</v-alert>
 				<v-data-table
 					:headers="headers"
 					:items="dialog_data.payment_reconciliation"

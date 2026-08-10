@@ -100,10 +100,18 @@ def get_opening_dialog_data() -> dict:
 		pos_profiles_list.append(i.name)
 
 	payment_method_table = "POS Payment Method"
+	# Explicit field list, not fields=["*"]. This response is durable-cached
+	# client-side (unencrypted Dexie `metadata` table, see DURABLE_KEYS in
+	# frontend/src/offline/read-cache.ts) on the premise that it carries no
+	# PII. "*" on a child table also returns `owner`/`modified_by` (staff
+	# email addresses) and would silently re-introduce PII the moment this
+	# doctype gains a new field. Only "parent" (used below AND by both
+	# OpeningDialog consumers to match a profile) and "mode_of_payment"
+	# (the only other field either consumer reads) are needed.
 	data["payments_method"] = frappe.get_list(
 		payment_method_table,
 		filters={"parent": ["in", pos_profiles_list]},
-		fields=["*"],
+		fields=["parent", "mode_of_payment"],
 		limit_page_length=0,
 		order_by="parent",
 		ignore_permissions=True,
@@ -116,30 +124,36 @@ def get_opening_dialog_data() -> dict:
 	for profile in data["pos_profiles_data"]:
 		profile_doc = frappe.get_cached_doc("POS Profile", profile.name)
 
-		if profile_doc.get("custom_enable_cash_denominations"):
-			cash_mode = profile_doc.get("posa_cash_mode_of_payment") or "Cash"
-			denominations = []
-			for d in profile_doc.get("custom_denominations", []):
-				denominations.append(
-					{
-						"denomination": d.denomination,
-						"denomination_name": frappe.get_cached_value(
-							"POS Denomination",
-							d.denomination,
-							"denomination_name",
-						),
-						"denomination_value": d.denomination_value,
-						"currency": d.currency,
-						"display_order": d.display_order,
-					}
-				)
-			denominations.sort(key=lambda x: x.get("display_order") or 0)
-			if denominations:
-				data["denomination_config"][profile.name] = {
-					"enabled": True,
-					"cash_mode": cash_mode,
-					"denominations": denominations,
+		if not profile_doc.get("custom_enable_cash_denominations"):
+			continue
+
+		denominations = []
+		for d in profile_doc.get("custom_denominations", []):
+			denominations.append(
+				{
+					"denomination": d.denomination,
+					"denomination_name": frappe.get_cached_value(
+						"POS Denomination",
+						d.denomination,
+						"denomination_name",
+					),
+					"denomination_value": d.denomination_value,
+					"currency": d.currency,
+					"display_order": d.display_order,
 				}
+			)
+		denominations.sort(key=lambda x: x.get("display_order") or 0)
+
+		# Emit the policy even when `denominations` is empty. "Enabled but
+		# unconfigured" is a misconfiguration the cashier should see, not a
+		# reason to silently render the dialog as if denominations were off.
+		# Collapsing the two states is what forced the client to guess.
+		data["denomination_config"][profile.name] = {
+			"enabled": True,
+			"cash_mode": profile_doc.get("posa_cash_mode_of_payment") or "Cash",
+			"denominations": denominations,
+			"config_version": str(profile_doc.modified),
+		}
 
 	return data
 

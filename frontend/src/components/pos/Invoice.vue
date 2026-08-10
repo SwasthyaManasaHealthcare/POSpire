@@ -1183,6 +1183,11 @@ export default {
 			// show_payment so new sales don't slip into a shift whose
 			// strict-closure parent_offline_ids list was already snapshotted.
 			shiftClosingPending: false,
+			// Lifecycle UUID of the shift `shiftClosingPending` refers to.
+			// Without it a `shift_closing_complete` for shift A would clear a
+			// lock that shift B put up — chained offline shifts are supported,
+			// so the two can be in flight at the same time.
+			closingPendingShiftId: null,
 			discount_amount: 0,
 			additional_discount_percentage: 0,
 			total_tax: 0,
@@ -2505,8 +2510,11 @@ export default {
 			// H4: shift is closing-pending — refuse Pay so a new invoice
 			// can't slip in under a closed shift. The cashier should open a
 			// new shift (or void the closing in reconciliation if they
-			// changed their mind).
-			if (this.shiftClosingPending) {
+			// changed their mind — reconcilePendingClosuresFromOutbox returns
+			// a voided shift to `open` and keeps its snapshot, so that really
+			// is a route back and not just a suggestion). Durable check, not
+			// the in-session flag: after a reload no event has fired.
+			if (await this.isShiftLocked()) {
 				toast.error(
 					__(
 						"This shift is closing. Open a new shift before submitting another invoice.",
@@ -4225,6 +4233,42 @@ export default {
 				this.delivery_charges_rate = 0;
 			}
 		},
+		/**
+		 * Durable lock check.
+		 *
+		 * `shiftClosingPending` is only the in-session signal: after a reload
+		 * no `shift_closing_pending` event has fired in this session, and the
+		 * cart must not accept items on a shift whose close is already queued.
+		 * So fall through to the shift row, keyed on the ACTIVE shift's
+		 * lifecycle UUID — isSellingBlocked() returns true only when that shift
+		 * is itself closing, never because some other shift is.
+		 *
+		 * The fast path must honour `closingPendingShiftId` for the same
+		 * reason. Relying on `register_pos_data` to clear the flag is not
+		 * enough: a shift change can arrive via `register_pos_profile` alone
+		 * (applyOpeningSnapshot(r) when the live response differs from the
+		 * cached snapshot), which would otherwise strand shift A's lock on
+		 * shift B. An unattributed lock (no id in the payload) still blocks —
+		 * we can't prove it belongs to another shift.
+		 */
+		async isShiftLocked() {
+			const activeId = this.pos_opening_shift?.pospire_lifecycle_id;
+			if (
+				this.shiftClosingPending &&
+				(!this.closingPendingShiftId || this.closingPendingShiftId === activeId)
+			) {
+				return true;
+			}
+			if (!activeId) return false;
+			try {
+				const { isSellingBlocked } = await import("@/offline/shift-lifecycle");
+				return await isSellingBlocked(activeId);
+			} catch {
+				// Fail open — never block a cashier from selling because of a
+				// storage error.
+				return false;
+			}
+		},
 	},
 
 	mounted() {
@@ -4238,7 +4282,9 @@ export default {
 				this.pos_profile = data.pos_profile;
 				this.customer = data.pos_profile.customer;
 				this.pos_opening_shift = data.pos_opening_shift;
-				this.shiftClosingPending = !!data.pos_opening_shift?.pospire_closing_pending;
+				// Closing-pending is NOT read off the snapshot any more — it
+				// lives on the durable shift row and is resolved lazily by
+				// isShiftLocked(), via this shift's `pospire_lifecycle_id`.
 				this.stock_settings = data.stock_settings;
 				this.float_precision = window.sys_defaults?.float_precision || 2;
 				this.currency_precision = window.sys_defaults?.currency_precision || 2;
@@ -4255,8 +4301,8 @@ export default {
 				this.update_delivery_charges();
 			}
 		});
-		this.eventBus.on("add_item", (item) => {
-			if (this.shiftClosingPending) {
+		this.eventBus.on("add_item", async (item) => {
+			if (await this.isShiftLocked()) {
 				toast.warning(
 					__(
 						"This shift is closing — its closing entry is queued. Open a new shift before ringing up another sale.",
@@ -4268,15 +4314,35 @@ export default {
 			this.add_item(item);
 		});
 
-		// H4: Pos.vue emits this when the offline closing is queued. The
-		// shift is locked locally — refuse new items and refuse Pay until
-		// either the closing syncs (Pos.vue's `shift_closing_complete`
-		// fires + redirects to OpeningDialog) or the cashier voids the
-		// closing in the reconciliation workspace.
-		this.eventBus.on("shift_closing_pending", () => {
+		// H4: Pos.vue emits this when the offline closing is queued (and
+		// again on reload, from the durable shift row). The lock applies only
+		// while the shift the cashier is actively on is itself closing — a
+		// closing-pending shift A must not lock selling on a freshly opened
+		// shift B, because chained offline shifts are supported and blocking
+		// them would halt sales during exactly the outage offline mode exists
+		// for. These three listeners are the fast in-session signal only;
+		// isShiftLocked() below is the durable answer.
+		this.eventBus.on("shift_closing_pending", (payload) => {
+			this.closingPendingShiftId = payload?.shift_lifecycle_id ?? null;
 			this.shiftClosingPending = true;
 		});
-		this.eventBus.on("shift_closing_complete", () => {
+		this.eventBus.on("shift_closing_complete", (payload) => {
+			if (
+				payload?.shift_lifecycle_id &&
+				this.closingPendingShiftId &&
+				payload.shift_lifecycle_id !== this.closingPendingShiftId
+			) {
+				return; // a different shift's closing resolved — stay locked
+			}
+			this.closingPendingShiftId = null;
+			this.shiftClosingPending = false;
+		});
+		this.eventBus.on("register_pos_data", () => {
+			// A new shift was just opened, so whatever was closing is no longer
+			// the shift the cashier is on. Clearing the in-session flag hands
+			// the decision back to isShiftLocked(), which reads the NEW shift's
+			// row and correctly allows selling on it.
+			this.closingPendingShiftId = null;
 			this.shiftClosingPending = false;
 		});
 		this.eventBus.on("update_customer", (customer) => {

@@ -93,14 +93,26 @@ class POSClosingShift(Document):
 		# If denominations not used, don't override manual closing amount
 		if not self.denomination_details:
 			return
-		total = 0
 
+		# The cash mode of payment is profile-configurable. Matching the literal
+		# "Cash" silently wrote the denomination total onto nothing whenever a
+		# site renamed it (e.g. "Cash - PL").
+		cash_mode = (
+			frappe.get_cached_value(
+				"POS Profile",
+				self.pos_profile,
+				"posa_cash_mode_of_payment",
+			)
+			or "Cash"
+		)
+
+		total = 0
 		for d in self.denomination_details:
 			d.closing_amount = (d.denomination_value or 0) * (d.closing_quantity or 0)
 			total += d.closing_amount
 
 		for p in self.payment_reconciliation:
-			if p.mode_of_payment == "Cash":
+			if p.mode_of_payment == cash_mode:
 				p.closing_amount = total
 
 	def on_submit(self):

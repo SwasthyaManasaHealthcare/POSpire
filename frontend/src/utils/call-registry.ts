@@ -140,6 +140,9 @@ function todayIso(): string {
 
 const HOUR = 60 * 60 * 1000;
 
+/** Stable cache key for `get_opening_dialog_data`. Must match DURABLE_KEYS. */
+export const OPENING_DIALOG_CACHE_KEY = "offline.opening_dialog_data";
+
 /**
  * The canonical registry. Names are the exact server method paths.
  *
@@ -189,6 +192,16 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		cacheTTLMs: 24 * HOUR,
 	},
+	// Opening-dialog reference data. Durable-cached (see DURABLE_KEYS in
+	// offline/read-cache.ts) so it survives a reload — the cashier often
+	// reaches this dialog only after an offline close, on a fresh page load.
+	// Both call sites MUST pass OPENING_DIALOG_CACHE_KEY as opts.cacheKey; the
+	// default arg-hashed key is neither stable nor allowlistable.
+	"pospire.pospire.api.posapp.get_opening_dialog_data": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 
 	// -----------------------------------------------------------------------
 	// Reads — LIVE ONLY (P-4: server stays authoritative)
@@ -203,7 +216,6 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "read",
 		offline: false,
 	},
-	"pospire.pospire.api.posapp.get_opening_dialog_data": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.check_opening_shift": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_draft_invoices": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.search_orders": { intent: "read", offline: false },
@@ -619,6 +631,25 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				// closure. They never get persisted onto the doc.
 				invoice_offline_ids: invoiceOfflineIds,
 			};
+
+			// Anchor the queued closing to its shift.
+			//
+			// Two client-side consumers read this off the queued row:
+			//   - Pos.vue `matchesShift()` (the duplicate-close guard)
+			//   - outbox.ts `readInnerShiftName()` (the strict-closure gate)
+			// Without it, both silently fail for online-opened shifts and the cashier
+			// can enqueue a second closing that the server later rejects.
+			//
+			// Stamp ONLY when the shift was opened online. For an offline-opened shift
+			// `cs.pos_opening_shift` holds the provisional "OFFLINE-OPN-..." name, which
+			// is not a server link and must never be written as one — that case is
+			// already anchored by `shift_offline_id` on the outbox row.
+			//
+			// The server overwrites this field at offline.py:1877 regardless, so
+			// stamping it changes nothing server-side.
+			if (!openingOfflineId && openingServerName) {
+				doc.pos_opening_shift = openingServerName;
+			}
 
 			// Parents the scheduler waits on before sending: the opening shift
 			// (must be synced first so its name resolves) and every invoice in

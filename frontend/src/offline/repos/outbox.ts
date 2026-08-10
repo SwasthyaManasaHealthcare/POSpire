@@ -135,6 +135,66 @@ export async function listByType<T = unknown>(
 	return Promise.all(stored.map((s) => fromStored<T>(s)));
 }
 
+/**
+ * Plaintext `{ offline_id, status }` for every queued closing entry, WITHOUT
+ * decrypting a single payload.
+ *
+ * `type` is indexed and `status` is a plaintext scalar on `StoredOutboxEntry`,
+ * so the sync-state of a closing can be answered without `fromStored`. The
+ * alternative — five `listByStatus()` sweeps — decrypts EVERY unsynced row in
+ * the outbox (queued invoices, payments, customers) just to read two plaintext
+ * columns, and one undecryptable row aborts the lot. Closing reconciliation
+ * runs on the boot path and swallows its own errors, so an abort there leaves
+ * the app selling against a shift that is already closing.
+ */
+export async function listClosingEntryStatuses(): Promise<
+	Array<Pick<StoredOutboxEntry, "offline_id" | "status">>
+> {
+	const stored = await db.outbox
+		.where("type")
+		.equals("closing_entry")
+		.toArray();
+	return stored.map((row) => ({
+		offline_id: row.offline_id,
+		status: row.status,
+	}));
+}
+
+/**
+ * Invoice rows across the given statuses, decrypted ROW-BY-ROW rather than
+ * with a single `Promise.all`.
+ *
+ * `listByStatus`'s `Promise.all(stored.map(fromStored))` rejects the ENTIRE
+ * bucket the instant any one row fails to decrypt (stale key, corrupted
+ * envelope). The shift-close aggregation (`sumQueuedPaymentsByMop` in
+ * `shift-lifecycle.ts`) scans six status buckets and sums every invoice it
+ * can read — if it were built on `listByStatus`, a single poison row in ANY
+ * bucket would throw, the caller's catch would swallow it, and the cashier's
+ * entire expected-amount figure would silently come back as zero across every
+ * mode of payment, not just the corrupt invoice's contribution. Skipping the
+ * bad row and continuing is strictly safer for a reconciliation figure than
+ * an all-or-nothing failure. `corruptCount` is returned so a caller can log
+ * or surface it; single-index scan by `type` (fewer types than statuses)
+ * keeps this cheap.
+ */
+export async function listInvoiceRowsAcrossStatuses(
+	statuses: OutboxStatus[],
+): Promise<{ rows: OutboxEntry<unknown>[]; corruptCount: number }> {
+	const statusSet = new Set(statuses);
+	const stored = await db.outbox.where("type").equals("invoice").toArray();
+	const rows: OutboxEntry<unknown>[] = [];
+	let corruptCount = 0;
+	for (const s of stored) {
+		if (!statusSet.has(s.status)) continue;
+		try {
+			rows.push(await fromStored(s));
+		} catch {
+			corruptCount += 1;
+		}
+	}
+	return { rows, corruptCount };
+}
+
 export async function listByShift<T = unknown>(
 	shiftOfflineId: string,
 ): Promise<OutboxEntry<T>[]> {

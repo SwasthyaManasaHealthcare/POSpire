@@ -20,7 +20,7 @@
  * table.
  */
 
-import { assertWritable, db } from "../db";
+import { assertWritable, db, runInTransaction } from "../db";
 import { decrypt, encrypt, getActiveKey } from "../crypto";
 import type {
 	EncryptedEnvelope,
@@ -84,6 +84,7 @@ async function toStored(row: ShiftRow): Promise<StoredShiftRow> {
 		variance_at_sync: row.variance_at_sync,
 		closed_at: row.closed_at,
 		closing_server_name: row.closing_server_name,
+		pending_closing_offline_id: row.pending_closing_offline_id,
 		status: row.status,
 		manager_approval_required: row.manager_approval_required,
 		opening_cash_envelope: opening,
@@ -133,6 +134,7 @@ async function fromStored(stored: StoredShiftRow): Promise<ShiftRow> {
 		closing_notes: notes,
 		closed_at: stored.closed_at,
 		closing_server_name: stored.closing_server_name,
+		pending_closing_offline_id: stored.pending_closing_offline_id,
 		status: stored.status,
 		manager_approval_required: stored.manager_approval_required,
 	};
@@ -177,6 +179,54 @@ export async function listAllShifts(): Promise<ShiftRow[]> {
 	return Promise.all(stored.map(fromStored));
 }
 
+/**
+ * Look a shift up by its server doc name without decrypting the whole
+ * table. `opening_server_name` is a plaintext scalar on `StoredShiftRow`
+ * but is NOT part of the v1 Dexie index (`"offline_id, device_id,
+ * status"`), so this is a linear `.filter()`, not a `.where()` — still far
+ * cheaper than `listAllShifts()`, which does `Promise.all(rows.map(fromStored))`
+ * and both decrypts every row in the table on every call AND throws the
+ * whole lookup if any unrelated row is missing its opening-cash envelope
+ * (corruption). Here `fromStored` only ever runs on the single matched row.
+ */
+export async function getShiftByOpeningServerName(
+	serverName: string,
+): Promise<ShiftRow | undefined> {
+	const stored = await db.shifts
+		.filter((row) => row.opening_server_name === serverName)
+		.first();
+	if (!stored) return undefined;
+	return fromStored(stored);
+}
+
+/**
+ * Plaintext scalars of every shift currently waiting on a queued closing.
+ *
+ * `pending_closing_offline_id`, `offline_id` and `status` are all plaintext
+ * on `StoredShiftRow`, so this deliberately skips `fromStored` — same
+ * reasoning as `getShiftByOpeningServerName` above: `listAllShifts()`
+ * decrypts every row in the table and throws the WHOLE lookup if any single
+ * unrelated row is corrupt or missing its opening-cash envelope. The two
+ * callers of this (startup reconciliation and closing-sync resolution) fail
+ * silently by design — a throw there would leave the app selling against a
+ * shift that is already closing, which is the exact bug this state exists
+ * to prevent — so they must not depend on the health of unrelated rows.
+ */
+export async function listPendingClosingShifts(): Promise<
+	Array<
+		Pick<StoredShiftRow, "offline_id" | "pending_closing_offline_id" | "status">
+	>
+> {
+	const stored = await db.shifts
+		.filter((row) => !!row.pending_closing_offline_id)
+		.toArray();
+	return stored.map((row) => ({
+		offline_id: row.offline_id,
+		pending_closing_offline_id: row.pending_closing_offline_id,
+		status: row.status,
+	}));
+}
+
 // ---------------------------------------------------------------------------
 // Write helpers
 // ---------------------------------------------------------------------------
@@ -185,6 +235,60 @@ export async function putShift(row: ShiftRow): Promise<void> {
 	assertWritable();
 	const stored = await toStored(row);
 	await db.shifts.put(stored);
+}
+
+/**
+ * Encrypt a candidate `ShiftRow` into its on-disk shape WITHOUT persisting
+ * it. Exported directly (not via `_internal`, which is documented as
+ * test/tooling-only) because `registerOpenedShift` (shift-lifecycle.ts)
+ * needs to encrypt a row BEFORE opening a Dexie transaction: `toStored`
+ * awaits `crypto.subtle`, a native, non-Dexie promise, and IndexedDB
+ * auto-commits a transaction the instant one of those is awaited inside
+ * its scope (PrematureCommitError — reproduced against this exact function
+ * in review). Encrypting up front and only conditionally `put`-ing inside
+ * `putShiftIfAbsent` keeps the transaction body 100% Dexie-native.
+ */
+export { toStored as buildStoredShift };
+
+/**
+ * Atomically register a PRE-ENCRYPTED stored row, deduping on the server
+ * name AND then on a caller-supplied durable id (`lifecycleId`) — without
+ * decrypting anything. `stored` must already be the output of
+ * `buildStoredShift`, produced OUTSIDE any transaction.
+ *
+ * BOTH keys are tried, in that order, rather than one or the other. A shift
+ * opened offline and synced mid-shift presents both: a server name (which
+ * its row may or may not have learned yet — `attachOpeningServerName` is
+ * best-effort) and its original outbox id. Checking only the server name
+ * missed that row and inserted a duplicate `open` one, which quietly
+ * detached the shift from its own `closed_pending_sync` state.
+ *
+ * Both dedupe checks compare plaintext scalars already present on
+ * `StoredShiftRow` (`opening_server_name`, the `offline_id` primary key),
+ * so the whole callback below is pure Dexie operations — `.filter().first()`,
+ * `.get()`, `.put()` — none of which is a non-Dexie promise, so the
+ * transaction can't prematurely commit the way a decrypt/encrypt call
+ * inside it would.
+ */
+export async function putShiftIfAbsent(
+	stored: StoredShiftRow,
+	dedupe: { openingServerName: string | null; lifecycleId?: string },
+): Promise<string> {
+	assertWritable();
+	return runInTransaction("rw", [db.shifts], async () => {
+		if (dedupe.openingServerName) {
+			const existing = await db.shifts
+				.filter((row) => row.opening_server_name === dedupe.openingServerName)
+				.first();
+			if (existing) return existing.offline_id;
+		}
+		if (dedupe.lifecycleId) {
+			const existing = await db.shifts.get(dedupe.lifecycleId);
+			if (existing) return existing.offline_id;
+		}
+		await db.shifts.put(stored);
+		return stored.offline_id;
+	});
 }
 
 /**
@@ -201,6 +305,7 @@ export async function updateShiftStatus(
 			| "closed_at"
 			| "closing_server_name"
 			| "opening_server_name"
+			| "pending_closing_offline_id"
 			| "variance_at_sync"
 			| "manager_approval_required"
 		>
