@@ -303,6 +303,11 @@ export default {
 			// online-opened ones included. Fire-and-forget: a Dexie failure
 			// must never block the POS from loading.
 			this.registerShiftLifecycle(snapshot);
+			// Resolve any contribution left `pending` by a crash between the
+			// stage and the confirm. Fire-and-forget: nothing during boot reads
+			// this, and a failure just leaves rows pending, which still count
+			// toward the displayed total.
+			this.reconcileContributions(snapshot);
 			this.get_offers(this.pos_profile.name);
 			this.eventBus.emit("register_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
@@ -432,6 +437,59 @@ export default {
 				}
 			} catch (err) {
 				console.warn("[Pos] registerShiftLifecycle failed", err);
+			}
+		},
+		/**
+		 * Resolve contributions left `pending` by a crash between staging and
+		 * confirming (see contribution-ledger.ts). Fire-and-forget and
+		 * non-fatal by construction: nothing during boot depends on this
+		 * having run, so it must never delay or throw into
+		 * `check_opening_entry`.
+		 *
+		 * Needs the shift's lifecycle id BEFORE `registerShiftLifecycle` (also
+		 * fired above, also un-awaited) has necessarily stamped it anywhere:
+		 * `this.shiftLifecycleId` was just nulled out synchronously by
+		 * `applyOpeningSnapshot` and is only reassigned once
+		 * `registerShiftLifecycle`'s internal awaits resolve, which can
+		 * happen after this method's own synchronous portion has already run.
+		 * So this uses the same per-sale fallback chain Payments.vue uses
+		 * rather than trusting `this.shiftLifecycleId` or
+		 * `pospire_lifecycle_id` alone: the in-memory stamp, then the
+		 * pre-sync offline id, then a direct Dexie lookup by server name. A
+		 * brand-new shift (nothing to reconcile yet) can race
+		 * `registerShiftLifecycle`'s write of the durable row, but a resumed
+		 * shift's row was already written in an earlier session, so the
+		 * lookup that matters in practice never races it.
+		 */
+		async reconcileContributions(snapshot) {
+			const shift = snapshot?.pos_opening_shift;
+			if (!shift) return;
+			try {
+				let shiftLifecycleId =
+					shift.pospire_lifecycle_id || shift.pos_offline_id || null;
+				if (!shiftLifecycleId && shift.name) {
+					const { findShiftByServerName } = await import(
+						"@/offline/shift-lifecycle"
+					);
+					const row = await findShiftByServerName(shift.name);
+					shiftLifecycleId = row?.offline_id || null;
+				}
+				if (!shiftLifecycleId) return;
+				const { reconcilePendingContributions } = await import(
+					"@/offline/contribution-ledger"
+				);
+				await reconcilePendingContributions({
+					shiftLifecycleId,
+					// Same `pospire_pending_sync` discriminator registerShiftLifecycle
+					// uses: `pos_offline_id` is a persisted server field that
+					// survives sync, so it cannot tell "unsynced" from "synced".
+					openingServerName: shift.pospire_pending_sync
+						? null
+						: shift.name || null,
+					openingOfflineId: shift.pos_offline_id || null,
+				});
+			} catch (err) {
+				console.warn("[Pos] reconcileContributions failed", err);
 			}
 		},
 		/**
