@@ -612,6 +612,17 @@ export default {
 							import("@/offline/shift-lifecycle"),
 						]);
 					const derived = await deriveExpectedByMop(lifecycleId, precision);
+					// Assign from the ledger FIRST, before the scan even runs.
+					// `contributionForInvoice`/`resolveChangeAmount` (which the
+					// scan below calls per row) are unguarded on payload shape —
+					// unlike `listInvoiceRowsAcrossStatuses`, which is
+					// deliberately written so one poison row cannot "silently
+					// zero the cashier's entire expected-amount figure". A scan
+					// throw below must therefore only cost the gap-detection and
+					// needs_review count, never the ledger figure already
+					// computed here.
+					queued = { byMop: derived.byMop, uncertainCount: derived.pendingCount };
+
 					// Run the Phase 1 scan alongside the ledger EVEN THOUGH an id
 					// resolved. Two live cases need it:
 					//  - Upgrade day: a shift stamped with a lifecycle id but
@@ -623,16 +634,35 @@ export default {
 					//    lifecycle id at sale time) or `stageContribution` threw
 					//    is invisible to the ledger forever, but the scan still
 					//    catches it if it was queued.
-					const scan = await sumQueuedPaymentsByMop({
-						openingServerName: opening.name || null,
-						shiftOfflineId: lifecycleId,
-						cashMode,
-						precision,
-					});
+					// Wrapped in its own try/catch — see the comment above
+					// `queued`'s assignment: a scan failure must not undo it.
+					let scan = { byMop: {}, uncertainCount: 0 };
+					try {
+						scan = await sumQueuedPaymentsByMop({
+							openingServerName: opening.name || null,
+							shiftOfflineId: lifecycleId,
+							cashMode,
+							precision,
+						});
+					} catch (err) {
+						console.warn(
+							"[Pos] outbox scan failed; gap-detection and needs_review count skipped",
+							err,
+						);
+					}
+
 					if (Object.keys(derived.byMop).length === 0) {
 						// Ledger has nothing for this shift — the upgrade-day
-						// case. The scan is all there is; use it outright.
-						queued = { byMop: scan.byMop, uncertainCount: scan.uncertainCount };
+						// case. The scan is all there is; use it outright. Still
+						// carry `derived.pendingCount`: a staged-but-unconfirmed
+						// contribution can have an empty `by_mop` (a zero-payment
+						// or fully loyalty-funded invoice), which would otherwise
+						// be silently dropped here even though something is
+						// genuinely still pending.
+						queued = {
+							byMop: scan.byMop,
+							uncertainCount: scan.uncertainCount + derived.pendingCount,
+						};
 					} else {
 						// The ledger has SOME data. Deliberately not merged with
 						// the scan: the scan only sees QUEUED sales while the
@@ -640,11 +670,12 @@ export default {
 						// (double-counts anything already in both) nor taking a
 						// per-MOP max is correct in general — either risks
 						// mis-stating the figure a cashier signs off on. Instead,
-						// trust the ledger's total but use the scan to DETECT a
-						// shortfall: any MOP where the scan reports more than the
-						// ledger is evidence the ledger is missing a sale for
-						// that MOP, so fold it into the uncertainty count rather
-						// than silently trusting either source.
+						// trust the ledger's total (already assigned above) but
+						// use the scan to DETECT a shortfall: any MOP where the
+						// scan reports more than the ledger is evidence the
+						// ledger is missing a sale for that MOP, so fold it into
+						// the uncertainty count rather than silently trusting
+						// either source.
 						let gapCount = 0;
 						for (const [mop, amount] of Object.entries(scan.byMop)) {
 							if (amount > (derived.byMop[mop] ?? 0)) gapCount += 1;
