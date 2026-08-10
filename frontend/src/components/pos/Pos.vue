@@ -606,34 +606,76 @@ export default {
 			let queued = { byMop: {}, uncertainCount: 0 };
 			try {
 				if (lifecycleId) {
-					const { deriveExpectedByMop } = await import(
-						"@/offline/contribution-ledger"
-					);
+					const [{ deriveExpectedByMop }, { sumQueuedPaymentsByMop }] =
+						await Promise.all([
+							import("@/offline/contribution-ledger"),
+							import("@/offline/shift-lifecycle"),
+						]);
 					const derived = await deriveExpectedByMop(lifecycleId, precision);
-					queued = {
-						byMop: derived.byMop,
-						uncertainCount: derived.pendingCount,
-					};
+					// Run the Phase 1 scan alongside the ledger EVEN THOUGH an id
+					// resolved. Two live cases need it:
+					//  - Upgrade day: a shift stamped with a lifecycle id but
+					//    opened before Phase 2 shipped has queued sales and NO
+					//    contributions at all. Branching only on "did an id
+					//    resolve" left this case showing opening amounts only —
+					//    strictly worse than the Phase 1 stopgap it replaced.
+					//  - A permanent gap: a sale where staging was skipped (no
+					//    lifecycle id at sale time) or `stageContribution` threw
+					//    is invisible to the ledger forever, but the scan still
+					//    catches it if it was queued.
+					const scan = await sumQueuedPaymentsByMop({
+						openingServerName: opening.name || null,
+						shiftOfflineId: lifecycleId,
+						cashMode,
+						precision,
+					});
+					if (Object.keys(derived.byMop).length === 0) {
+						// Ledger has nothing for this shift — the upgrade-day
+						// case. The scan is all there is; use it outright.
+						queued = { byMop: scan.byMop, uncertainCount: scan.uncertainCount };
+					} else {
+						// The ledger has SOME data. Deliberately not merged with
+						// the scan: the scan only sees QUEUED sales while the
+						// ledger sees every sale, so neither summing the two
+						// (double-counts anything already in both) nor taking a
+						// per-MOP max is correct in general — either risks
+						// mis-stating the figure a cashier signs off on. Instead,
+						// trust the ledger's total but use the scan to DETECT a
+						// shortfall: any MOP where the scan reports more than the
+						// ledger is evidence the ledger is missing a sale for
+						// that MOP, so fold it into the uncertainty count rather
+						// than silently trusting either source.
+						let gapCount = 0;
+						for (const [mop, amount] of Object.entries(scan.byMop)) {
+							if (amount > (derived.byMop[mop] ?? 0)) gapCount += 1;
+						}
+						queued = {
+							byMop: derived.byMop,
+							// Combine every signal the ledger's own pendingCount
+							// misses: contributions still pending (stage/confirm
+							// not resolved) PLUS outbox invoices this shift has
+							// in needs_review/handed_off (server rejected or
+							// handed the sale off) PLUS any detected shortfall
+							// above. `confirmContribution` fires on the enqueue
+							// ack, before either of those outbox outcomes is
+							// known, so a later-rejected sale stays "confirmed"
+							// and would otherwise raise no flag at all.
+							uncertainCount:
+								derived.pendingCount + scan.uncertainCount + gapCount,
+						};
+					}
 				} else {
 					const { sumQueuedPaymentsByMop } = await import(
 						"@/offline/shift-lifecycle"
 					);
-					// BOTH anchors, always — sumQueuedPaymentsByMop matches on
-					// either. A shift opened offline and synced mid-shift has
-					// invoices on both sides of the sync: the pre-sync ones are
-					// stamped with `shift_offline_id` (= the lifecycle id, since
-					// the row is keyed by the opening's outbox id) and the
-					// post-sync ones carry only the server name. Passing just one
-					// anchor dropped a whole half of the shift's takings.
-					// `pospire_lifecycle_id` is the offline id's stand-in after the
-					// sync handler clears `pos_offline_id`; on an online-opened
-					// shift it is a UUID no outbox row carries, which simply
-					// matches nothing and leaves the server-name clause to do the
-					// work.
 					queued = await sumQueuedPaymentsByMop({
 						openingServerName: opening.name || null,
-						shiftOfflineId:
-							opening.pos_offline_id || opening.pospire_lifecycle_id || null,
+						// The two fields `lifecycleId` above is derived from
+						// (`pospire_lifecycle_id`, `pos_offline_id`) are both
+						// already known falsy by the time this branch is
+						// reachable — that's what made `lifecycleId` null — so
+						// there is nothing left to pass here.
+						shiftOfflineId: null,
 						cashMode,
 						precision,
 					});

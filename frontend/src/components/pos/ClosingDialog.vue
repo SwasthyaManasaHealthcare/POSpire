@@ -28,7 +28,7 @@
 					density="compact"
 					class="mb-3"
 				>
-					{{ __("Some contributions are not yet confirmed against the server. Affected invoices:") }}
+					{{ __("Some contributions are not yet recorded on the server. Affected invoices:") }}
 					{{ dialog_data.pospire_uncertain_count }}
 				</v-alert>
 				<v-data-table
