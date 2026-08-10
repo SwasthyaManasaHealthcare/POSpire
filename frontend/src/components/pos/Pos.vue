@@ -1291,6 +1291,19 @@ export default {
 						}
 						if (!resolved) return;
 
+						// The close has landed server-side, so this shift's
+						// contributions can go. Deliberately NOT done at close
+						// time: a queued close can sit unsynced for hours and
+						// the dialog may be reopened in the meantime.
+						try {
+							const { deleteContributionsForShift } = await import(
+								"@/offline/contribution-ledger"
+							);
+							await deleteContributionsForShift(resolved.shiftLifecycleId);
+						} catch (err) {
+							console.warn("[Pos] contribution prune failed", err);
+						}
+
 						if (this.pendingClosingOfflineId === event.offline_id) {
 							this.pendingClosingOfflineId = null;
 						}
