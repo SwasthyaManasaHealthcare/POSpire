@@ -4240,10 +4240,23 @@ export default {
 		 * So fall through to the shift row, keyed on the ACTIVE shift's
 		 * lifecycle UUID — isSellingBlocked() returns true only when that shift
 		 * is itself closing, never because some other shift is.
+		 *
+		 * The fast path must honour `closingPendingShiftId` for the same
+		 * reason. Relying on `register_pos_data` to clear the flag is not
+		 * enough: a shift change can arrive via `register_pos_profile` alone
+		 * (applyOpeningSnapshot(r) when the live response differs from the
+		 * cached snapshot), which would otherwise strand shift A's lock on
+		 * shift B. An unattributed lock (no id in the payload) still blocks —
+		 * we can't prove it belongs to another shift.
 		 */
 		async isShiftLocked() {
-			if (this.shiftClosingPending) return true;
 			const activeId = this.pos_opening_shift?.pospire_lifecycle_id;
+			if (
+				this.shiftClosingPending &&
+				(!this.closingPendingShiftId || this.closingPendingShiftId === activeId)
+			) {
+				return true;
+			}
 			if (!activeId) return false;
 			try {
 				const { isSellingBlocked } = await import("@/offline/shift-lifecycle");

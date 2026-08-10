@@ -8,13 +8,14 @@
 					{{ __("Create POS Opening Shift") }}
 				</span>
 				<!--
-					Hidden only while a close is queued: go_desk() navigates to
-					/app and tears down the SPA, which on that path would strand
-					the cashier with a locked shift and no till. Unchanged on a
-					normal open-shift dialog.
+					Hidden while a close is queued: go_desk() navigates to /app
+					and tears down the SPA, which on that path would strand the
+					cashier with a locked shift and no till. See can_exit_dialog
+					for the never-trap invariant that bounds this. Unchanged on
+					a normal open-shift dialog.
 				-->
 				<v-btn
-					v-if="!closingPending"
+					v-if="can_exit_dialog"
 					icon="mdi-close"
 					variant="text"
 					@click="go_desk"
@@ -148,10 +149,10 @@
 			<v-divider />
 			<v-card-actions class="px-6 py-4 enhanced-modal-header">
 				<v-spacer />
-				<!-- Same exit, same reason — hiding only the header X would leave
-					 the escape hatch wide open. -->
+				<!-- Same exit, same reason, same invariant — hiding only the
+					 header X would leave the escape hatch wide open. -->
 				<v-btn
-					v-if="!closingPending"
+					v-if="can_exit_dialog"
 					variant="text"
 					color="grey-darken-1"
 					@click="go_desk"
@@ -306,6 +307,24 @@ export default {
 			 */
 			cashModeForSelectedProfile() {
 				return this.denomination_config[this.pos_profile]?.cash_mode || "Cash";
+			},
+
+			/**
+			 * INVARIANT: this dialog must never present zero enabled controls.
+			 * It is `persistent`, so there is no click-away or Esc; both exits
+			 * (header X, Cancel) call the same `go_desk()`, and Submit is
+			 * disabled whenever `config_unavailable` — which is precisely the
+			 * offline-with-a-cold-cache case that follows an offline close. So
+			 * the closing-pending gate is lifted the moment Submit is
+			 * unusable: the cashier keeps a way forward, or a way out, always.
+			 *
+			 * `is_loading` deliberately does NOT lift the gate: it is transient,
+			 * self-clearing in submit_dialog's `finally`, and entered only by
+			 * the cashier's own action — not a trap, and flickering the exits
+			 * on every submit would be worse.
+			 */
+			can_exit_dialog() {
+				return !this.closingPending || this.config_unavailable;
 			},
 
 	},

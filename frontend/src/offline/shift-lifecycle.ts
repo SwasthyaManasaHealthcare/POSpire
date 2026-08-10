@@ -18,7 +18,7 @@
  * name exists, and the online-opened case is precisely the one that breaks.
  */
 
-import { listByStatus } from "./outbox";
+import { listClosingEntryStatuses } from "./outbox";
 import {
 	buildStoredShift,
 	getShiftById,
@@ -125,13 +125,13 @@ export { getShiftById };
  * `synced` and `voided` are both terminal and both mean the closing is no
  * longer in flight, so neither keeps a shift locked.
  */
-const UNSYNCED_OUTBOX_STATUSES: readonly OutboxStatus[] = [
+const UNSYNCED_OUTBOX_STATUSES: ReadonlySet<OutboxStatus> = new Set([
 	"enqueued",
 	"in_flight",
 	"retry_pending",
 	"needs_review",
 	"handed_off",
-];
+]);
 
 /**
  * Mark a shift as closing-pending against a queued closing entry.
@@ -161,6 +161,7 @@ export async function markShiftClosingPending(
  */
 export async function resolveClosingSynced(
 	closingOfflineId: string,
+	closingServerName: string | null = null,
 ): Promise<{ shiftLifecycleId: string; wasActive: boolean } | null> {
 	if (!closingOfflineId) return null;
 	const pending = await listPendingClosingShifts();
@@ -171,6 +172,10 @@ export async function resolveClosingSynced(
 
 	await updateShiftStatus(match.offline_id, "synced", {
 		pending_closing_offline_id: null,
+		// The server's name for the closing doc. The row would otherwise never
+		// learn it — this is the only moment it exists AND we know which shift
+		// it belongs to.
+		closing_server_name: closingServerName,
 	});
 	return {
 		shiftLifecycleId: match.offline_id,
@@ -201,32 +206,43 @@ export async function isSellingBlocked(
  *
  * The outbox is the durable command log and therefore the reconciliation
  * source; `db.shifts` is what the running app reads. Any shift whose queued
- * closing has already left the unsynced set is released here — it landed
- * (or was voided) while the app was closed.
+ * closing has already left the unsynced set is RELEASED here — it landed (or
+ * was voided) while the app was closed.
  *
- * Returns the lifecycle ids that are still legitimately closing-pending.
+ * Returns both halves. `released` is not bookkeeping: the caller must
+ * invalidate any cached opening snapshot naming a released shift, or an
+ * offline boot re-applies that snapshot and rings sales against a shift that
+ * is closed server-side.
  */
-export async function reconcilePendingClosuresFromOutbox(): Promise<string[]> {
-	const unsynced = (
-		await Promise.all(UNSYNCED_OUTBOX_STATUSES.map((s) => listByStatus(s)))
-	).flat();
-	const liveClosingIds = new Set(
-		unsynced
-			.filter((row) => row.type === "closing_entry")
-			.map((row) => row.offline_id),
+export async function reconcilePendingClosuresFromOutbox(): Promise<{
+	stillPending: string[];
+	released: string[];
+}> {
+	const closingStatusById = new Map(
+		(await listClosingEntryStatuses()).map((row) => [
+			row.offline_id,
+			row.status,
+		]),
 	);
 
 	const stillPending: string[] = [];
+	const released: string[] = [];
 	for (const row of await listPendingClosingShifts()) {
 		const pendingId = row.pending_closing_offline_id;
 		if (!pendingId) continue;
-		if (liveClosingIds.has(pendingId)) {
+		const closingStatus = closingStatusById.get(pendingId);
+		if (closingStatus && UNSYNCED_OUTBOX_STATUSES.has(closingStatus)) {
 			stillPending.push(row.offline_id);
-		} else {
-			await updateShiftStatus(row.offline_id, "synced", {
-				pending_closing_offline_id: null,
-			});
+			continue;
 		}
+		await updateShiftStatus(row.offline_id, "synced", {
+			pending_closing_offline_id: null,
+			// A voided closing means the shift was never closed at all, so it
+			// must not keep carrying a close timestamp. An absent row (vacuumed
+			// tombstone) tells us nothing either way, so leave `closed_at` be.
+			...(closingStatus === "voided" ? { closed_at: null } : {}),
+		});
+		released.push(row.offline_id);
 	}
-	return stillPending;
+	return { stillPending, released };
 }

@@ -135,6 +135,31 @@ export async function listByType<T = unknown>(
 	return Promise.all(stored.map((s) => fromStored<T>(s)));
 }
 
+/**
+ * Plaintext `{ offline_id, status }` for every queued closing entry, WITHOUT
+ * decrypting a single payload.
+ *
+ * `type` is indexed and `status` is a plaintext scalar on `StoredOutboxEntry`,
+ * so the sync-state of a closing can be answered without `fromStored`. The
+ * alternative — five `listByStatus()` sweeps — decrypts EVERY unsynced row in
+ * the outbox (queued invoices, payments, customers) just to read two plaintext
+ * columns, and one undecryptable row aborts the lot. Closing reconciliation
+ * runs on the boot path and swallows its own errors, so an abort there leaves
+ * the app selling against a shift that is already closing.
+ */
+export async function listClosingEntryStatuses(): Promise<
+	Array<Pick<StoredOutboxEntry, "offline_id" | "status">>
+> {
+	const stored = await db.outbox
+		.where("type")
+		.equals("closing_entry")
+		.toArray();
+	return stored.map((row) => ({
+		offline_id: row.offline_id,
+		status: row.status,
+	}));
+}
+
 export async function listByShift<T = unknown>(
 	shiftOfflineId: string,
 ): Promise<OutboxEntry<T>[]> {

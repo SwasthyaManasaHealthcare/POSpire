@@ -226,6 +226,39 @@ export default {
 			}
 		},
 
+		/**
+		 * Drop the cached opening snapshot when reconciliation released the very
+		 * shift it names.
+		 *
+		 * A released shift is one whose closing already landed server-side, so
+		 * selling against it is invalid — but `isSellingBlocked` correctly stops
+		 * blocking the moment it stops being `closed_pending_sync`. Offline,
+		 * `check_opening_shift` can't be reached to contradict the snapshot, so
+		 * without this the next boot re-applies that shift UNLOCKED and rings
+		 * invoices against a closed shift. The old code got this for free by
+		 * nulling the snapshot at close time; that null-out had to go, so the
+		 * guard is re-established here from the durable reconciliation result.
+		 */
+		dropSnapshotForReleasedShifts(releasedIds) {
+			if (!Array.isArray(releasedIds) || !releasedIds.length) return;
+			try {
+				const raw = localStorage.getItem("pospire.opening_shift_snapshot");
+				if (!raw) return;
+				const cachedShift = JSON.parse(raw)?.pos_opening_shift;
+				if (!cachedShift) return;
+				// Same two keys registerOpenedShift dedupes on, in the same order.
+				const cachedId =
+					cachedShift.pospire_lifecycle_id || cachedShift.pos_offline_id;
+				if (!cachedId || !releasedIds.includes(cachedId)) return;
+				this.invalidateOpeningSnapshot(
+					"pospire.opening_shift_snapshot",
+					"pospire.opening_shift_snapshot.meta",
+				);
+			} catch {
+				/* private mode / corrupt cache — non-fatal */
+			}
+		},
+
 		openingSnapshotDiffers(cached, live) {
 			if (!cached) return true;
 			if (
@@ -494,9 +527,12 @@ export default {
 					shift_lifecycle_id: this.shiftLifecycleId,
 					closing_offline_id: r.offline_id,
 				});
-				// The snapshot is deliberately left pointing at the closing shift:
-				// it still carries `pospire_lifecycle_id`, which is how the lock
-				// re-resolves against the shift row after a reload.
+				// The snapshot is deliberately left pointing at the closing shift so
+				// the next boot can still find it. The lock is NOT re-derived from
+				// the snapshot's `pospire_lifecycle_id`: registerShiftLifecycle()
+				// re-derives the id through registerOpenedShift()'s dedupe and
+				// re-emits from getShiftById(). The stamp is only a fallback for
+				// Invoice.isShiftLocked().
 				this.pos_opening_shift = "";
 				this.create_opening_voucher();
 				return;
@@ -742,6 +778,9 @@ export default {
 				.then(({ reconcilePendingClosuresFromOutbox }) =>
 					reconcilePendingClosuresFromOutbox(),
 				)
+				.then((result) => {
+					this.dropSnapshotForReleasedShifts(result?.released);
+				})
 				.catch((err) => {
 					console.warn("[Pos] pending-closure reconciliation failed", err);
 				})
@@ -753,6 +792,21 @@ export default {
 				this.dialog = false;
 			});
 			this.eventBus.on("register_pos_data", (data) => {
+				// FIRST, before anything can observe the new shift. `pos_opening_shift`
+				// below is assigned synchronously but `shiftLifecycleId` is only
+				// assigned tens of ms later, inside registerShiftLifecycle(), after
+				// initOfflineStorage() + registerOpenedShift(). If the previous
+				// shift's closing syncs inside that gap — and that gap IS a reconnect,
+				// which is exactly when both happen at once — the onSynced handler's
+				// `resolved.shiftLifecycleId === this.shiftLifecycleId` would still
+				// match the OLD shift and wipe the one just opened. Nulling first
+				// makes that comparison unmatchable during the gap.
+				// `pendingClosingOfflineId` is cleared for a different reason: it
+				// gates the opening dialog's exits, and a closing parked in
+				// needs_review / handed_off can sit there indefinitely — a new shift
+				// must end the exit-less state.
+				this.shiftLifecycleId = null;
+				this.pendingClosingOfflineId = null;
 				this.pos_profile = data.pos_profile;
 				this.get_offers(this.pos_profile.name);
 				this.pos_opening_shift = data.pos_opening_shift;
@@ -884,7 +938,10 @@ export default {
 							const { resolveClosingSynced } = await import(
 								"@/offline/shift-lifecycle"
 							);
-							resolved = await resolveClosingSynced(event.offline_id);
+							resolved = await resolveClosingSynced(
+								event.offline_id,
+								event.server_doc_name ?? null,
+							);
 						} catch (err) {
 							console.warn("[Pos] resolveClosingSynced failed", err);
 							return;

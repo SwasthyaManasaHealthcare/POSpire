@@ -930,6 +930,17 @@ export async function countPending(): Promise<number> {
 }
 
 /**
+ * Sync-state of every queued closing entry, read off plaintext columns only.
+ * See `repos/outbox.listClosingEntryStatuses` for why this is not a set of
+ * `listByStatus()` sweeps.
+ */
+export async function listClosingEntryStatuses(): ReturnType<
+	typeof outboxRepo.listClosingEntryStatuses
+> {
+	return outboxRepo.listClosingEntryStatuses();
+}
+
+/**
  * Edit & Retry: mutate the queued payload, re-encrypt, recompute integrity hash,
  * reset status to enqueued, and wake the scheduler. Refuses on voided/synced rows.
  */
