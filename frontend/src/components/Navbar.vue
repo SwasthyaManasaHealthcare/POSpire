@@ -228,6 +228,7 @@
 <script>
 import { storeToRefs } from "pinia";
 import { call } from "@/utils/call";
+import { OPENING_DIALOG_CACHE_KEY } from "@/utils/call-registry";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { useOutboxStore } from "@/stores/outbox";
 import { useConnectivityStore } from "@/stores/connectivity";
@@ -301,6 +302,18 @@ export default {
     },
     async logOut() {
       this.logged_out = true;
+      // The cached POS configuration must not outlive the session that fetched
+      // it; the next cashier may have a different profile set.
+      try {
+        // NOTE: getReadCache lives in "@/offline/runtime" (the registration
+        // shim), not "@/offline/read-cache" (the adapter implementations) —
+        // the latter never exports it. Corrected from the brief's snippet,
+        // which would have silently no-op'd here.
+        const { getReadCache } = await import("@/offline/runtime");
+        await getReadCache()?.invalidate(OPENING_DIALOG_CACHE_KEY);
+      } catch {
+        /* non-fatal */
+      }
       await call('logout');
       window.location.href = "/login";
     },

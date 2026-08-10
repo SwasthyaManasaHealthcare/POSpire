@@ -59,6 +59,7 @@ import Variants from "./Variants.vue";
 import Returns from "./Returns.vue";
 import MpesaPayments from "./Mpesa-Payments.vue";
 import { call, unwrapStale } from "@/utils/call";
+import { OPENING_DIALOG_CACHE_KEY } from "@/utils/call-registry";
 import { toast } from "vue3-toastify";
 import { onSynced } from "@/offline/outbox";
 import { setBeaconContext } from "@/offline/beacon";
@@ -120,6 +121,20 @@ export default {
 					user: window.user,
 				});
 				liveCallSucceeded = true;
+				// Warm the opening-dialog cache on every online boot, not
+				// only when the dialog opens. OpeningDialog is v-if="dialog"
+				// so it is constructed only when create_opening_voucher()
+				// fires; a terminal running all day on an open shift would
+				// otherwise reach the dialog (after an offline close) cold.
+				// Fire-and-forget: never block the shift check on this.
+				call({
+					method: "pospire.pospire.api.posapp.get_opening_dialog_data",
+					args: {},
+					intent: "read",
+					cacheKey: OPENING_DIALOG_CACHE_KEY,
+				}).catch(() => {
+					/* non-fatal — the dialog retries when it opens */
+				});
 				if (r) {
 					this.persistOpeningSnapshot(r, SNAPSHOT_KEY, SNAPSHOT_META_KEY);
 				}

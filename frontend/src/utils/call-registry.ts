@@ -140,6 +140,9 @@ function todayIso(): string {
 
 const HOUR = 60 * 60 * 1000;
 
+/** Stable cache key for `get_opening_dialog_data`. Must match DURABLE_KEYS. */
+export const OPENING_DIALOG_CACHE_KEY = "offline.opening_dialog_data";
+
 /**
  * The canonical registry. Names are the exact server method paths.
  *
@@ -203,7 +206,16 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		intent: "read",
 		offline: false,
 	},
-	"pospire.pospire.api.posapp.get_opening_dialog_data": { intent: "read", offline: false },
+	// Opening-dialog reference data. Durable-cached (see DURABLE_KEYS in
+	// offline/read-cache.ts) so it survives a reload — the cashier often
+	// reaches this dialog only after an offline close, on a fresh page load.
+	// Both call sites MUST pass OPENING_DIALOG_CACHE_KEY as opts.cacheKey; the
+	// default arg-hashed key is neither stable nor allowlistable.
+	"pospire.pospire.api.posapp.get_opening_dialog_data": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 	"pospire.pospire.api.posapp.check_opening_shift": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_draft_invoices": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.search_orders": { intent: "read", offline: false },

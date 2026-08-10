@@ -60,6 +60,10 @@ export class InMemoryReadCache implements ReadCache {
 		});
 	}
 
+	async invalidate(cacheKey: string): Promise<void> {
+		this.store.delete(cacheKey);
+	}
+
 	/** Test/diagnostic: drop everything. */
 	clear(): void {
 		this.store.clear();
@@ -82,6 +86,12 @@ const RC_PREFIX = "rc:";
 const DURABLE_KEYS: ReadonlySet<string> = new Set([
 	"dashboard.shift", // shift dashboard cards + graph/table payload
 	"offline.customer_form_options", // territory / gender / customer-group lists
+	// Opening-dialog reference data: companies, POS profile names, POS Payment
+	// Method rows, denomination policy. No PII, no catalogue — qualifies under
+	// the allowlist contract above. Durable because the dialog is unusable
+	// without it and the cashier often reaches it only after a reload, offline.
+	// Do not widen get_opening_dialog_data's response without re-checking this.
+	"offline.opening_dialog_data",
 ]);
 
 export class DexieMetadataReadCache implements ReadCache {
@@ -132,6 +142,17 @@ export class DexieMetadataReadCache implements ReadCache {
 			} as MetadataRow<CacheEntry>);
 		} catch {
 			// Non-fatal — in-memory still covers this session.
+		}
+	}
+
+	/** Drop a single cached key from both layers. Used on logout. */
+	async invalidate(cacheKey: string): Promise<void> {
+		this.mem.delete(cacheKey);
+		if (!DURABLE_KEYS.has(cacheKey)) return;
+		try {
+			await db.metadata.delete(RC_PREFIX + cacheKey);
+		} catch {
+			/* non-fatal — the memory layer is already cleared */
 		}
 	}
 

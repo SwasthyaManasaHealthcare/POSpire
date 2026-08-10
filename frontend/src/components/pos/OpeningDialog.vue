@@ -117,6 +117,23 @@
 				</v-container>
 			</v-card-text>
 
+			<v-alert
+				v-if="config_unavailable"
+				type="warning"
+				variant="tonal"
+				class="mx-6 mb-2"
+			>
+				{{ __("POS configuration is not available on this device yet. Connect to the network once to load it, then reopen this dialog.") }}
+			</v-alert>
+			<v-alert
+				v-else-if="config_is_stale"
+				type="info"
+				variant="tonal"
+				density="compact"
+				class="mx-6 mb-2"
+			>
+				{{ __("Showing saved POS configuration. It will refresh when the connection returns.") }}
+			</v-alert>
 			<v-divider />
 			<v-card-actions class="px-6 py-4 enhanced-modal-header">
 				<v-spacer />
@@ -126,7 +143,7 @@
 				<v-btn
 					variant="elevated"
 					color="primary"
-					:disabled="is_loading"
+					:disabled="is_loading || config_unavailable"
 					@click="submit_dialog"
 				>
 					{{ __("Submit") }}
@@ -137,7 +154,8 @@
 </template>
 
 <script>
-import { call } from "@/utils/call";
+import { call, isStaleReadResult, unwrapStale } from "@/utils/call";
+import { OPENING_DIALOG_CACHE_KEY } from "@/utils/call-registry";
 import connectivity from "@/offline/connectivity";
 import format from "@/utils/format";
 import { toast } from "vue3-toastify";
@@ -177,9 +195,11 @@ export default {
 			snack: false, // TODO : need to remove
 			snackColor: "", // TODO : need to remove
 			snackText: "", // TODO : need to remove
-			denomination_config: {},       
-			denomination_rows: [],         
-			denominations_enabled: false,    
+			denomination_config: {},
+			denomination_rows: [],
+			denominations_enabled: false,
+			config_is_stale: false,
+			config_unavailable: false,
 		};
 	},
 	watch: {
@@ -260,100 +280,80 @@ export default {
 			this.eventBus.emit("close_opening_dialog");
 		},
 		async get_opening_dialog_data() {
-			// `get_opening_dialog_data` is registered as offline:false, so a
-			// cold-start with no connectivity throws here and the dialog
-			// stays empty (companies/pos_profiles/payments_methods all
-			// blank). submit_dialog then immediately bails on the empty
-			// payments check, leaving the cashier stuck.
-			//
-			// Two-level offline fallback:
-			//   1. Cache the live response under `pospire.opening_dialog_data_cache`
-			//      on success. Reuse it directly when the live call fails.
-			//   2. If even the cache is missing, synthesise a minimal payload
-			//      from the broader `pospire.opening_shift_snapshot` (which
-			//      Pos.vue caches from the last `check_opening_shift`). It
-			//      contains the full POS Profile doc — enough to derive the
-			//      single-company / single-profile / payments shape.
-			const DIALOG_CACHE_KEY = "pospire.opening_dialog_data_cache";
-			const SHIFT_SNAPSHOT_KEY = "pospire.opening_shift_snapshot";
+			// Durable read-cache. The registry marks this method offline:true
+			// and OPENING_DIALOG_CACHE_KEY is allowlisted in DURABLE_KEYS, so a
+			// successful online call persists to Dexie and is served after a
+			// reload while offline. Pos.vue warms it on every online boot,
+			// because a terminal that runs all day on an already-open shift
+			// never opens this dialog and would otherwise arrive here cold.
 			const vm = this;
 			let r = null;
 			try {
-				r = await call("pospire.pospire.api.posapp.get_opening_dialog_data", {});
-				if (r) {
-					try {
-						localStorage.setItem(DIALOG_CACHE_KEY, JSON.stringify(r));
-					} catch {
-						/* quota / privacy mode — non-fatal */
-					}
-				}
-			} catch (err) {
-				console.warn(
-					"[OpeningDialog] get_opening_dialog_data failed; trying offline fallbacks",
-					err,
-				);
-				try {
-					const cached = localStorage.getItem(DIALOG_CACHE_KEY);
-					if (cached) r = JSON.parse(cached);
-				} catch {
-					/* corrupt cache */
-				}
-				if (!r) {
-					r = this.synthesizeDialogDataFromShiftSnapshot(SHIFT_SNAPSHOT_KEY);
-				}
-			}
-
-			if (r) {
-				(r.companies || []).forEach((element) => {
-					vm.companies.push(element.name);
+				const raw = await call({
+					method: "pospire.pospire.api.posapp.get_opening_dialog_data",
+					args: {},
+					intent: "read",
+					cacheKey: OPENING_DIALOG_CACHE_KEY,
 				});
-				vm.company = vm.companies[0];
-				vm.pos_profiles_data = r.pos_profiles_data || [];
-				vm.payments_method_data = r.payments_method || [];
-				vm.denomination_config = r.denomination_config || {};
+				// Capture staleness BEFORE unwrapping — unwrapStale discards it.
+				this.config_is_stale = isStaleReadResult(raw);
+				r = unwrapStale(raw);
+			} catch (err) {
+				console.warn("[OpeningDialog] get_opening_dialog_data unavailable", err);
+				this.config_unavailable = true;
+				return;
 			}
-		},
 
-		/**
-		 * Build a minimal `get_opening_dialog_data` shape from the cached
-		 * opening-shift snapshot. The shape mirrors what the live endpoint
-		 * returns so the watchers in this component (which key off
-		 * `pos_profiles_data` company match and `payments_method_data` parent
-		 * match) can do their thing without code changes.
-		 *
-		 * Only used when both the live call AND the dialog cache are missing —
-		 * i.e. the device booted cold offline. The snapshot's pos_profile
-		 * carries the full payments[] child table with mode_of_payment +
-		 * default flag, which is enough to populate the dialog's payment-
-		 * method rows.
-		 */
-		synthesizeDialogDataFromShiftSnapshot(snapshotKey) {
-			try {
-				const raw = localStorage.getItem(snapshotKey);
-				if (!raw) return null;
-				const snap = JSON.parse(raw);
-				if (!snap?.pos_profile) return null;
-				const profile = snap.pos_profile;
-				const companyName = profile.company || snap.company?.name;
-				if (!companyName) return null;
-				return {
-					companies: [{ name: companyName }],
-					pos_profiles_data: [{ name: profile.name, company: companyName }],
-					payments_method: (profile.payments || []).map((p) => ({
-						parent: profile.name,
-						mode_of_payment: p.mode_of_payment,
-						currency: profile.currency,
-						default: p.default,
-					})),
-					// Denomination config isn't on the shift snapshot — leaving
-					// it empty disables the denomination grid offline. The
-					// cashier enters straight cash amounts; reconciliation at
-					// online sync verifies totals.
-					denomination_config: {},
-				};
-			} catch {
-				return null;
+			if (!r) {
+				this.config_unavailable = true;
+				return;
 			}
+
+			this.config_unavailable = false;
+			(r.companies || []).forEach((element) => {
+				vm.companies.push(element.name);
+			});
+			vm.company = vm.companies[0];
+			vm.pos_profiles_data = r.pos_profiles_data || [];
+			vm.payments_method_data = r.payments_method || [];
+			vm.denomination_config = r.denomination_config || {};
+		},
+		async refresh_dialog_config() {
+			let fresh = null;
+			try {
+				const raw = await call({
+					method: "pospire.pospire.api.posapp.get_opening_dialog_data",
+					args: {},
+					intent: "read",
+					cacheKey: OPENING_DIALOG_CACHE_KEY,
+				});
+				this.config_is_stale = isStaleReadResult(raw);
+				fresh = unwrapStale(raw);
+			} catch {
+				return; // still unreachable — keep what we have
+			}
+			if (!fresh) return;
+
+			this.config_unavailable = false;
+			this.payments_method_data = fresh.payments_method || [];
+			this.denomination_config = fresh.denomination_config || {};
+
+			// Re-derive the grid for the selected profile WITHOUT resetting
+			// quantities the cashier has already counted into it.
+			const config = this.denomination_config[this.pos_profile];
+			if (!config?.enabled) return;
+			const typed = new Map(
+				this.denomination_rows.map((row) => [row.denomination, row.quantity]),
+			);
+			this.denominations_enabled = true;
+			this.denomination_rows = (config.denominations || []).map((d) => ({
+				denomination: d.denomination,
+				denomination_name: d.denomination_name,
+				denomination_value: d.denomination_value,
+				currency: d.currency,
+				quantity: typed.get(d.denomination) ?? 0,
+				amount: 0,
+			}));
 		},
 		async submit_dialog() {
 			if (!this.payments_methods.length || !this.company || !this.pos_profile) {
@@ -552,6 +552,20 @@ export default {
 		this.$nextTick(function () {
 			this.get_opening_dialog_data();
 		});
+	},
+	mounted() {
+		// isOnline() needs THRESHOLD_ONLINE = 3 consecutive successful pings
+		// before it flips back, and any offline:false read throws without
+		// touching the network during that window. A dialog opened in the
+		// gap would otherwise stay on stale config for its whole lifetime.
+		this._unsubConnectivity = connectivity.onChange(() => {
+			if (!connectivity.isOnline()) return;
+			if (!this.config_is_stale && !this.config_unavailable) return;
+			this.refresh_dialog_config();
+		});
+	},
+	beforeUnmount() {
+		if (this._unsubConnectivity) this._unsubConnectivity();
 	},
 };
 </script>

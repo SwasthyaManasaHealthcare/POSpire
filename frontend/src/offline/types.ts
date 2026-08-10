@@ -355,4 +355,6 @@ export interface ReadCache {
 		key: string,
 	): Promise<{ data: T; cachedAt: number } | null>;
 	write<T>(key: string, data: T, ttlMs?: number): Promise<void>;
+	/** Drop a single cached key from both layers. Used on logout. */
+	invalidate(cacheKey: string): Promise<void>;
 }
