@@ -89,6 +89,8 @@ export interface SyncCycleLog {
 	longest_latency_ms: number;
 	next_wake_ms: number | null;
 	leader: boolean;
+	/** Rows parked on a dependency 409 (siblings/parent not ready) this cycle. */
+	parked?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +637,9 @@ export class SyncScheduler {
 						result.category,
 						result.detail,
 					);
+				} else if (result.kind === "park") {
+					await markBlocked(entry.offline_id, result.reason);
+					cycle.parked = (cycle.parked ?? 0) + 1;
 				} else {
 					// Mark needs_review first (stable terminal state) before attempting
 					// handoff — the next cycle retries the handoff if it fails.
@@ -963,6 +968,12 @@ type SendResult =
 			kind: "needsReview";
 			category: NonNullable<LastErrorCategory>;
 			detail: string | null;
+	  }
+	| {
+			kind: "park";
+			reason: "waiting_for_parent" | "waiting_for_siblings";
+			detail: string;
+			missingOfflineIds: string[];
 	  };
 
 // ---------------------------------------------------------------------------
@@ -1454,17 +1465,35 @@ function classifySendError(
 			};
 		}
 		if (status === 409) {
-			// 409 is the dependency / conflict bucket on the server:
-			// parent_not_ready, siblings_not_ready, stock_shortage, batch_or_
-			// serial_conflict. The previous default (batch_or_serial_conflict)
-			// collapsed unrelated failures into the wrong fix flow. When the
-			// server omits error_code (older builds, generic ValidationError),
-			// keep the category as `parent_not_ready` since it's the most
-			// common 409 in the offline pipeline AND it routes to the right
-			// per-category Edit & Retry flow (parent inspector).
+			// 409 is the dependency / conflict bucket: parent_not_ready,
+			// siblings_not_ready, stock_shortage, batch_or_serial_conflict.
+			//
+			// The two dependency codes PARK. MAX_ATTEMPTS was sized for
+			// transient transport failures; a closing waiting on its invoices
+			// may legitimately wait far longer, and every attempt is a wasted
+			// round-trip that burns the budget until the row lands in
+			// needs_review anyway — the very state parking exists to avoid.
+			// The outbox already has the machinery and the pre-send gate
+			// already uses it, so route into that rather than inventing a
+			// second path. Parking does NOT consume an attempt.
+			//
+			// A generic 409 with no error_code is NOT assumed transient — the
+			// old `parent_not_ready` default was a guess and must not become
+			// an automatic park.
+			if (errorCode === "siblings_not_ready" || errorCode === "parent_not_ready") {
+				return {
+					kind: "park",
+					reason:
+						errorCode === "siblings_not_ready"
+							? "waiting_for_siblings"
+							: "waiting_for_parent",
+					detail,
+					missingOfflineIds: extractMissingOfflineIds(err),
+				};
+			}
 			return {
 				kind: "needsReview",
-				category: errorCodeToCategory(errorCode, "parent_not_ready"),
+				category: errorCodeToCategory(errorCode, "validation_error"),
 				detail,
 			};
 		}
@@ -1487,6 +1516,19 @@ function classifySendError(
 		return { kind: "retry", category: "timeout", detail };
 	}
 	return { kind: "retry", category: "network_error", detail };
+}
+
+/**
+ * Pull `missing_offline_ids` off a server dependency error. The server sends
+ * it on siblings_not_ready (offline.py:1607-1611) so the reconciliation
+ * workspace can show the cashier exactly which invoices a close is waiting
+ * on. Absent on older server builds — an empty array is fine.
+ */
+function extractMissingOfflineIds(err: unknown): string[] {
+	if (!err || typeof err !== "object") return [];
+	const raw = (err as Record<string, unknown>).missing_offline_ids;
+	if (!Array.isArray(raw)) return [];
+	return raw.filter((v): v is string => typeof v === "string" && v.length > 0);
 }
 
 /**
