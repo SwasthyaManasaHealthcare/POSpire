@@ -1814,6 +1814,35 @@ def _enrich_closing_payload(
 	payload["payment_reconciliation"] = new_recon
 
 
+def _ensure_opening_closed(opening_name: str, closing_name: str) -> bool:
+	"""Assert `opening_name` is Closed against `closing_name`.
+
+	Some _idempotent_submit branches (replay, dup-rollback) skip
+	POSClosingShift.on_submit, leaving the opening shift Open after a
+	"synced" response. Mirrors the repair in submit_closing_shift.
+	Idempotent - no-op (incl. `modified`) if already correct.
+
+	Returns True if a repair was applied.
+	"""
+	current = frappe.db.get_value(
+		"POS Opening Shift",
+		opening_name,
+		["status", "pos_closing_shift"],
+		as_dict=True,
+	)
+	if not current:
+		return False
+	if current.status == "Closed" and current.pos_closing_shift == closing_name:
+		return False
+
+	opening = frappe.get_doc("POS Opening Shift", opening_name)
+	opening.pos_closing_shift = closing_name
+	opening.set_status()
+	opening.flags.ignore_permissions = True
+	opening.save()
+	return True
+
+
 @frappe.whitelist()
 def create_closing_entry(
 	data: dict | str,
@@ -1900,6 +1929,13 @@ def create_closing_entry(
 		submit=True,
 		owner_user=owner_user,
 	)
+
+	# Assert closure post-condition on every branch (fresh, replay, dup-race).
+	closing_name = result.get("name")
+	if closing_name and cint(result.get("docstatus")) == 1:
+		if _ensure_opening_closed(opening_name, closing_name):
+			result["opening_shift_repaired"] = True
+
 	if auto_included_invoice_offline_ids:
 		result["auto_included_invoice_offline_ids"] = auto_included_invoice_offline_ids
 		result["validated_invoice_offline_ids"] = canonical_invoice_offline_ids
