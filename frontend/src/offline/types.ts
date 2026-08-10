@@ -215,6 +215,28 @@ export interface StoredShiftRow {
 	closing_notes_envelope: EncryptedEnvelope | null;
 }
 
+export interface ContributionRow {
+	/** Invoice offline_id. Primary key. Same id on the live and queued paths. */
+	offline_id: string;
+	/** Owning shift's lifecycle UUID (db.shifts primary key). */
+	shift_lifecycle_id: string;
+	/** "pending" until the submit is known to have landed. */
+	status: "pending" | "confirmed";
+	/** Encrypted at rest (sensitive financial). MOP name -> net amount. */
+	by_mop: Record<string, number>;
+	created_at: number;
+	confirmed_at: number | null;
+}
+
+export interface StoredContributionRow {
+	offline_id: string;
+	shift_lifecycle_id: string;
+	status: "pending" | "confirmed";
+	by_mop_envelope: EncryptedEnvelope;
+	created_at: number;
+	confirmed_at: number | null;
+}
+
 export interface OutboxEntry<TPayload = unknown> {
 	offline_id: string;
 	type: OutboxType;

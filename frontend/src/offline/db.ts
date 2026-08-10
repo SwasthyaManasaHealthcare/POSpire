@@ -45,6 +45,7 @@ import type {
 	ItemRow,
 	JournalRow,
 	MetadataRow,
+	StoredContributionRow,
 	StoredCustomerRow,
 	StoredOutboxEntry,
 	StoredShiftRow,
@@ -76,6 +77,7 @@ export class PospireOfflineDB extends Dexie {
 	outbox!: Table<StoredOutboxEntry, string>;
 	metadata!: Table<MetadataRow, string>;
 	_health!: Table<HealthProbeRow, string>;
+	contributions!: Table<StoredContributionRow, string>;
 
 	constructor() {
 		super(DB_NAME_PRIMARY);
@@ -105,6 +107,20 @@ export class PospireOfflineDB extends Dexie {
 				"offline_id, status, type, shift_offline_id, [status+next_attempt_at]",
 			metadata: "key",
 			_health: "id",
+		});
+
+		// v2 — per-invoice contribution ledger (Phase 2).
+		//
+		// Purely ADDITIVE: no existing table's schema changes, so Dexie needs
+		// no upgrade function. Devices holding queued invoices and shift rows
+		// keep them; Dexie replays v1 then applies v2's new store.
+		//
+		// Indexed on `shift_lifecycle_id` (every read is shift-scoped) and
+		// `status` (the startup reconciliation scans pending rows). `by_mop`
+		// is deliberately NOT indexed — it is encrypted, and indexing it would
+		// leak amounts into the unencrypted index.
+		this.version(2).stores({
+			contributions: "offline_id, shift_lifecycle_id, status",
 		});
 	}
 }
