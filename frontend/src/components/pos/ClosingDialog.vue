@@ -12,14 +12,32 @@
 
 			<v-divider></v-divider>
 			<v-card-text class="px-6 py-4 overflow-y-auto" style="max-height:65vh;">
+				<!--
+					Two wordings, never both. The contribution ledger records
+					every sale, online and offline, so its figure is merely
+					unconfirmed. The outbox scan (`pospire_source === "scan"`)
+					is structurally blind to sales made earlier while online —
+					dropping that caveat there would present an incomplete
+					figure as a complete one. A stub with no discriminator at
+					all gets the cautious wording.
+				-->
 				<v-alert
-					v-if="dialog_data.pospire_offline_stub"
+					v-if="dialog_data.pospire_offline_stub && dialog_data.pospire_source === 'ledger'"
 					type="warning"
 					variant="tonal"
 					density="compact"
 					class="mb-3"
 				>
 					{{ __("Expected amounts are provisional — computed on this device and not yet confirmed by the server.") }}
+				</v-alert>
+				<v-alert
+					v-else-if="dialog_data.pospire_offline_stub"
+					type="warning"
+					variant="tonal"
+					density="compact"
+					class="mb-3"
+				>
+					{{ __("Expected amounts are provisional — computed on this device and not yet confirmed by the server. Sales made earlier while online are not included.") }}
 				</v-alert>
 				<v-alert
 					v-if="dialog_data.pospire_uncertain_count"

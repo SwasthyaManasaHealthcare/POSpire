@@ -97,6 +97,18 @@ export interface DerivedExpected {
 	byMop: Record<string, number>;
 	/** Contributions still unconfirmed — surfaced so the UI can say so. */
 	pendingCount: number;
+	/**
+	 * Rows whose envelope would not decrypt. Their money is NOT in `byMop`, so
+	 * the caller must fold this into whatever uncertainty it shows: otherwise
+	 * a corrupt row silently shortens a figure that reads as fact.
+	 */
+	skippedCount: number;
+	/**
+	 * The invoice `offline_id` of every row that DID contribute. Lets a caller
+	 * union this total with the outbox scan without double-counting: both
+	 * stores key on the same id.
+	 */
+	offlineIds: string[];
 }
 
 /**
@@ -110,18 +122,21 @@ export async function deriveExpectedByMop(
 	shiftLifecycleId: string,
 	precision: number,
 ): Promise<DerivedExpected> {
-	const rows = await listContributionsForShift(shiftLifecycleId);
+	const { rows, skippedCount } =
+		await listContributionsForShift(shiftLifecycleId);
 	const byMop: Record<string, number> = {};
+	const offlineIds: string[] = [];
 	let pendingCount = 0;
 	const f = 10 ** precision;
 	for (const row of rows) {
+		offlineIds.push(row.offline_id);
 		if (row.status === "pending") pendingCount += 1;
 		for (const [mop, amount] of Object.entries(row.by_mop)) {
 			const next = (byMop[mop] ?? 0) + (Number(amount) || 0);
 			byMop[mop] = Math.round(next * f) / f;
 		}
 	}
-	return { byMop, pendingCount };
+	return { byMop, pendingCount, skippedCount, offlineIds };
 }
 
 /**

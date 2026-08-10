@@ -760,6 +760,44 @@ export default {
 	}),
 
 		methods: {
+			// Run a contribution-ledger operation with a hard deadline.
+			//
+			// Every sale now touches IndexedDB on its critical path, which an
+			// ONLINE sale never did before the ledger existed. Dexie queues
+			// every operation behind `db.open()`, and an open can block
+			// INDEFINITELY rather than fail: a second POS tab still holding the
+			// previous schema version blocks the `version(2)` upgrade until it
+			// closes, and iOS/Safari stall IndexedDB on their own. A promise
+			// that never settles cannot be caught — the awaiting sale would
+			// simply stop, `submittingPayment` would never reset in a `finally`
+			// that never runs, and the Pay button would be dead until reload.
+			// The till must not freeze on a healthy network because of a
+			// bookkeeping write, so a timeout is treated exactly like any other
+			// ledger failure: warn, skip the contribution, sell.
+			async runLedgerOp(label, run) {
+				let timer = null;
+				const TIMEOUT = Symbol("ledger-timeout");
+				try {
+					const outcome = await Promise.race([
+						run(),
+						new Promise((resolve) => {
+							timer = setTimeout(() => resolve(TIMEOUT), 2000);
+						}),
+					]);
+					if (outcome === TIMEOUT) {
+						console.warn(
+							`[Payments] ${label} timed out; contribution skipped`,
+						);
+						return false;
+					}
+					return true;
+				} catch (err) {
+					console.warn(`[Payments] ${label} failed`, err);
+					return false;
+				} finally {
+					if (timer !== null) clearTimeout(timer);
+				}
+			},
 			parseSubmitData(raw) {
 				if (!raw) return {};
 				if (typeof raw === "object") return raw;
@@ -925,13 +963,14 @@ export default {
 				this.pos_opening_shift?.pos_offline_id ||
 				null;
 			if (!shiftLifecycleId && this.pos_opening_shift?.name) {
-				try {
+				// Also deadline-bounded: this is a Dexie read on the same
+				// critical path, with the same never-settles failure mode as
+				// the staging write below.
+				await this.runLedgerOp("findShiftByServerName", async () => {
 					const { findShiftByServerName } = await import("@/offline/shift-lifecycle");
 					const row = await findShiftByServerName(this.pos_opening_shift.name);
 					shiftLifecycleId = row?.offline_id || null;
-				} catch (err) {
-					console.warn("[Payments] findShiftByServerName failed", err);
-				}
+				});
 			}
 			if (!shiftLifecycleId) {
 				// No lifecycle id resolvable by any route. Skip rather than
@@ -942,7 +981,7 @@ export default {
 					"[Payments] no shift lifecycle id; skipping contribution staging",
 				);
 			} else {
-				try {
+				await this.runLedgerOp("stageContribution", async () => {
 					const { stageContribution } = await import("@/offline/contribution-ledger");
 					await stageContribution({
 						invoiceOfflineId,
@@ -953,9 +992,7 @@ export default {
 							"Cash",
 						precision: Number(window.sys_defaults?.currency_precision || 2),
 					});
-				} catch (err) {
-					console.warn("[Payments] stageContribution failed", err);
-				}
+				});
 			}
 
 			// Un-stage on any failure exit below. `deriveExpectedByMop` sums
@@ -966,12 +1003,10 @@ export default {
 			// when staging was skipped or never ran: deleting a missing key is
 			// a no-op.
 			const discardStagedContribution = async () => {
-				try {
+				await this.runLedgerOp("discardContribution", async () => {
 					const { discardContribution } = await import("@/offline/contribution-ledger");
 					await discardContribution(invoiceOfflineId);
-				} catch (err) {
-					console.warn("[Payments] discardContribution failed", err);
-				}
+				});
 			};
 
 			let r = null;
@@ -1018,12 +1053,10 @@ export default {
 				vm.invoice_doc.pospire_pending_sync = true;
 				vm.invoice_doc.pospire_offline_id = r.offline_id;
 
-				try {
+				await vm.runLedgerOp("confirmContribution", async () => {
 					const { confirmContribution } = await import("@/offline/contribution-ledger");
 					await confirmContribution(invoiceOfflineId);
-				} catch (err) {
-					console.warn("[Payments] confirmContribution failed", err);
-				}
+				});
 
 				if (print) {
 					vm.handleProvisionalPrint(vm.invoice_doc);
@@ -1043,12 +1076,10 @@ export default {
 				return;
 			}
 
-			try {
+			await vm.runLedgerOp("confirmContribution", async () => {
 				const { confirmContribution } = await import("@/offline/contribution-ledger");
 				await confirmContribution(invoiceOfflineId);
-			} catch (err) {
-				console.warn("[Payments] confirmContribution failed", err);
-			}
+			});
 
 			if (print) {
 				vm.handlePrint(vm.invoice_doc.name);

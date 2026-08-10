@@ -145,6 +145,22 @@ export class PospireJournalDB extends Dexie {
 export const db = new PospireOfflineDB();
 export const journalDb = new PospireJournalDB();
 
+// LOGGING ONLY. `blocked` fires when this tab's version upgrade cannot proceed
+// because another tab still holds an older connection open. Dexie does not
+// reject the open in that case — it simply waits, so the symptom is "every
+// IndexedDB call in this tab hangs forever" with nothing in the console to
+// explain it. Callers on the sale path defend themselves with their own
+// deadline; this only makes the cause visible.
+//
+// Deliberately NO `versionchange` handler: Dexie's default closes the
+// connection so the OTHER tab's upgrade can complete, and overriding it would
+// turn a transient block into a permanent one.
+db.on("blocked", () => {
+	console.warn(
+		"[offline-db] IndexedDB upgrade is blocked by another open tab; operations in this tab will not settle until it closes",
+	);
+});
+
 // ---------------------------------------------------------------------------
 // Safe mode — state machine flag surfaced to the UI when corruption / storage
 // health is compromised (§8.4).

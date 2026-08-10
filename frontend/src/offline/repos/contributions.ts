@@ -15,6 +15,7 @@
 
 import { assertWritable, db, runInTransaction } from "../db";
 import { decrypt, encrypt, getActiveKey } from "../crypto";
+import { assertOfflineEnabled } from "../kill-switch";
 import type {
 	ContributionRow,
 	EncryptedEnvelope,
@@ -63,20 +64,22 @@ async function fromStored(
 	};
 }
 
-/** Write a pre-encrypted row. Upsert: re-staging the same invoice overwrites. */
+/**
+ * Write a pre-encrypted row. Upsert: re-staging the same invoice overwrites.
+ *
+ * Gated on the offline kill switch as well as safe mode, matching
+ * `outbox.enqueue`. With offline admin-disabled the device must not be
+ * accumulating encrypted per-invoice money rows on disk: the close dialog will
+ * never source from them (the server owns the figure) and nothing would prune
+ * them. Throws `OfflineDisabledError`; the sale path treats that like any other
+ * staging failure — warn and continue.
+ */
 export async function putContribution(
 	stored: StoredContributionRow,
 ): Promise<void> {
 	assertWritable();
+	await assertOfflineEnabled();
 	await db.contributions.put(stored);
-}
-
-export async function getContribution(
-	offlineId: string,
-): Promise<ContributionRow | undefined> {
-	const stored = await db.contributions.get(offlineId);
-	if (!stored) return undefined;
-	return fromStored(stored);
 }
 
 /**
@@ -87,8 +90,8 @@ export async function getContribution(
  * wasteful — it converts a corrupt envelope into a thrown error on a path that
  * had no business touching the ciphertext. `stageContribution` is exactly that
  * case: it reads only the scalars, and it must be able to overwrite a corrupt
- * row with a fresh one rather than being blocked by it. Use `getContribution`
- * when you genuinely need `by_mop`.
+ * row with a fresh one rather than being blocked by it. The shift-scoped list
+ * helpers below are the only readers that decrypt `by_mop`.
  */
 export async function getStoredContribution(
 	offlineId: string,
@@ -96,32 +99,46 @@ export async function getStoredContribution(
 	return db.contributions.get(offlineId);
 }
 
+export interface ContributionListing {
+	rows: ContributionRow[];
+	/**
+	 * Rows whose envelope would not decrypt. Their money is MISSING from
+	 * `rows`, so callers must surface this rather than presenting the sum as
+	 * fact — a shift with a good 10 and a corrupt 99 derives 10, and a clean
+	 * -looking short number is exactly what a cashier signs off on by mistake.
+	 */
+	skippedCount: number;
+}
+
 /**
  * All contributions for a shift, decrypted row-by-row.
  *
  * A row whose envelope will not decrypt is SKIPPED and logged, not thrown.
  * One corrupt row must cost only its own contribution — an all-or-nothing
- * failure here would silently zero the cashier's expected amount.
+ * failure here would silently zero the cashier's expected amount — but it is
+ * counted so the total can be labelled uncertain.
  */
 export async function listContributionsForShift(
 	shiftLifecycleId: string,
-): Promise<ContributionRow[]> {
+): Promise<ContributionListing> {
 	const stored = await db.contributions
 		.where("shift_lifecycle_id")
 		.equals(shiftLifecycleId)
 		.toArray();
-	const out: ContributionRow[] = [];
+	const rows: ContributionRow[] = [];
+	let skippedCount = 0;
 	for (const row of stored) {
 		try {
-			out.push(await fromStored(row));
+			rows.push(await fromStored(row));
 		} catch (err) {
+			skippedCount += 1;
 			console.warn(
 				`[contributions] skipping undecryptable row ${row.offline_id}`,
 				err,
 			);
 		}
 	}
-	return out;
+	return { rows, skippedCount };
 }
 
 /**

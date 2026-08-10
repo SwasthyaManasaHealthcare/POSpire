@@ -651,26 +651,43 @@ export default {
 			// Fall back to the Phase 1 outbox scan when no lifecycle id is
 			// resolvable at all (an upgrade-day snapshot predating the
 			// stamp). An offline-only figure is worse than the ledger's but
-			// far better than a blank one.
+			// far better than a blank one. The banner wording differs between
+			// the two — only the scan branch is blind to online sales — so the
+			// stub carries a discriminator, not just `pospire_offline_stub`.
 			let queued = { byMop: {}, uncertainCount: 0 };
+			let source = "scan";
 			try {
 				if (lifecycleId) {
-					const [{ deriveExpectedByMop }, { sumQueuedPaymentsByMop }] =
-						await Promise.all([
-							import("@/offline/contribution-ledger"),
-							import("@/offline/shift-lifecycle"),
-						]);
+					const [
+						{ deriveExpectedByMop },
+						{ scanQueuedContributionsByInvoice },
+					] = await Promise.all([
+						import("@/offline/contribution-ledger"),
+						import("@/offline/shift-lifecycle"),
+					]);
 					const derived = await deriveExpectedByMop(lifecycleId, precision);
+					// Keyed off whether the ledger actually HAS rows, not off
+					// whether an id resolved. An upgrade-day shift resolves an id
+					// but has no contributions at all, and its figure then comes
+					// entirely from the outbox — which is blind to online sales,
+					// so the Phase 1 caveat is still the truthful banner there.
+					if (derived.offlineIds.length > 0) source = "ledger";
 					// Assign from the ledger FIRST, before the scan even runs.
 					// `contributionForInvoice`/`resolveChangeAmount` (which the
 					// scan below calls per row) are unguarded on payload shape —
 					// unlike `listInvoiceRowsAcrossStatuses`, which is
 					// deliberately written so one poison row cannot "silently
 					// zero the cashier's entire expected-amount figure". A scan
-					// throw below must therefore only cost the gap-detection and
-					// needs_review count, never the ledger figure already
-					// computed here.
-					queued = { byMop: derived.byMop, uncertainCount: derived.pendingCount };
+					// throw below must therefore only cost the outbox-side
+					// additions, never the ledger figure already computed here.
+					queued = {
+						byMop: derived.byMop,
+						// `skippedCount` is money that DECRYPTED NOWHERE: an
+						// undecryptable row's amount is simply absent from
+						// `byMop`, so without this the dialog would show a short
+						// number with no hint that anything went missing.
+						uncertainCount: derived.pendingCount + derived.skippedCount,
+					};
 
 					// Run the Phase 1 scan alongside the ledger EVEN THOUGH an id
 					// resolved. Two live cases need it:
@@ -680,14 +697,15 @@ export default {
 					//    resolve" left this case showing opening amounts only —
 					//    strictly worse than the Phase 1 stopgap it replaced.
 					//  - A permanent gap: a sale where staging was skipped (no
-					//    lifecycle id at sale time) or `stageContribution` threw
-					//    is invisible to the ledger forever, but the scan still
-					//    catches it if it was queued.
+					//    lifecycle id at sale time, Dexie in safe mode, the
+					//    staging timeout in Payments.vue firing) is invisible to
+					//    the ledger forever, but the scan still catches it if it
+					//    was queued.
 					// Wrapped in its own try/catch — see the comment above
 					// `queued`'s assignment: a scan failure must not undo it.
-					let scan = { byMop: {}, uncertainCount: 0 };
+					let scan = { byMop: {}, uncertainCount: 0, byInvoice: new Map() };
 					try {
-						scan = await sumQueuedPaymentsByMop({
+						scan = await scanQueuedContributionsByInvoice({
 							openingServerName: opening.name || null,
 							shiftOfflineId: lifecycleId,
 							cashMode,
@@ -695,55 +713,56 @@ export default {
 						});
 					} catch (err) {
 						console.warn(
-							"[Pos] outbox scan failed; gap-detection and needs_review count skipped",
+							"[Pos] outbox scan failed; queued-only sales may be missing from the figure",
 							err,
 						);
 					}
 
-					if (Object.keys(derived.byMop).length === 0) {
-						// Ledger has nothing for this shift — the upgrade-day
-						// case. The scan is all there is; use it outright. Still
-						// carry `derived.pendingCount`: a staged-but-unconfirmed
-						// contribution can have an empty `by_mop` (a zero-payment
-						// or fully loyalty-funded invoice), which would otherwise
-						// be silently dropped here even though something is
-						// genuinely still pending.
-						queued = {
-							byMop: scan.byMop,
-							uncertainCount: scan.uncertainCount + derived.pendingCount,
-						};
-					} else {
-						// The ledger has SOME data. Deliberately not merged with
-						// the scan: the scan only sees QUEUED sales while the
-						// ledger sees every sale, so neither summing the two
-						// (double-counts anything already in both) nor taking a
-						// per-MOP max is correct in general — either risks
-						// mis-stating the figure a cashier signs off on. Instead,
-						// trust the ledger's total (already assigned above) but
-						// use the scan to DETECT a shortfall: any MOP where the
-						// scan reports more than the ledger is evidence the
-						// ledger is missing a sale for that MOP, so fold it into
-						// the uncertainty count rather than silently trusting
-						// either source.
-						let gapCount = 0;
-						for (const [mop, amount] of Object.entries(scan.byMop)) {
-							if (amount > (derived.byMop[mop] ?? 0)) gapCount += 1;
+					// UNION the two stores, per invoice. Both key on the same
+					// invoice `offline_id` (`call()` passes it as
+					// `offlineIdempotencyKey`; `enqueue` stores it verbatim), so
+					// "in the ledger" and "in the outbox" is an exact test and
+					// the union is exactly computable: every ledger contribution,
+					// PLUS every outbox invoice the ledger never saw.
+					//
+					// Earlier revisions computed the scan and then threw its
+					// money away, folding it into a bare count. That understated
+					// the drawer by the full value of any sale whose staging was
+					// skipped — on upgrade day, by the whole pre-upgrade shift.
+					// Neither store is a superset of the other (the scan can't
+					// see online sales; the ledger can't see sales staged before
+					// it existed or when staging was skipped), so taking either
+					// one alone is wrong.
+					const ledgerIds = new Set(derived.offlineIds);
+					const byMop = { ...derived.byMop };
+					const f = 10 ** precision;
+					let gapCount = 0;
+					for (const [offlineId, contribution] of scan.byInvoice) {
+						if (ledgerIds.has(offlineId)) continue; // already counted — never twice.
+						gapCount += 1;
+						for (const [mop, amount] of Object.entries(contribution)) {
+							byMop[mop] =
+								Math.round(((byMop[mop] || 0) + amount) * f) / f;
 						}
-						queued = {
-							byMop: derived.byMop,
-							// Combine every signal the ledger's own pendingCount
-							// misses: contributions still pending (stage/confirm
-							// not resolved) PLUS outbox invoices this shift has
-							// in needs_review/handed_off (server rejected or
-							// handed the sale off) PLUS any detected shortfall
-							// above. `confirmContribution` fires on the enqueue
-							// ack, before either of those outbox outcomes is
-							// known, so a later-rejected sale stays "confirmed"
-							// and would otherwise raise no flag at all.
-							uncertainCount:
-								derived.pendingCount + scan.uncertainCount + gapCount,
-						};
 					}
+					queued = {
+						byMop,
+						// Combine every signal the ledger's own pendingCount
+						// misses: contributions still pending (stage/confirm not
+						// resolved) PLUS rows that would not decrypt PLUS outbox
+						// invoices this shift has in needs_review/handed_off
+						// (server rejected or handed the sale off) PLUS the
+						// invoices the ledger never recorded at all.
+						// `confirmContribution` fires on the enqueue ack, before
+						// either outbox outcome is known, so a later-rejected
+						// sale stays "confirmed" and would otherwise raise no
+						// flag at all.
+						uncertainCount:
+							derived.pendingCount +
+							derived.skippedCount +
+							scan.uncertainCount +
+							gapCount,
+					};
 				} else {
 					const { sumQueuedPaymentsByMop } = await import(
 						"@/offline/shift-lifecycle"
@@ -808,6 +827,11 @@ export default {
 				denomination_details: opening.denomination_details || [],
 				pospire_offline_stub: true,
 				pospire_uncertain_count: queued.uncertainCount,
+				// "ledger" | "scan" — which store the expected amounts came
+				// from. The dialog needs it because only the scan branch is
+				// structurally blind to sales made earlier while ONLINE, and
+				// that caveat must not be shown when it is false.
+				pospire_source: source,
 			};
 		},
 		async submit_closing_pos(data) {

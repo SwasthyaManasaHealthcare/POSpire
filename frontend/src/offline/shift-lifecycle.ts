@@ -345,6 +345,20 @@ export interface QueuedPaymentSum {
 	uncertainCount: number;
 }
 
+export interface QueuedContributionScan extends QueuedPaymentSum {
+	/**
+	 * Per-invoice contributions, keyed by the invoice's `offline_id` — the SAME
+	 * id the contribution ledger keys on (`call()` passes it as
+	 * `offlineIdempotencyKey` and `enqueue` stores it verbatim as the outbox
+	 * row's `offline_id`).
+	 *
+	 * This is what makes a UNION of the two stores exactly computable: the
+	 * close dialog can add the outbox rows the ledger never saw without
+	 * double-counting the ones it did.
+	 */
+	byInvoice: Map<string, Record<string, number>>;
+}
+
 /**
  * Sum queued invoice payments for a shift, by mode of payment.
  *
@@ -480,24 +494,24 @@ export interface QueuedPaymentSum {
  * Invoices whose inner doc fails to parse are NOT counted here — they contribute
  * no money and are a distinct failure mode (unreadable, not merely unconfirmed).
  *
- * This is a STOPGAP for offline-queued sales only (Issue 3, Task 10). Sales
- * made earlier in the shift while online leave no trace in the outbox and are
- * NOT recovered here — that needs the Phase 2 per-invoice contribution
- * ledger. Callers must label whatever they build from this figure provisional.
+ * This scan sees OFFLINE-QUEUED sales only: sales made earlier in the shift
+ * while online leave no trace in the outbox. That is what the Phase 2
+ * contribution ledger exists to cover. Neither store is a superset of the
+ * other, so the close dialog unions them per invoice — see `byInvoice`.
  */
-export async function sumQueuedPaymentsByMop(input: {
+export async function scanQueuedContributionsByInvoice(input: {
 	openingServerName: string | null;
 	shiftOfflineId: string | null;
 	cashMode: string;
 	precision: number;
-}): Promise<QueuedPaymentSum> {
+}): Promise<QueuedContributionScan> {
 	// Without an anchor, `row.shift_offline_id` falsy AND
 	// `readInnerShiftName(row.payload) === null` would match EVERY unanchored
 	// invoice in the outbox — including other shifts' — because `null ===
 	// null`. Refuse to aggregate rather than silently pull in other shifts'
 	// money.
 	if (!input.shiftOfflineId && !input.openingServerName) {
-		return { byMop: {}, uncertainCount: 0 };
+		return { byMop: {}, uncertainCount: 0, byInvoice: new Map() };
 	}
 
 	const buckets: OutboxStatus[] = [
@@ -522,11 +536,12 @@ export async function sumQueuedPaymentsByMop(input: {
 		// vanish silently either — this is the one signal an operator has
 		// that the total is short by an unknown, undecryptable invoice.
 		console.warn(
-			`[shift-lifecycle] sumQueuedPaymentsByMop: skipped ${corruptCount} outbox row(s) that failed to decrypt`,
+			`[shift-lifecycle] scanQueuedContributionsByInvoice: skipped ${corruptCount} outbox row(s) that failed to decrypt`,
 		);
 	}
 
 	const seen = new Set<string>();
+	const byInvoice = new Map<string, Record<string, number>>();
 	const byMop: Record<string, number> = {};
 	let uncertainCount = 0;
 
@@ -572,11 +587,30 @@ export async function sumQueuedPaymentsByMop(input: {
 			input.cashMode,
 			input.precision,
 		);
+		byInvoice.set(row.offline_id, contribution);
 		for (const [mop, amount] of Object.entries(contribution)) {
 			byMop[mop] = round((byMop[mop] ?? 0) + amount, input.precision);
 		}
 	}
 
+	return { byMop, uncertainCount, byInvoice };
+}
+
+/**
+ * The scan's shift total, without the per-invoice breakdown.
+ *
+ * Thin wrapper so the per-invoice arithmetic has exactly one implementation:
+ * callers that only need "what do the queued sales add up to" (the no-lifecycle
+ * -id fallback branch of the close dialog) keep the old shape.
+ */
+export async function sumQueuedPaymentsByMop(input: {
+	openingServerName: string | null;
+	shiftOfflineId: string | null;
+	cashMode: string;
+	precision: number;
+}): Promise<QueuedPaymentSum> {
+	const { byMop, uncertainCount } =
+		await scanQueuedContributionsByInvoice(input);
 	return { byMop, uncertainCount };
 }
 
