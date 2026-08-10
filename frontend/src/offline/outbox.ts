@@ -1024,7 +1024,13 @@ export async function resetForRetry(offlineId: string): Promise<void> {
 // Utilities
 // ---------------------------------------------------------------------------
 
-function readDeviceId(): string {
+/**
+ * Exported so `shift-lifecycle.ts` (and any other module that needs to
+ * stamp a device id outside the outbox's own enqueue path) reuses this
+ * exact fallback logic instead of growing a second copy. `audit-export.ts`
+ * still carries its own pre-existing duplicate; not touched here.
+ */
+export function readDeviceId(): string {
 	try {
 		if (typeof localStorage !== "undefined") {
 			return localStorage.getItem(LS_DEVICE_ID) ?? "unknown-device";

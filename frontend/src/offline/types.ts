@@ -172,6 +172,13 @@ export interface ShiftRow {
 	closing_notes: string | null;
 	closed_at: number | null;
 	closing_server_name: string | null;
+	/**
+	 * Offline_id of the queued closing entry this shift is waiting on.
+	 * Set while `status === "closed_pending_sync"`, cleared once the closing
+	 * syncs. Distinct from `closing_server_name`, which is the SERVER's name
+	 * for the closing and only exists after sync.
+	 */
+	pending_closing_offline_id: string | null;
 	status: ShiftStatus;
 	manager_approval_required: boolean;
 }
@@ -193,6 +200,13 @@ export interface StoredShiftRow {
 	variance_at_sync: { by_mop: Record<string, number>; total: number } | null;
 	closed_at: number | null;
 	closing_server_name: string | null;
+	/**
+	 * Offline_id of the queued closing entry this shift is waiting on.
+	 * Set while `status === "closed_pending_sync"`, cleared once the closing
+	 * syncs. Distinct from `closing_server_name`, which is the SERVER's name
+	 * for the closing and only exists after sync.
+	 */
+	pending_closing_offline_id: string | null;
 	status: ShiftStatus;
 	manager_approval_required: boolean;
 	// Encrypted siblings — may be null when the shift is still open.

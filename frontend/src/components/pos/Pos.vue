@@ -61,7 +61,7 @@ import MpesaPayments from "./Mpesa-Payments.vue";
 import { call, unwrapStale } from "@/utils/call";
 import { OPENING_DIALOG_CACHE_KEY } from "@/utils/call-registry";
 import { toast } from "vue3-toastify";
-import { onSynced } from "@/offline/outbox";
+import { onSynced, readDeviceId } from "@/offline/outbox";
 import { setBeaconContext } from "@/offline/beacon";
 import connectivity from "@/offline/connectivity";
 
@@ -78,6 +78,7 @@ export default {
 				pendingMasterDataRefresh: { items: false, customers: false },
 				cartHasItems: false,
 				pendingClosingOfflineId: null,
+				shiftLifecycleId: null,
 			};
 		},
 
@@ -234,6 +235,10 @@ export default {
 			if (!snapshot?.pos_profile) return;
 			this.pos_profile = snapshot.pos_profile;
 			this.pos_opening_shift = snapshot.pos_opening_shift;
+			// Every shift gets a durable row and a local lifecycle UUID,
+			// online-opened ones included. Fire-and-forget: a Dexie failure
+			// must never block the POS from loading.
+			this.registerShiftLifecycle(snapshot);
 			this.get_offers(this.pos_profile.name);
 			this.eventBus.emit("register_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
@@ -257,6 +262,41 @@ export default {
 				console.warn("[Pos] setBeaconContext failed", err);
 			}
 			this.warm_customer_form_options_cache();
+		},
+		async registerShiftLifecycle(snapshot) {
+			const shift = snapshot?.pos_opening_shift;
+			if (!shift) return;
+			try {
+				// Pos.vue's mounted() can apply a cached opening snapshot
+				// before App.vue's mounted() finishes initOfflineStorage()
+				// (children mount before their parent in Vue's lifecycle,
+				// and App's init is async). initOfflineStorage() is
+				// idempotent — this either joins the in-flight init or
+				// no-ops if it already finished — so the write below never
+				// races the Dexie open / crypto key setup it depends on.
+				const { initOfflineStorage } = await import("@/offline/db");
+				await initOfflineStorage();
+				const { registerOpenedShift } = await import(
+					"@/offline/shift-lifecycle"
+				);
+				const openingCashByMop = {};
+				(shift.balance_details || []).forEach((row) => {
+					openingCashByMop[row.mode_of_payment] = Number(row.amount) || 0;
+				});
+				this.shiftLifecycleId = await registerOpenedShift({
+					openingServerName: shift.pos_offline_id ? null : shift.name || null,
+					posProfile: snapshot.pos_profile || {},
+					openingCashByMop,
+					cashierUser: shift.user || window.user || "",
+					deviceId: readDeviceId(),
+				});
+				// Task 9's lock reads this off the in-memory shift.
+				if (this.pos_opening_shift) {
+					this.pos_opening_shift.pospire_lifecycle_id = this.shiftLifecycleId;
+				}
+			} catch (err) {
+				console.warn("[Pos] registerShiftLifecycle failed", err);
+			}
 		},
 		create_opening_voucher() {
 			this.dialog = true;
@@ -633,6 +673,7 @@ export default {
 				this.pos_profile = data.pos_profile;
 				this.get_offers(this.pos_profile.name);
 				this.pos_opening_shift = data.pos_opening_shift;
+				this.registerShiftLifecycle(data);
 				this.eventBus.emit("register_pos_profile", data);
 				if (data.pos_profile && data.company) {
 					this.persistOpeningSnapshot(

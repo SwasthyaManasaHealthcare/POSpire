@@ -84,6 +84,7 @@ async function toStored(row: ShiftRow): Promise<StoredShiftRow> {
 		variance_at_sync: row.variance_at_sync,
 		closed_at: row.closed_at,
 		closing_server_name: row.closing_server_name,
+		pending_closing_offline_id: row.pending_closing_offline_id,
 		status: row.status,
 		manager_approval_required: row.manager_approval_required,
 		opening_cash_envelope: opening,
@@ -133,6 +134,7 @@ async function fromStored(stored: StoredShiftRow): Promise<ShiftRow> {
 		closing_notes: notes,
 		closed_at: stored.closed_at,
 		closing_server_name: stored.closing_server_name,
+		pending_closing_offline_id: stored.pending_closing_offline_id,
 		status: stored.status,
 		manager_approval_required: stored.manager_approval_required,
 	};
@@ -201,6 +203,7 @@ export async function updateShiftStatus(
 			| "closed_at"
 			| "closing_server_name"
 			| "opening_server_name"
+			| "pending_closing_offline_id"
 			| "variance_at_sync"
 			| "manager_approval_required"
 		>
