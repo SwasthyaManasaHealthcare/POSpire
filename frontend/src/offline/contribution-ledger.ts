@@ -15,9 +15,9 @@
 import {
 	buildStoredContribution,
 	deleteContributionsForShift,
-	getContribution,
+	getStoredContribution,
 	listContributionsForShift,
-	listPendingContributions,
+	listPendingContributionsForShift,
 	markContributionConfirmed,
 	putContribution,
 } from "./repos/contributions";
@@ -46,7 +46,12 @@ export async function stageContribution(
 		input.cashMode,
 		input.precision,
 	);
-	const existing = await getContribution(input.invoiceOfflineId);
+	// The STORED row, deliberately not decrypted: only the plaintext scalars
+	// below are read. Decrypting here would make an unreadable envelope throw
+	// on the one path that can repair it — the `put` below overwrites the
+	// corrupt row with a fresh, readable one — and because staging happens
+	// BEFORE the submit, that throw would hard-block the sale itself.
+	const existing = await getStoredContribution(input.invoiceOfflineId);
 	const row: ContributionRow = {
 		offline_id: input.invoiceOfflineId,
 		shift_lifecycle_id: input.shiftLifecycleId,
@@ -108,12 +113,18 @@ export async function deriveExpectedByMop(
  * The oracle is `offline.get_shift_invoice_offline_ids`, which returns
  * `pos_offline_id` for every submitted Sales Invoice on the shift — and both
  * submit paths persist that id, so it covers live and queued sales alike.
+ *
+ * Both the input and the result are scoped to `shiftLifecycleId`, because the
+ * oracle is scoped to one opening: rows from another shift can never appear in
+ * its answer, so including them would strand them in `stillPending` at every
+ * startup and misreport them as this shift's unconfirmed money.
  */
 export async function reconcilePendingContributions(opts: {
+	shiftLifecycleId: string;
 	openingServerName: string | null;
 	openingOfflineId: string | null;
 }): Promise<{ confirmed: string[]; stillPending: string[] }> {
-	const pending = await listPendingContributions();
+	const pending = await listPendingContributionsForShift(opts.shiftLifecycleId);
 	if (!pending.length) return { confirmed: [], stillPending: [] };
 	if (!opts.openingServerName && !opts.openingOfflineId) {
 		return { confirmed: [], stillPending: pending.map((r) => r.offline_id) };

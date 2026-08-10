@@ -80,6 +80,23 @@ export async function getContribution(
 }
 
 /**
+ * The stored row, WITHOUT decrypting `by_mop`.
+ *
+ * For callers that only need the plaintext scalars (`status`, `created_at`,
+ * `confirmed_at`). Decrypting where the plaintext is never read is not merely
+ * wasteful — it converts a corrupt envelope into a thrown error on a path that
+ * had no business touching the ciphertext. `stageContribution` is exactly that
+ * case: it reads only the scalars, and it must be able to overwrite a corrupt
+ * row with a fresh one rather than being blocked by it. Use `getContribution`
+ * when you genuinely need `by_mop`.
+ */
+export async function getStoredContribution(
+	offlineId: string,
+): Promise<StoredContributionRow | undefined> {
+	return db.contributions.get(offlineId);
+}
+
+/**
  * All contributions for a shift, decrypted row-by-row.
  *
  * A row whose envelope will not decrypt is SKIPPED and logged, not thrown.
@@ -107,12 +124,27 @@ export async function listContributionsForShift(
 	return out;
 }
 
-/** Pending rows across every shift — the startup reconciliation's input. */
-export async function listPendingContributions(): Promise<ContributionRow[]> {
-	const stored = await db.contributions
-		.where("status")
-		.equals("pending")
-		.toArray();
+/**
+ * Pending rows for ONE shift — the startup reconciliation's input.
+ *
+ * Scoped to a shift rather than global because the oracle it feeds
+ * (`get_shift_invoice_offline_ids`) is itself scoped to one opening: a pending
+ * row belonging to an earlier shift could never appear in that answer, so a
+ * global query would re-ask about it at every startup forever and report it as
+ * this shift's unconfirmed money.
+ *
+ * Queried on the `shift_lifecycle_id` index and filtered on `status` in memory
+ * — the schema has no compound index, and a shift's row count is small.
+ */
+export async function listPendingContributionsForShift(
+	shiftLifecycleId: string,
+): Promise<ContributionRow[]> {
+	const stored = (
+		await db.contributions
+			.where("shift_lifecycle_id")
+			.equals(shiftLifecycleId)
+			.toArray()
+	).filter((row) => row.status === "pending");
 	const out: ContributionRow[] = [];
 	for (const row of stored) {
 		try {
