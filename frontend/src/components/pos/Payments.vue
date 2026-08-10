@@ -722,6 +722,7 @@
 <script>
 import { call } from "@/utils/call";
 import { OfflineReturnDeferredError } from "@/utils/call-registry";
+import { uuidV4 } from "@/offline/db";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import { toast } from "vue3-toastify"; // <-- make sure this is imported
@@ -734,6 +735,7 @@ export default {
 		loading: false,
 		submittingPayment: false,
 		pos_profile: "",
+		pos_opening_shift: "",
 		invoice_doc: "",
 		loyalty_amount: 0,
 		today_date: datetime.now_date(),
@@ -890,6 +892,45 @@ export default {
 			// customer, and substitutes the real name. forceQueue is a no-op
 			// when the registry entry isn't offline-capable.
 			const hasOfflineCustomer = !!this.invoice_doc?.customer_offline_id;
+
+			// One id for the whole sale. `call()` would generate this itself,
+			// but the ledger needs it BEFORE the request so the contribution
+			// can be staged first. Passing it as offlineIdempotencyKey makes
+			// the outbox row, the server's pos_offline_id, and the ledger key
+			// all the same value on both the live and queued paths.
+			const invoiceOfflineId = uuidV4();
+
+			// Stage the contribution before submitting. If the app dies between
+			// here and the confirm, the row survives as `pending` and the
+			// startup reconciliation resolves it against the server.
+			// Never let a ledger failure block the sale.
+			const shiftLifecycleId = this.pos_opening_shift?.pospire_lifecycle_id;
+			if (!shiftLifecycleId) {
+				// No lifecycle id means an upgrade-day snapshot that predates
+				// the Phase 1 stamp. Skip rather than writing a row keyed to
+				// no shift: it would count toward nothing and could never be
+				// pruned. The close dialog falls back to the Phase 1 outbox
+				// scan for this shift.
+				console.warn(
+					"[Payments] no shift lifecycle id; skipping contribution staging",
+				);
+			} else {
+				try {
+					const { stageContribution } = await import("@/offline/contribution-ledger");
+					await stageContribution({
+						invoiceOfflineId,
+						shiftLifecycleId,
+						invoice: this.invoice_doc,
+						cashMode:
+							(this.pos_profile && this.pos_profile.posa_cash_mode_of_payment) ||
+							"Cash",
+						precision: Number(window.sys_defaults?.currency_precision ?? 2),
+					});
+				} catch (err) {
+					console.warn("[Payments] stageContribution failed", err);
+				}
+			}
+
 			let r = null;
 			try {
 				r = await call({
@@ -900,6 +941,7 @@ export default {
 					},
 					intent: "write",
 					forceQueue: hasOfflineCustomer,
+					offlineIdempotencyKey: invoiceOfflineId,
 				});
 			} catch (err) {
 				if (err instanceof OfflineReturnDeferredError) {
@@ -931,6 +973,13 @@ export default {
 				vm.invoice_doc.pospire_pending_sync = true;
 				vm.invoice_doc.pospire_offline_id = r.offline_id;
 
+				try {
+					const { confirmContribution } = await import("@/offline/contribution-ledger");
+					await confirmContribution(invoiceOfflineId);
+				} catch (err) {
+					console.warn("[Payments] confirmContribution failed", err);
+				}
+
 				if (print) {
 					vm.handleProvisionalPrint(vm.invoice_doc);
 				}
@@ -947,6 +996,13 @@ export default {
 				vm.eventBus.emit("clear_invoice", { submitted: true });
 				vm.back_to_invoice();
 				return;
+			}
+
+			try {
+				const { confirmContribution } = await import("@/offline/contribution-ledger");
+				await confirmContribution(invoiceOfflineId);
+			} catch (err) {
+				console.warn("[Payments] confirmContribution failed", err);
 			}
 
 			if (print) {
@@ -1502,6 +1558,10 @@ export default {
 			});
 			this.eventBus.on("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
+				// Same object reference Pos.vue/Invoice.vue hold — later
+				// in-place stamps of `pospire_lifecycle_id` (registerShiftLifecycle,
+				// sync ack handlers) stay visible here without a re-emit.
+				this.pos_opening_shift = data.pos_opening_shift;
 				// Initialize is_cashback based on POS Profile setting
 				// If use_cashback is disabled (0), set is_cashback to false
 				// If use_cashback is enabled (1), keep it true (default)
