@@ -268,32 +268,73 @@ export interface QueuedPaymentSum {
  * netted of change. Change is NOT read from `inner.change_amount` — that
  * field is computed server-side, at submit time, by ERPNext's
  * `calculate_change_amount()` (erpnext/controllers/taxes_and_totals.py) and
- * does not exist on a queued-but-not-yet-submitted invoice payload. Instead
- * this reads `posa_submit_data.total_change`, the client-computed change
- * value `Payments.vue` already carries alongside the payment (see its
- * `submit_invoice()`: `total_change = !is_return ? -diff_payment : 0`), and
- * re-applies ERPNext's own guards before trusting it:
- *   - not a return (`calculate_change_amount`'s `not self.doc.is_return`);
- *   - a cash payment was actually tendered (mirrors
- *     `any(d.type == "Cash" for d in self.doc.payments)`). ERPNext's guard
- *     reads each payment row's `type`, fetched from the linked Mode of
- *     Payment (`Sales Invoice Payment.type`, `fetch_from:
- *     mode_of_payment.type`) — but that field is populated server-side at
- *     `.save()`/`.insert()` (see `posapp.py`'s `update_invoice`), so a queued
- *     invoice that never round-tripped through a server save while online
- *     (the exact case this stopgap exists for) never gets it written.
- *     Trusting `payments[].type` here would make the guard permanently
- *     false for genuinely offline invoices and defeat the fix it's meant to
- *     enable. Use the signal the rest of this codebase already relies on for
- *     the same purpose instead: `_aggregate_closing_from_invoices` nets
- *     change purely by `mode_of_payment == cash_mode`, with no `type` check
- *     at all — so "a cash-type payment was tendered" becomes "the profile's
- *     cash-mode row is present on this invoice with a positive amount";
- *   - the value is positive (mirrors `self.doc.paid_amount > grand_total`;
- *     a partial-payment invoice can have total_change negative and must not
- *     be "netted" into a bonus).
- * `parseInnerDoc`/`parseSubmitData` never throw on malformed JSON — a bad
- * payload just yields no change for that invoice, not an aborted scan.
+ * does not exist on a queued-but-not-yet-submitted invoice payload.
+ *
+ * It is also NOT read from `posa_submit_data.total_change` — an earlier
+ * revision of this function did, and that turned out to be an unreliable
+ * source with two measured failure modes, both reproduced against the real
+ * `submit_invoice` adapter:
+ *   1. `Payments.vue` computes `total_payments` (and therefore
+ *      `total_change`, via `diff_payment`) behind `if (!this.is_cashback)
+ *      total = 0`. On a POS Profile with `use_cashback = 0`, `is_cashback`
+ *      is false for every sale, so `total_change` comes out as
+ *      `-rounded_total`, gets clamped to 0 by the "positive" guard, and NO
+ *      change is ever netted for that entire class of profiles — the
+ *      original overstatement bug, fully restored.
+ *   2. `total_payments` also folds in `redeemed_customer_credit` and
+ *      `loyalty_amount`, neither of which the server's `paid_amount`
+ *      includes. An invoice with redeemed credit (e.g. grand_total 90,
+ *      credit 40, cash 60) nets a PHANTOM change the server never computes
+ *      (client sees "paid" 100 vs 90 -> change 10; server sees paid_amount
+ *      60 < 90 -> no change) and books cash short.
+ * Both failures share a root cause: `total_change` is a PARALLEL client-side
+ * calculation with its own gating and inputs that can drift from what the
+ * server actually books, rather than being derived from the same two
+ * numbers the server uses.
+ *
+ * Instead, this derives change exactly the way ERPNext does:
+ * `change = paid_amount - (rounded_total or grand_total)`, clamped to >= 0.
+ * `paid_amount` is summed directly from `payments[].amount` (mirrors
+ * ERPNext's own `calculate_paid_amount()`, not `posa_submit_data`), and
+ * `rounded_total` / `grand_total` are read straight off the inner doc.
+ * Both are reliably present on a genuinely-offline queued invoice —
+ * `Invoice.vue`'s `get_invoice_doc()` (lines ~2226-2241) stamps
+ * `rounded_total` equal to `grand_total` unconditionally, client-side, with
+ * no server round-trip required, even when the POS Profile disables
+ * rounding. The `rounded_total || grand_total` fallback (matching Python's
+ * `or`, where a falsy 0/absent value falls through) is kept anyway as a
+ * defensive match to the server's own condition, in case a future payload
+ * shape ever omits one.
+ *
+ * Guards applied, mirroring `calculate_change_amount`'s conditions:
+ *   - not a return (`not self.doc.is_return`) — see the `is_return` check
+ *     below; currently unreachable via the real adapter (which throws
+ *     `OfflineReturnDeferredError` for `is_return` before any invoice
+ *     payload is built — returns cannot reach the outbox as type `invoice`
+ *     in this phase), kept as defense-in-depth for a legacy row or future
+ *     offline-return support;
+ *   - the value is positive (`self.doc.paid_amount > grand_total`) — a
+ *     partial-payment invoice (`posa_allow_partial_payment`) can have
+ *     paid_amount < total; that must not "net" into a negative-turned-bonus.
+ *
+ * DELIBERATELY NOT mirrored: `any(d.type == "Cash" for d in payments)`.
+ * `type` (`Sales Invoice Payment.type`, fetch_from `mode_of_payment.type`)
+ * is populated server-side only when an invoice round-trips through
+ * `posapp.py`'s `update_invoice()` (`.save()`) while online — exactly the
+ * condition a genuinely offline invoice never meets — so it is unusable
+ * client-side. Two known, deliberate divergences follow from omitting it:
+ *   (1) a cash MOP whose underlying `Mode of Payment.type` is not "Cash":
+ *       the server's guard fails and nets nothing; this function still
+ *       nets the change.
+ *   (2) a zero-amount cash-mode payment row alongside over-tender on a
+ *       different MOP: the server nets the change against that (zero)
+ *       cash row and can drive its expected amount negative; this
+ *       function's per-invoice change is the same value, applied the same
+ *       way, so in the cases where the two arithmetically diverge the
+ *       client figure is arguably the physically correct one anyway — this
+ *       is exactly what the dialog's "provisional" label exists to cover.
+ * `parseInnerDoc` never throws on malformed JSON — a bad payload just
+ * yields no change for that invoice, not an aborted scan.
  *
  * This mirrors the server's CLOSING-time aggregation
  * (`_aggregate_closing_from_invoices` in pospire/pospire/api/offline.py),
@@ -394,7 +435,7 @@ export async function sumQueuedPaymentsByMop(input: {
 		}
 
 		const payments = (inner.payments as Array<Record<string, unknown>>) || [];
-		const change = resolveChangeAmount(inner, payments, input.cashMode);
+		const change = resolveChangeAmount(inner, payments);
 		for (const p of payments) {
 			const mop = String(p.mode_of_payment ?? "");
 			if (!mop) continue;
@@ -411,46 +452,44 @@ export async function sumQueuedPaymentsByMop(input: {
 }
 
 /**
- * Client-side stand-in for ERPNext's `calculate_change_amount()`. Reads the
- * change value `Payments.vue` already computed (`posa_submit_data.total_change`)
- * rather than `change_amount` (a server-only, post-submit field — see the
- * doc comment above `sumQueuedPaymentsByMop`), and applies the same three
- * guards the server checks before trusting it (see that doc comment for why
- * the "cash payment present" guard is checked via `cashMode` rather than
- * `payments[].type`). Returns 0 — meaning "net nothing" — whenever any guard
- * fails, exactly like the server leaving `change_amount` at its `0.0` default.
+ * Client-side stand-in for ERPNext's `calculate_change_amount()`. Derives
+ * change from `payments[].amount` and `rounded_total`/`grand_total` — the
+ * same two quantities the server computes it from — rather than from
+ * `posa_submit_data`, a parallel client calculation that measurably drifts
+ * from the server's numbers (see the doc comment above
+ * `sumQueuedPaymentsByMop` for the two reproduced failure modes, and for the
+ * `payments[].type` guard this deliberately does NOT attempt to mirror).
+ * Returns 0 — meaning "net nothing" — whenever a guard fails, exactly like
+ * the server leaving `change_amount` at its `0.0` default.
  */
 function resolveChangeAmount(
 	inner: Record<string, unknown>,
 	payments: Array<Record<string, unknown>>,
-	cashMode: string,
 ): number {
-	if (inner.is_return) return 0; // `not self.doc.is_return`
-	const cashPayment = payments.find(
-		(p) => String(p.mode_of_payment ?? "") === cashMode,
-	);
-	if (!cashPayment || !(Number(cashPayment.amount) > 0)) return 0; // `any(d.type == "Cash" ...)` proxy
-	const submitData = parseSubmitData(inner.posa_submit_data);
-	const totalChange = Number(submitData.total_change) || 0;
-	// `self.doc.paid_amount > grand_total` — a partial-payment invoice can
-	// have total_change negative; treat anything <= 0 as "no change given".
-	return totalChange > 0 ? totalChange : 0;
-}
+	// `not self.doc.is_return`. Currently unreachable via the real adapter,
+	// which throws `OfflineReturnDeferredError` for returns before any
+	// invoice payload is built (call-registry.ts) — kept as defense-in-depth
+	// so a future reader does not need to infer this from the adapter's
+	// behavior alone, and so it still holds if a legacy row or later offline-
+	// return support ever reaches this function.
+	if (inner.is_return) return 0;
 
-/**
- * Mirrors `Payments.vue`'s / `Invoice.vue`'s own `parseSubmitData` — the
- * wrapper stores `posa_submit_data` as either a JSON string or (for older
- * queued rows) an already-parsed object. Never throws.
- */
-function parseSubmitData(raw: unknown): Record<string, unknown> {
-	if (!raw) return {};
-	if (typeof raw === "object") return raw as Record<string, unknown>;
-	if (typeof raw !== "string") return {};
-	try {
-		return JSON.parse(raw) as Record<string, unknown>;
-	} catch {
-		return {};
-	}
+	const paidAmount = payments.reduce(
+		(sum, p) => sum + (Number(p.amount) || 0),
+		0,
+	);
+	// `self.doc.rounded_total or self.doc.grand_total`. Both fields are
+	// reliably present on the client's own queued doc — see the doc comment
+	// above `sumQueuedPaymentsByMop`. The `||` chain matches Python's `or`
+	// (a falsy 0/absent value falls through) rather than `??`, defensively,
+	// in case a differently-shaped payload ever omits `rounded_total`.
+	const total = Number(inner.rounded_total) || Number(inner.grand_total) || 0;
+
+	const change = paidAmount - total;
+	// `self.doc.paid_amount > grand_total` — a partial-payment invoice can
+	// have paid_amount < total; that must not "net" into a negative-turned-
+	// bonus.
+	return change > 0 ? change : 0;
 }
 
 function parseInnerDoc(payload: unknown): Record<string, unknown> | null {
