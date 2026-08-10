@@ -118,15 +118,15 @@ export default defineComponent({
         case "needs_review":
           return `${needsReviewCount.value} transaction${needsReviewCount.value === 1 ? "" : "s"} need attention`;
         case "chained_shifts":
-          return `${unsyncedOpeningCount.value} unsynced shift${unsyncedOpeningCount.value === 1 ? "" : "s"} stacked — reconnect before opening another`;
+          return `${unsyncedOpeningCount.value} unsynced shift${unsyncedOpeningCount.value === 1 ? "" : "s"} stacked. Reconnect before opening another`;
         case "offline": {
           if (oldestPendingMinutes.value !== null && oldestPendingMinutes.value >= 30) {
-            return `You are offline — ${oldestPendingMinutes.value} min`;
+            return `You are offline: ${oldestPendingMinutes.value} min`;
           }
-          return `You are offline — ${queuedCount.value} transaction${queuedCount.value === 1 ? "" : "s"} queued`;
+          return `You are offline: ${queuedCount.value} transaction${queuedCount.value === 1 ? "" : "s"} queued`;
         }
         case "degraded":
-          return "Connectivity unstable — saving locally";
+          return "Connectivity unstable: saving locally";
         case "syncing":
           return `Syncing ${inFlightCount.value || pendingCount.value} transaction${(inFlightCount.value || pendingCount.value) === 1 ? "" : "s"}…`;
         default:

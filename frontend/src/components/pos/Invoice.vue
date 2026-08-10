@@ -4305,7 +4305,7 @@ export default {
 			if (await this.isShiftLocked()) {
 				toast.warning(
 					__(
-						"This shift is closing — its closing entry is queued. Open a new shift before ringing up another sale.",
+						"This shift is closing. Its closing entry is queued. Open a new shift before ringing up another sale.",
 					),
 					{ autoClose: 5000 },
 				);

@@ -87,7 +87,7 @@
     >
       {{
         __(
-          '{0} entries queued — drain may take several minutes. Tap Pause if you need to keep taking orders without the sync noise.',
+          '{0} entries queued. Drain may take several minutes. Tap Pause if you need to keep taking orders without the sync noise.',
           [queuedCount]
         )
       }}
@@ -200,7 +200,7 @@
                 location="left"
                 :text="
                   __(
-                    'Copy the OSR ID — share it with a manager so they can locate this entry in the Desk recovery queue.'
+                    'Copy the OSR ID and share it with a manager so they can locate this entry in the Desk recovery queue.'
                   )
                 "
               >
