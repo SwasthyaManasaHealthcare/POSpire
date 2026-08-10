@@ -57,7 +57,7 @@
 										:prefix="currencySymbol(pos_profile.currency)"
 										:readonly="
 											denominations_enabled ||
-											props.item.mode_of_payment !== (denomination_config[pos_profile]?.cash_mode || 'Cash')
+											props.item.mode_of_payment !== cashModeForSelectedProfile
 										"
 										/>
 								</template>
@@ -273,7 +273,18 @@ export default {
 		return this.denomination_rows.reduce((sum, row) => {
 			return sum + (row.denomination_value * (row.quantity || 0));
 		}, 0);
-	}
+	},
+
+			/**
+			 * Cash MOP for the selected profile, straight from the server
+			 * policy. Never falls back to a snapshot — Task 6 deletes the
+			 * snapshot dependency, and reintroducing it here would restore the
+			 * second source of truth by the back door. The literal "Cash" is a
+			 * last resort only for profiles that send no policy at all.
+			 */
+			cashModeForSelectedProfile() {
+				return this.denomination_config[this.pos_profile]?.cash_mode || "Cash";
+			},
 
 	},
 	methods: {
