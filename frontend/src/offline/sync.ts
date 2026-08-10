@@ -638,7 +638,18 @@ export class SyncScheduler {
 						result.detail,
 					);
 				} else if (result.kind === "park") {
-					await markBlocked(entry.offline_id, result.reason);
+					// Persist WHAT the row is waiting on, not just that it is
+					// waiting — the reconciliation workspace reads
+					// `last_error_detail`. Passing only two args would default
+					// `detail` to null and wipe any prior error text.
+					const waitingOn = result.missingOfflineIds.length
+						? ` (waiting on: ${result.missingOfflineIds.join(", ")})`
+						: "";
+					await markBlocked(
+						entry.offline_id,
+						result.reason,
+						`${result.detail}${waitingOn}`,
+					);
 					cycle.parked = (cycle.parked ?? 0) + 1;
 				} else {
 					// Mark needs_review first (stable terminal state) before attempting
