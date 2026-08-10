@@ -269,6 +269,55 @@ export default {
 			}
 		},
 
+		/**
+		 * Reconciliation-path contribution prune — DISTINCT from the live
+		 * `onSynced` `closing_entry` prune further below. Do NOT fold these
+		 * two into one: they cover different windows.
+		 *
+		 * A closing can land in `released` here WITHOUT `onSynced` ever
+		 * having fired for it, because that live callback needs a
+		 * subscriber running at the moment the sync happens:
+		 *   - the `onSynced` prune itself threw (it is warn-only and does
+		 *     not retry, so the row would otherwise survive forever);
+		 *   - another tab drained the outbox while this tab was on a
+		 *     different route and `Pos.vue` was unmounted;
+		 *   - the outbox row was vacuumed to a tombstone before this tab
+		 *     observed the sync.
+		 * In every one of those, this reconciliation pass is the ONLY
+		 * remaining place that ever learns the closing landed, so it must
+		 * carry its own prune rather than relying on `onSynced` to have
+		 * already done it.
+		 *
+		 * `deleteContributionsForShift` is idempotent (deletes are a no-op
+		 * on an already-empty shift), so this and the `onSynced` prune can
+		 * never conflict — the common case prunes once via `onSynced` and
+		 * this call simply finds nothing left to do on the next boot.
+		 *
+		 * `released` ONLY, same as `dropSnapshotForReleasedShifts` — never
+		 * `reopened`. A reopened shift's closing was voided, so the shift
+		 * is still sellable and its takings must still be there.
+		 *
+		 * Fire-and-forget by design: called without `await` from the
+		 * reconciliation chain, which must boot the POS regardless of
+		 * whether pruning succeeds. Failure is caught here and only
+		 * warned — it must never reject into that chain.
+		 */
+		pruneReleasedShiftContributions(releasedIds) {
+			if (!Array.isArray(releasedIds) || !releasedIds.length) return;
+			import("@/offline/contribution-ledger")
+				.then(({ deleteContributionsForShift }) =>
+					Promise.all(
+						releasedIds.map((id) => deleteContributionsForShift(id)),
+					),
+				)
+				.catch((err) => {
+					console.warn(
+						"[Pos] reconciliation contribution prune failed",
+						err,
+					);
+				});
+		},
+
 		openingSnapshotDiffers(cached, live) {
 			if (!cached) return true;
 			if (
@@ -1084,6 +1133,11 @@ export default {
 					// what used to strand them in the opening dialog and get a
 					// second shift opened against the first.
 					this.dropSnapshotForReleasedShifts(result?.released);
+					// Reconciliation-path contribution prune (see the method's
+					// doc comment). Deliberately NOT awaited: this whole chain
+					// exists to unblock `check_opening_entry()` in `.finally`
+					// below, and pruning must never delay or fail that boot.
+					this.pruneReleasedShiftContributions(result?.released);
 				})
 				.catch((err) => {
 					console.warn("[Pos] pending-closure reconciliation failed", err);
@@ -1295,6 +1349,14 @@ export default {
 						// contributions can go. Deliberately NOT done at close
 						// time: a queued close can sit unsynced for hours and
 						// the dialog may be reopened in the meantime.
+						//
+						// LIVE-SYNC prune — DISTINCT from the reconciliation-path
+						// prune in `pruneReleasedShiftContributions` (called from
+						// the `mounted` reconciliation chain). Do NOT merge these
+						// two: this one only ever fires while a subscriber is
+						// running at the moment the sync happens (see that
+						// method's doc comment for the cases it misses and why
+						// the other hook exists to catch them).
 						try {
 							const { deleteContributionsForShift } = await import(
 								"@/offline/contribution-ledger"
