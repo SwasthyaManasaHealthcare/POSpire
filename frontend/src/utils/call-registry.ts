@@ -192,6 +192,16 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		cacheTTLMs: 24 * HOUR,
 	},
+	// Opening-dialog reference data. Durable-cached (see DURABLE_KEYS in
+	// offline/read-cache.ts) so it survives a reload — the cashier often
+	// reaches this dialog only after an offline close, on a fresh page load.
+	// Both call sites MUST pass OPENING_DIALOG_CACHE_KEY as opts.cacheKey; the
+	// default arg-hashed key is neither stable nor allowlistable.
+	"pospire.pospire.api.posapp.get_opening_dialog_data": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 
 	// -----------------------------------------------------------------------
 	// Reads — LIVE ONLY (P-4: server stays authoritative)
@@ -205,16 +215,6 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	"pospire.pospire.api.posapp.get_applicable_delivery_charges": {
 		intent: "read",
 		offline: false,
-	},
-	// Opening-dialog reference data. Durable-cached (see DURABLE_KEYS in
-	// offline/read-cache.ts) so it survives a reload — the cashier often
-	// reaches this dialog only after an offline close, on a fresh page load.
-	// Both call sites MUST pass OPENING_DIALOG_CACHE_KEY as opts.cacheKey; the
-	// default arg-hashed key is neither stable nor allowlistable.
-	"pospire.pospire.api.posapp.get_opening_dialog_data": {
-		intent: "read",
-		offline: true,
-		cacheTTLMs: 24 * HOUR,
 	},
 	"pospire.pospire.api.posapp.check_opening_shift": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_draft_invoices": { intent: "read", offline: false },

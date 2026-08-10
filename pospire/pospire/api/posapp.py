@@ -100,10 +100,18 @@ def get_opening_dialog_data() -> dict:
 		pos_profiles_list.append(i.name)
 
 	payment_method_table = "POS Payment Method"
+	# Explicit field list, not fields=["*"]. This response is durable-cached
+	# client-side (unencrypted Dexie `metadata` table, see DURABLE_KEYS in
+	# frontend/src/offline/read-cache.ts) on the premise that it carries no
+	# PII. "*" on a child table also returns `owner`/`modified_by` (staff
+	# email addresses) and would silently re-introduce PII the moment this
+	# doctype gains a new field. Only "parent" (used below AND by both
+	# OpeningDialog consumers to match a profile) and "mode_of_payment"
+	# (the only other field either consumer reads) are needed.
 	data["payments_method"] = frappe.get_list(
 		payment_method_table,
 		filters={"parent": ["in", pos_profiles_list]},
-		fields=["*"],
+		fields=["parent", "mode_of_payment"],
 		limit_page_length=0,
 		order_by="parent",
 		ignore_permissions=True,

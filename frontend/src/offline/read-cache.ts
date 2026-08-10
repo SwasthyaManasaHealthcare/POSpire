@@ -87,10 +87,15 @@ const DURABLE_KEYS: ReadonlySet<string> = new Set([
 	"dashboard.shift", // shift dashboard cards + graph/table payload
 	"offline.customer_form_options", // territory / gender / customer-group lists
 	// Opening-dialog reference data: companies, POS profile names, POS Payment
-	// Method rows, denomination policy. No PII, no catalogue — qualifies under
-	// the allowlist contract above. Durable because the dialog is unusable
-	// without it and the cashier often reaches it only after a reload, offline.
-	// Do not widen get_opening_dialog_data's response without re-checking this.
+	// Method rows (server explicitly selects only `parent` + `mode_of_payment`
+	// — NOT fields=["*"], which would also return `owner`/`modified_by` staff
+	// emails, see pospire/pospire/api/posapp.py::get_opening_dialog_data),
+	// denomination policy. No PII, no catalogue — qualifies under the
+	// allowlist contract above. Durable because the dialog is unusable
+	// without it and the cashier often reaches it only after a reload,
+	// offline. Do not widen get_opening_dialog_data's response (server OR
+	// client side) without re-checking this — a future `fields=["*"]` or an
+	// added PII field on the doctype would silently defeat the allowlist.
 	"offline.opening_dialog_data",
 ]);
 

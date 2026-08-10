@@ -200,6 +200,7 @@ export default {
 			denominations_enabled: false,
 			config_is_stale: false,
 			config_unavailable: false,
+			unsubConnectivity: null,
 		};
 	},
 	watch: {
@@ -279,6 +280,28 @@ export default {
 		close_opening_dialog() {
 			this.eventBus.emit("close_opening_dialog");
 		},
+		/**
+		 * Single source of truth for populating the dialog from a
+		 * `get_opening_dialog_data` payload. Used by BOTH the initial fetch
+		 * and the reconnect refresh — a previous version only had
+		 * `refresh_dialog_config` update `payments_method_data` /
+		 * `denomination_config`, which never repopulated `companies` /
+		 * `pos_profiles_data`. Since `company`/`pos_profile` stayed "" on a
+		 * cold-boot-offline dialog, reassigning `payments_method_data` alone
+		 * never re-fired the `pos_profile` watcher, so Submit flipped
+		 * enabled on reconnect while the form was still completely blank —
+		 * the exact silent dead end this task exists to remove.
+		 *
+		 * Assigns `companies` (does NOT push) so re-running this on refresh
+		 * doesn't duplicate entries.
+		 */
+		applyDialogData(r) {
+			this.companies = (r.companies || []).map((element) => element.name);
+			this.company = this.companies[0];
+			this.pos_profiles_data = r.pos_profiles_data || [];
+			this.payments_method_data = r.payments_method || [];
+			this.denomination_config = r.denomination_config || {};
+		},
 		async get_opening_dialog_data() {
 			// Durable read-cache. The registry marks this method offline:true
 			// and OPENING_DIALOG_CACHE_KEY is allowlisted in DURABLE_KEYS, so a
@@ -286,7 +309,6 @@ export default {
 			// reload while offline. Pos.vue warms it on every online boot,
 			// because a terminal that runs all day on an already-open shift
 			// never opens this dialog and would otherwise arrive here cold.
-			const vm = this;
 			let r = null;
 			try {
 				const raw = await call({
@@ -310,13 +332,7 @@ export default {
 			}
 
 			this.config_unavailable = false;
-			(r.companies || []).forEach((element) => {
-				vm.companies.push(element.name);
-			});
-			vm.company = vm.companies[0];
-			vm.pos_profiles_data = r.pos_profiles_data || [];
-			vm.payments_method_data = r.payments_method || [];
-			vm.denomination_config = r.denomination_config || {};
+			this.applyDialogData(r);
 		},
 		async refresh_dialog_config() {
 			let fresh = null;
@@ -335,18 +351,44 @@ export default {
 			if (!fresh) return;
 
 			this.config_unavailable = false;
-			this.payments_method_data = fresh.payments_method || [];
-			this.denomination_config = fresh.denomination_config || {};
+			// `previousProfile` lets us tell whether `applyDialogData` just
+			// drove the `company` → `pos_profile` watcher chain from a blank
+			// selection (cold-boot-offline reconnect): in that case the
+			// `pos_profile` watcher below already built payments_methods AND
+			// denomination_rows from scratch, so re-deriving them again here
+			// would both duplicate work and double the misconfiguration
+			// toast. When the profile selection is UNCHANGED, neither
+			// watcher fires (Vue only calls a watcher when the value
+			// actually changes), so payments_methods/denomination_rows are
+			// left exactly as the cashier last saw them — which is what
+			// preserves typed quantities across a reconnect.
+			const previousProfile = this.pos_profile;
+			this.applyDialogData(fresh);
+			if (this.pos_profile !== previousProfile) return;
 
 			// Re-derive the grid for the selected profile WITHOUT resetting
-			// quantities the cashier has already counted into it.
+			// quantities the cashier has already counted into it. Mirrors
+			// the `pos_profile` watcher's gate EXACTLY: `enabled: true` alone
+			// does not mean render the grid — {enabled:true, denominations:[]}
+			// is a real "misconfigured" state. Locking the cash field on an
+			// unconfigured-but-enabled profile (by gating on `enabled` alone)
+			// would strand the cashier with no way to enter opening cash.
 			const config = this.denomination_config[this.pos_profile];
-			if (!config?.enabled) return;
+			if (!config?.denominations?.length) {
+				this.denominations_enabled = false;
+				this.denomination_rows = [];
+				if (config) {
+					toast.warning(__("Cash denominations are enabled for this profile but no denomination rows are configured."), {
+						autoClose: 5000,
+					});
+				}
+				return;
+			}
 			const typed = new Map(
 				this.denomination_rows.map((row) => [row.denomination, row.quantity]),
 			);
 			this.denominations_enabled = true;
-			this.denomination_rows = (config.denominations || []).map((d) => ({
+			this.denomination_rows = config.denominations.map((d) => ({
 				denomination: d.denomination,
 				denomination_name: d.denomination_name,
 				denomination_value: d.denomination_value,
@@ -558,14 +600,14 @@ export default {
 		// before it flips back, and any offline:false read throws without
 		// touching the network during that window. A dialog opened in the
 		// gap would otherwise stay on stale config for its whole lifetime.
-		this._unsubConnectivity = connectivity.onChange(() => {
+		this.unsubConnectivity = connectivity.onChange(() => {
 			if (!connectivity.isOnline()) return;
 			if (!this.config_is_stale && !this.config_unavailable) return;
 			this.refresh_dialog_config();
 		});
 	},
 	beforeUnmount() {
-		if (this._unsubConnectivity) this._unsubConnectivity();
+		if (this.unsubConnectivity) this.unsubConnectivity();
 	},
 };
 </script>
