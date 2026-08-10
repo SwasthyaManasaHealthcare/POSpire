@@ -7,7 +7,17 @@
 		<NewAddress></NewAddress>
 		<MpesaPayments></MpesaPayments>
 		<Variants></Variants>
-		<OpeningDialog v-if="dialog" :dialog="dialog"></OpeningDialog>
+		<!--
+			`closing-pending` is passed as a prop rather than signalled over the
+			eventBus: the dialog is `v-if`-ed into existence BY the close path,
+			so a `shift_closing_pending` event emitted there always fires
+			before this component exists and its listener would never run.
+		-->
+		<OpeningDialog
+			v-if="dialog"
+			:dialog="dialog"
+			:closing-pending="!!pendingClosingOfflineId"
+		></OpeningDialog>
 
 		<!-- Modal Components -->
 		<CouponsModal v-model="showCouponsModal"></CouponsModal>
@@ -242,13 +252,9 @@ export default {
 			this.get_offers(this.pos_profile.name);
 			this.eventBus.emit("register_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
-			if (snapshot.pos_opening_shift?.pospire_closing_pending) {
-				this.eventBus.emit("shift_closing_pending", {
-					shift_offline_id: snapshot.pos_opening_shift?.pos_offline_id,
-					closing_offline_id:
-						snapshot.pos_opening_shift?.pospire_pending_closing_offline_id,
-				});
-			}
+			// Closing-pending is no longer read off the snapshot — it lives on
+			// the durable shift row and is re-announced by
+			// registerShiftLifecycle() once the row has been looked up.
 			try {
 				setBeaconContext({
 					outlet:
@@ -284,7 +290,7 @@ export default {
 				// id instead of "unknown-device".
 				const { initOfflineStorage } = await import("@/offline/db");
 				await initOfflineStorage();
-				const { registerOpenedShift } = await import(
+				const { getShiftById, registerOpenedShift } = await import(
 					"@/offline/shift-lifecycle"
 				);
 				const openingCashByMop = {};
@@ -320,6 +326,28 @@ export default {
 				if (this.pos_opening_shift === shift) {
 					shift.pospire_lifecycle_id = lifecycleId;
 					this.restampOpeningSnapshotCache(shift, lifecycleId);
+				}
+
+				// Durable closing-pending state, re-announced. After a reload
+				// no `shift_closing_pending` event has ever fired in this
+				// session, so the shift row is the only thing that knows this
+				// shift is closing. Re-emitting rehydrates every in-session
+				// listener (cart lock, opening-dialog exit gate) from it.
+				// Deliberately LAST in the try: a decrypt failure here must not
+				// cost us the lifecycle-id stamping above.
+				const row = await getShiftById(lifecycleId);
+				if (row?.status === "closed_pending_sync") {
+					this.pendingClosingOfflineId = row.pending_closing_offline_id;
+					this.eventBus.emit("shift_closing_pending", {
+						shift_lifecycle_id: lifecycleId,
+						closing_offline_id: row.pending_closing_offline_id,
+					});
+					// The shift stays applied so the durable lock keeps
+					// resolving against it, but the cashier needs a route to a
+					// working till — otherwise a reload during a queued close
+					// strands them on a shift they can neither sell on nor
+					// close again.
+					this.create_opening_voucher();
 				}
 			} catch (err) {
 				console.warn("[Pos] registerShiftLifecycle failed", err);
@@ -439,52 +467,36 @@ export default {
 				this.check_opening_entry();
 				return;
 			}
-				if (r && r.offline === true && r.status === "enqueued") {
-					this.pendingClosingOfflineId = r.offline_id;
-					toast.info(
-						__("Shift close queued. It will finalise once every invoice in this shift has synced."),
-						{ autoClose: 5000 },
-					);
-				if (this.pos_opening_shift) {
-					this.pos_opening_shift = {
-						...this.pos_opening_shift,
-						pospire_closing_pending: true,
-						pospire_pending_closing_offline_id: r.offline_id,
-					};
+			if (r && r.offline === true && r.status === "enqueued") {
+				// Durable closing-pending state. The old code wrote a marker into
+				// the opening-shift snapshot and then nulled that same snapshot six
+				// lines later, so every reload-time recovery hook was dead: the
+				// sales lock evaporated and the queued close became invisible on
+				// refresh. State now lives on the shift row, which can also
+				// represent "A is closing while B is already open" — the normal
+				// state right after this branch routes the cashier to the dialog.
+				if (this.shiftLifecycleId) {
 					try {
-						const raw = localStorage.getItem("pospire.opening_shift_snapshot");
-						if (raw) {
-							const cached = JSON.parse(raw);
-							if (cached?.pos_opening_shift) {
-								cached.pos_opening_shift.pospire_closing_pending = true;
-								cached.pos_opening_shift.pospire_pending_closing_offline_id = r.offline_id;
-								localStorage.setItem(
-									"pospire.opening_shift_snapshot",
-									JSON.stringify(cached),
-								);
-							}
-						}
-					} catch {
-						/* non-fatal */
+						const { markShiftClosingPending } = await import(
+							"@/offline/shift-lifecycle"
+						);
+						await markShiftClosingPending(this.shiftLifecycleId, r.offline_id);
+					} catch (err) {
+						console.warn("[Pos] markShiftClosingPending failed", err);
 					}
 				}
+				this.pendingClosingOfflineId = r.offline_id;
+				toast.info(
+					__("Shift close queued. It will finalise once every invoice in this shift has synced."),
+					{ autoClose: 5000 },
+				);
 				this.eventBus.emit("shift_closing_pending", {
-					shift_offline_id: this.pos_opening_shift?.pos_offline_id,
+					shift_lifecycle_id: this.shiftLifecycleId,
 					closing_offline_id: r.offline_id,
 				});
-				try {
-					const raw = localStorage.getItem("pospire.opening_shift_snapshot");
-					if (raw) {
-						const cached = JSON.parse(raw);
-						cached.pos_opening_shift = null;
-						localStorage.setItem(
-							"pospire.opening_shift_snapshot",
-							JSON.stringify(cached),
-						);
-					}
-				} catch {
-					/* non-fatal */
-				}
+				// The snapshot is deliberately left pointing at the closing shift:
+				// it still carries `pospire_lifecycle_id`, which is how the lock
+				// re-resolves against the shift row after a reload.
 				this.pos_opening_shift = "";
 				this.create_opening_voucher();
 				return;
@@ -718,7 +730,24 @@ export default {
 		});
 
 		this.$nextTick(function () {
-			this.check_opening_entry();
+			// Rebuild closing-pending state from the outbox BEFORE the shift
+			// check runs, so a reload lands in the right state instead of
+			// silently resuming selling on a shift that is already closing —
+			// or staying locked on one whose closing landed while the app was
+			// shut. The shift check is chained rather than merely sequenced:
+			// reconciliation is async, and check_opening_entry() reads the very
+			// rows it rewrites. Chained off `.finally` so an import or Dexie
+			// failure still boots the POS.
+			import("@/offline/shift-lifecycle")
+				.then(({ reconcilePendingClosuresFromOutbox }) =>
+					reconcilePendingClosuresFromOutbox(),
+				)
+				.catch((err) => {
+					console.warn("[Pos] pending-closure reconciliation failed", err);
+				})
+				.finally(() => {
+					this.check_opening_entry();
+				});
 			this.get_pos_setting();
 			this.eventBus.on("close_opening_dialog", () => {
 				this.dialog = false;
@@ -805,7 +834,7 @@ export default {
 			// to the real server doc name. Subsequent invoices stop needing
 			// the offline_id forwarding (Invoice.vue's get_invoice_doc only
 			// emits `pos_opening_shift_offline_id` when that field is set).
-			this._unsubShiftSync = onSynced((event) => {
+			this._unsubShiftSync = onSynced(async (event) => {
 				if (event.type === "opening_entry") {
 					if (!event.server_doc_name || !event.provisional_name) return;
 					if (
@@ -845,29 +874,42 @@ export default {
 				}
 
 					// H4: closing entry synced. The shift is now genuinely closed
-					// on the server. If the cashier is still on the locked shift,
-					// release the local lock and route to the opening dialog. If
-					// they already opened the next shift, keep that active shift
-					// untouched and just clear the pending-close marker.
+					// on the server. Key off the CLOSING's own offline_id: the old
+					// guard read the ACTIVE shift's pending marker, so a synced
+					// closing for shift A could reset shift B — and after a reload
+					// (marker gone) it matched nothing at all and silently returned.
 					if (event.type === "closing_entry") {
-						const expected =
-							this.pos_opening_shift?.pospire_pending_closing_offline_id ||
-							this.pendingClosingOfflineId;
-						if (!expected || expected !== event.offline_id) return;
-						const stillOnLockedShift =
-							this.pos_opening_shift?.pospire_pending_closing_offline_id ===
-							event.offline_id;
-						this.pendingClosingOfflineId = null;
+						let resolved = null;
+						try {
+							const { resolveClosingSynced } = await import(
+								"@/offline/shift-lifecycle"
+							);
+							resolved = await resolveClosingSynced(event.offline_id);
+						} catch (err) {
+							console.warn("[Pos] resolveClosingSynced failed", err);
+							return;
+						}
+						if (!resolved) return;
+
+						if (this.pendingClosingOfflineId === event.offline_id) {
+							this.pendingClosingOfflineId = null;
+						}
 						toast.success(__("Shift closed and synced"), { autoClose: 3000 });
 						this.eventBus.emit("shift_closing_complete", {
+							shift_lifecycle_id: resolved.shiftLifecycleId,
 							closing_offline_id: event.offline_id,
 							closing_server_name: event.server_doc_name,
 						});
-						if (stillOnLockedShift) {
+
+						// Route to the opening dialog only if the cashier is STILL on
+						// the shift that just closed. If they already opened the next
+						// one, leave it — and its snapshot — completely alone.
+						if (resolved.shiftLifecycleId === this.shiftLifecycleId) {
 							this.invalidateOpeningSnapshot(
 								"pospire.opening_shift_snapshot",
 								"pospire.opening_shift_snapshot.meta",
 							);
+							this.shiftLifecycleId = null;
 							this.pos_opening_shift = "";
 							this.pos_profile = "";
 							this.create_opening_voucher();

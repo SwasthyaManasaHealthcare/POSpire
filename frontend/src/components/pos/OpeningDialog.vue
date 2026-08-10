@@ -7,7 +7,18 @@
 				<span class="text-h6 font-weight-bold text-primary">
 					{{ __("Create POS Opening Shift") }}
 				</span>
-				<v-btn icon="mdi-close" variant="text" @click="go_desk"></v-btn>
+				<!--
+					Hidden only while a close is queued: go_desk() navigates to
+					/app and tears down the SPA, which on that path would strand
+					the cashier with a locked shift and no till. Unchanged on a
+					normal open-shift dialog.
+				-->
+				<v-btn
+					v-if="!closingPending"
+					icon="mdi-close"
+					variant="text"
+					@click="go_desk"
+				></v-btn>
 			</v-card-title>
 
 			<v-card-text class="overflow-y-auto"
@@ -137,7 +148,14 @@
 			<v-divider />
 			<v-card-actions class="px-6 py-4 enhanced-modal-header">
 				<v-spacer />
-				<v-btn variant="text" color="grey-darken-1" @click="go_desk">
+				<!-- Same exit, same reason — hiding only the header X would leave
+					 the escape hatch wide open. -->
+				<v-btn
+					v-if="!closingPending"
+					variant="text"
+					color="grey-darken-1"
+					@click="go_desk"
+				>
 					{{ __("Cancel") }}
 				</v-btn>
 				<v-btn
@@ -162,7 +180,11 @@ import { toast } from "vue3-toastify";
 import { amountRules, isAmountValid } from "@/utils/validation";
 export default {
 	mixins: [format],
-	props: ["dialog"],
+	// `closingPending` comes in as a prop rather than over the eventBus: this
+	// dialog is `v-if`-ed into existence BY the offline-close path, so a
+	// `shift_closing_pending` event emitted there always fires before the
+	// component (and any listener it would register) exists.
+	props: ["dialog", "closingPending"],
 	data() {
 		return {
 			isOpen: this.dialog ? this.dialog : false,

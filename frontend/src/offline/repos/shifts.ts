@@ -199,6 +199,34 @@ export async function getShiftByOpeningServerName(
 	return fromStored(stored);
 }
 
+/**
+ * Plaintext scalars of every shift currently waiting on a queued closing.
+ *
+ * `pending_closing_offline_id`, `offline_id` and `status` are all plaintext
+ * on `StoredShiftRow`, so this deliberately skips `fromStored` — same
+ * reasoning as `getShiftByOpeningServerName` above: `listAllShifts()`
+ * decrypts every row in the table and throws the WHOLE lookup if any single
+ * unrelated row is corrupt or missing its opening-cash envelope. The two
+ * callers of this (startup reconciliation and closing-sync resolution) fail
+ * silently by design — a throw there would leave the app selling against a
+ * shift that is already closing, which is the exact bug this state exists
+ * to prevent — so they must not depend on the health of unrelated rows.
+ */
+export async function listPendingClosingShifts(): Promise<
+	Array<
+		Pick<StoredShiftRow, "offline_id" | "pending_closing_offline_id" | "status">
+	>
+> {
+	const stored = await db.shifts
+		.filter((row) => !!row.pending_closing_offline_id)
+		.toArray();
+	return stored.map((row) => ({
+		offline_id: row.offline_id,
+		pending_closing_offline_id: row.pending_closing_offline_id,
+		status: row.status,
+	}));
+}
+
 // ---------------------------------------------------------------------------
 // Write helpers
 // ---------------------------------------------------------------------------

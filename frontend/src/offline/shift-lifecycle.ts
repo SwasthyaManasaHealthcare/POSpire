@@ -18,13 +18,16 @@
  * name exists, and the online-opened case is precisely the one that breaks.
  */
 
+import { listByStatus } from "./outbox";
 import {
 	buildStoredShift,
 	getShiftById,
 	getShiftByOpeningServerName,
+	listPendingClosingShifts,
 	putShiftIfAbsent,
+	updateShiftStatus,
 } from "./repos/shifts";
-import type { ShiftRow } from "./types";
+import type { OutboxStatus, ShiftRow } from "./types";
 
 export interface OpenedShiftInput {
 	/**
@@ -116,3 +119,114 @@ export async function findShiftByServerName(
 
 /** Re-export so callers never reach past this module into the repo. */
 export { getShiftById };
+
+/**
+ * Outbox statuses that mean "this command has NOT landed on the server yet".
+ * `synced` and `voided` are both terminal and both mean the closing is no
+ * longer in flight, so neither keeps a shift locked.
+ */
+const UNSYNCED_OUTBOX_STATUSES: readonly OutboxStatus[] = [
+	"enqueued",
+	"in_flight",
+	"retry_pending",
+	"needs_review",
+	"handed_off",
+];
+
+/**
+ * Mark a shift as closing-pending against a queued closing entry.
+ *
+ * The link is `pending_closing_offline_id` — the closing's own outbox id —
+ * and NOT `closing_server_name`, which does not exist until the closing has
+ * actually synced.
+ */
+export async function markShiftClosingPending(
+	shiftLifecycleId: string,
+	closingOfflineId: string,
+): Promise<void> {
+	await updateShiftStatus(shiftLifecycleId, "closed_pending_sync", {
+		closed_at: Date.now(),
+		pending_closing_offline_id: closingOfflineId,
+	});
+}
+
+/**
+ * Resolve a synced closing back to its shift.
+ *
+ * Keys off the CLOSING's own offline_id, never off whatever shift happens to
+ * be active — reading the active shift's marker is what let a synced closing
+ * for shift A reset shift B, and what made the handler silently no-op after
+ * a reload. Returns null when no shift is waiting on this closing, so an
+ * unknown id changes nothing.
+ */
+export async function resolveClosingSynced(
+	closingOfflineId: string,
+): Promise<{ shiftLifecycleId: string; wasActive: boolean } | null> {
+	if (!closingOfflineId) return null;
+	const pending = await listPendingClosingShifts();
+	const match = pending.find(
+		(row) => row.pending_closing_offline_id === closingOfflineId,
+	);
+	if (!match) return null;
+
+	await updateShiftStatus(match.offline_id, "synced", {
+		pending_closing_offline_id: null,
+	});
+	return {
+		shiftLifecycleId: match.offline_id,
+		// The shift was still awaiting its close (rather than already
+		// advanced past it by a reconciliation pass) when this landed.
+		wasActive: match.status === "closed_pending_sync",
+	};
+}
+
+/**
+ * Is selling blocked right now?
+ *
+ * Blocked ONLY when the shift the cashier is actively on is itself closing.
+ * A closing-pending shift A must not lock selling on a freshly opened B —
+ * chained offline shifts are a supported requirement, and blocking them
+ * would halt sales during exactly the outage offline mode exists for.
+ */
+export async function isSellingBlocked(
+	activeShiftLifecycleId: string | null,
+): Promise<boolean> {
+	if (!activeShiftLifecycleId) return false;
+	const row = await getShiftById(activeShiftLifecycleId);
+	return row?.status === "closed_pending_sync";
+}
+
+/**
+ * Rebuild closing-pending state from the outbox after a reload.
+ *
+ * The outbox is the durable command log and therefore the reconciliation
+ * source; `db.shifts` is what the running app reads. Any shift whose queued
+ * closing has already left the unsynced set is released here — it landed
+ * (or was voided) while the app was closed.
+ *
+ * Returns the lifecycle ids that are still legitimately closing-pending.
+ */
+export async function reconcilePendingClosuresFromOutbox(): Promise<string[]> {
+	const unsynced = (
+		await Promise.all(UNSYNCED_OUTBOX_STATUSES.map((s) => listByStatus(s)))
+	).flat();
+	const liveClosingIds = new Set(
+		unsynced
+			.filter((row) => row.type === "closing_entry")
+			.map((row) => row.offline_id),
+	);
+
+	const stillPending: string[] = [];
+	for (const row of await listPendingClosingShifts()) {
+		const pendingId = row.pending_closing_offline_id;
+		if (!pendingId) continue;
+		if (liveClosingIds.has(pendingId)) {
+			stillPending.push(row.offline_id);
+		} else {
+			await updateShiftStatus(row.offline_id, "synced", {
+				pending_closing_offline_id: null,
+			});
+		}
+	}
+	return stillPending;
+}
