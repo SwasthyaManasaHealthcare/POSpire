@@ -11,7 +11,7 @@
  * explicitly overridden for this task only (see task-11-brief.md). `call.ts`
  * now performs its own `fetch()` instead of delegating to frappe-ui, and
  * there is no TypeScript compiler in this project to catch a shape mistake
- * in that rewrite — these five cases are the only real gate on it.
+ * in that rewrite — these six cases are the only real gate on it.
  *
  * Each test does its own `vi.resetModules()` + dynamic import (matching
  * `connectivity.test.ts`'s convention) so the connectivity module's
@@ -134,8 +134,9 @@ describe("liveFetch success", () => {
 // ---------------------------------------------------------------------------
 
 describe("liveFetch structured error", () => {
-	it("carries error_code/details/status through a structured 409", async () => {
-		const { call } = await importFresh();
+	it("carries error_code/details/status through a structured 409, and never reports success", async () => {
+		const { call, connectivity } = await importFresh();
+		const reportSpy = vi.spyOn(connectivity, "reportRequestOutcome");
 		const body = {
 			exc_type: "OfflineSubmitError",
 			error_code: "siblings_not_ready",
@@ -151,6 +152,11 @@ describe("liveFetch structured error", () => {
 			http_status_code: 409,
 			exc_type: "OfflineSubmitError",
 		});
+
+		// A 4xx/5xx must never be reported as a connectivity success — doing
+		// so would pin the detector "online" forever regardless of what the
+		// server is actually returning.
+		expect(reportSpy).not.toHaveBeenCalledWith("success");
 	});
 });
 
@@ -159,8 +165,9 @@ describe("liveFetch structured error", () => {
 // ---------------------------------------------------------------------------
 
 describe("liveFetch non-JSON error body", () => {
-	it("does not throw a SyntaxError on an HTML 502 and leaves structured fields undefined", async () => {
-		const { call } = await importFresh();
+	it("does not throw a SyntaxError on an HTML 502, leaves structured fields undefined, and never reports success", async () => {
+		const { call, connectivity } = await importFresh();
+		const reportSpy = vi.spyOn(connectivity, "reportRequestOutcome");
 		vi.stubGlobal(
 			"fetch",
 			vi
@@ -183,6 +190,10 @@ describe("liveFetch non-JSON error body", () => {
 		// http_status_code falls back to the real HTTP status when the
 		// (absent, unparseable) body has none of its own.
 		expect(e.http_status_code).toBe(502);
+
+		// Same rationale as the 409 case: a 5xx must never be reported as a
+		// connectivity success.
+		expect(reportSpy).not.toHaveBeenCalledWith("success");
 	});
 });
 
@@ -200,6 +211,36 @@ describe("liveFetch network rejection", () => {
 			"Failed to fetch",
 		);
 
+		expect(reportSpy).not.toHaveBeenCalledWith("success");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// 6. Abort — a cancel is not a connectivity signal
+// ---------------------------------------------------------------------------
+
+describe("liveFetch abort", () => {
+	it("rejects with AbortError without classifying it as network_error", async () => {
+		const { call, connectivity } = await importFresh();
+		const reportSpy = vi.spyOn(connectivity, "reportRequestOutcome");
+		// This is what a real `fetch()` rejects with when its `signal` fires —
+		// simulated here since the stubbed fetch doesn't wire up AbortController
+		// itself.
+		const abortError = new DOMException("The operation was aborted.", "AbortError");
+		vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(
+			call({ method: METHOD, args: {}, intent: "read", abortSignal: controller.signal }),
+		).rejects.toMatchObject({ name: "AbortError" });
+
+		// The regression this guards: without a rethrow-before-classify, an
+		// abort falls through classifyFetchError's default and comes out as
+		// network_error, which pins the connectivity detector toward OFFLINE
+		// on a user-initiated cancel and — on a write — would enqueue the very
+		// request that was just cancelled.
+		expect(reportSpy).not.toHaveBeenCalledWith("network_error");
 		expect(reportSpy).not.toHaveBeenCalledWith("success");
 	});
 });

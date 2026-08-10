@@ -21,9 +21,10 @@
 // `call()` — see the function for why (structured server error fields need to
 // survive the request). This file no longer needs a frappe-ui import as a
 // result, but the `no-restricted-imports` override for it in eslint.config.js
-// is left in place: it still legitimately covers call-registry.ts, and a
-// future change here that needs a frappe-ui helper directly is expected to
-// use it rather than re-litigate the boundary.
+// is left in place: it still legitimately covers the two remaining direct
+// importers (src/main.js and src/offline/connectivity.ts), and a future
+// change here that needs a frappe-ui helper directly is expected to use it
+// rather than re-litigate the boundary.
 import {
 	getMethodConfig,
 	isReadConfig,
@@ -735,6 +736,12 @@ async function buildLiveFetchError(
 			messages = [];
 		}
 	}
+	// `_server_messages` is server-controlled and only ever JSON-encodes to an
+	// array in practice, but JSON.parse doesn't guarantee that shape (e.g.
+	// `"{}"` parses to a plain object). Without this guard, `.concat`/`.map`
+	// below would throw a TypeError that escapes uncaught and gets
+	// misclassified as network_error — which would enqueue a 4xx write.
+	if (!Array.isArray(messages)) messages = [];
 	messages = messages.concat(parsed?.message as unknown);
 	messages = messages
 		.map((m) => {
@@ -771,8 +778,15 @@ async function buildLiveFetchError(
  * is the more direct source of truth when both are present.
  */
 function classifyFetchError(err: unknown): "network_error" | "http_4xx" | "http_5xx" {
+	// An AbortError is the caller cancelling, not the server being
+	// unreachable. Classifying it as network_error would count a user
+	// cancel toward the offline transition, serve stale cache instead of
+	// rejecting, and — worst — enqueue the very write that was cancelled.
+	// Rethrow here (not return a fourth classification) so both call sites
+	// propagate the abort unclassified and skip reportRequestOutcome entirely.
+	if (err instanceof Error && err.name === "AbortError") throw err;
 	// Defensive parsing — a rejected fetch() (e.g. `TypeError: Failed to
-	// fetch`, or an AbortError) won't have any of these fields.
+	// fetch`) won't have any of these fields.
 	if (!err || typeof err !== "object") return "network_error";
 	const e = err as Record<string, unknown>;
 	const response = e.response as { status?: unknown } | undefined;
