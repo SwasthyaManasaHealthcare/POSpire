@@ -503,7 +503,11 @@ def get_offline_tax_config(pos_profile: str | dict) -> dict:
 	Returns the POS Profile's invoice-level tax rows plus a map of Item Tax
 	Templates for per-item overrides.
 	"""
-	pos_profile = _load(pos_profile)
+	# Unlike the other pos_profile APIs, this one takes a bare POS Profile *name*,
+	# which is not JSON -- feeding it to _load() unconditionally raises and 500s.
+	# Only decode when the string actually looks like JSON.
+	if isinstance(pos_profile, str) and pos_profile.startswith(("{", '"')):
+		pos_profile = _load(pos_profile)
 	profile_name = pos_profile.get("name") if isinstance(pos_profile, dict) else pos_profile
 
 	sales_taxes = []
