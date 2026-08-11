@@ -10,7 +10,7 @@ app_email = "rajit@example.com"
 app_license = "GPLv3"
 required_apps = ["erpnext"]
 
-POSPIRE_COLOR = "#2563EB"
+POSPIRE_COLOR = "#0CC2D1"
 POSPIRE_MANAGER_PIN_EMAIL_TEMPLATE = "POSpire Manager PIN"
 
 # Includes in <head>
