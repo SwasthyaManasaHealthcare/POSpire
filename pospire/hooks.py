@@ -398,6 +398,9 @@ fixtures = [
 			]
 		],
 	},
+	{
+		"doctype": "POS Dashboard Settings",
+	},
 ]
 add_to_apps_screen = [
 	{
