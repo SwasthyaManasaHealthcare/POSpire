@@ -556,6 +556,11 @@ export default {
 
 					// Immediately update stock for cached items
 					vm.$nextTick(() => {
+						// The token can move between queueing this callback and
+						// running it — a newer get_items() or an unmount, both of
+						// which bump it. Re-check rather than start work for a
+						// catalogue that is no longer current.
+						if (catalogSeq !== vm.catalog_request_seq) return;
 						if (
 							!vm.pos_profile.pose_use_limit_search &&
 							vm.filtered_items.length > 0
@@ -606,6 +611,8 @@ export default {
 
 					// Immediately update stock quantities
 					vm.$nextTick(() => {
+						// Same re-check as the cached-hydration path above.
+						if (catalogSeq !== vm.catalog_request_seq) return;
 						if (
 							!vm.pos_profile.pose_use_limit_search &&
 							vm.filtered_items.length > 0
