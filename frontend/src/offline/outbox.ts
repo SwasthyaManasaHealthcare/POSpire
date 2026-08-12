@@ -691,6 +691,75 @@ export async function clearDependentsBlockedOn(
 }
 
 /**
+ * Repair rows latched on a parent that will never arrive.
+ *
+ * `listReady` drops rows with a non-null `blocked_reason` before the gate
+ * runs, so `evaluateParents` can never re-evaluate a row it already blocked.
+ * A shift opened online has no outbox row, so any child holding its
+ * `pos_offline_id` stays blocked forever without this pass.
+ *
+ * Drops a parent ONLY when the shifts store proves that shift reached the
+ * server. Invoice, customer and material-receipt dependencies are preserved,
+ * and `integrity_mismatch` blocks are never touched.
+ *
+ * Returns the number of rows repaired.
+ */
+export async function reconcileBlockedParents(): Promise<number> {
+	assertWritable();
+
+	let repaired = 0;
+
+	// Proof lookup, row read, filter and write all inside ONE transaction. Read
+	// outside it and a concurrent void/retry/status transition landing in the
+	// gap would be clobbered by a stale full-object put — potentially
+	// resurrecting a terminal row.
+	await db.transaction("rw", db.outbox, db.shifts, async () => {
+		const shiftOnServer = new Map<string, boolean>();
+		for (const shift of await db.shifts.toArray()) {
+			shiftOnServer.set(shift.offline_id, Boolean(shift.opening_server_name));
+		}
+
+		const rows = await db.outbox.toArray();
+		const present = new Set(rows.map((r) => r.offline_id));
+
+		for (const row of rows) {
+			if (
+				row.blocked_reason !== "waiting_for_parent" &&
+				row.blocked_reason !== "waiting_for_siblings"
+			) {
+				continue;
+			}
+			if (row.status === "synced" || row.status === "voided") continue;
+
+			const parents = row.parent_offline_ids ?? [];
+			const keep = parents.filter(
+				(pid) => present.has(pid) || !shiftOnServer.get(pid),
+			);
+			if (keep.length === parents.length) continue;
+
+			const current = await db.outbox.get(row.offline_id);
+			if (!current) continue;
+			if (
+				current.status !== row.status ||
+				current.blocked_reason !== row.blocked_reason
+			) {
+				continue;
+			}
+
+			await db.outbox.put({
+				...current,
+				parent_offline_ids: keep,
+				blocked_reason: null,
+				next_attempt_at: Date.now(),
+			});
+			repaired += 1;
+		}
+	});
+
+	return repaired;
+}
+
+/**
  * Resolve parent status for an entry. Returns:
  *   `ready`   → every parent is synced; entry may ship.
  *   `waiting` → at least one parent is still in-flight/enqueued; defer.
@@ -707,8 +776,13 @@ export async function evaluateParents(
 	for (const parentId of entry.parent_offline_ids) {
 		const parent = await db.outbox.get(parentId);
 		if (!parent) {
-			// Parent row missing entirely is a hard block — we can't reason
-			// about its status. Treat as blocked so the UI surfaces it.
+			// A shift opened ONLINE never gets an outbox row, but children
+			// still carry its `pos_offline_id` as a parent. The shifts store
+			// records the server name once the opening exists server-side, so
+			// there is nothing left to wait for. Any other missing parent is
+			// still a hard block: we can't reason about its status.
+			const shift = await db.shifts.get(parentId);
+			if (shift?.opening_server_name) continue;
 			blockedByParent = true;
 			continue;
 		}

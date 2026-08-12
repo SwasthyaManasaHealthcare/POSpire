@@ -2251,6 +2251,12 @@ export default {
 			// either reject (parent_not_ready) or insert with a dangling link.
 			if (this.pos_opening_shift?.pos_offline_id) {
 				doc.pos_opening_shift_offline_id = this.pos_opening_shift.pos_offline_id;
+				// Separate the server reference from the local dependency: the
+				// id above always goes to the server, but only a still-queued
+				// opening has an outbox row to wait on.
+				doc.pos_opening_shift_pending_sync = Boolean(
+					this.pos_opening_shift.pospire_pending_sync,
+				);
 			}
 			doc.disable_rounded_total = this.pos_profile.disable_rounded_total ? 1 : 0;
 			doc.payments = this.get_payments();

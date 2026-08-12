@@ -845,6 +845,11 @@ export default {
 					data.pos_opening_shift_offline_id ||
 					this.pos_opening_shift?.pos_offline_id ||
 					null,
+				// Only a still-queued opening is a local outbox parent; the id
+				// above is still sent to the server either way.
+				pos_opening_shift_pending_sync: Boolean(
+					this.pos_opening_shift?.pospire_pending_sync,
+				),
 				invoice_offline_ids: await this.collectShiftInvoiceOfflineIds(),
 			};
 
@@ -959,9 +964,23 @@ export default {
 		},
 
 		async collectShiftInvoiceOfflineIds() {
-			const openingOfflineId = this.pos_opening_shift?.pos_offline_id;
+			// `pos_offline_id` is CLEARED once the opening syncs (see the
+			// opening-sync handler below), but this shift's pre-sync invoice
+			// rows still carry that UUID in `shift_offline_id`. The lifecycle id
+			// is deliberately preserved as the surviving handle on them, so the
+			// local anchor must fall back to it or those invoices vanish from
+			// strict closure.
+			// The server endpoint keys off the REAL offline id only; the
+			// lifecycle fallback below is a local-scan concern and must not be
+			// sent as `opening_shift_offline_id`.
+			const openingOfflineId = this.pos_opening_shift?.pos_offline_id || null;
+			const openingLocalAnchor =
+				openingOfflineId ||
+				this.pos_opening_shift?.pospire_lifecycle_id ||
+				this.shiftLifecycleId ||
+				null;
 			const openingServerName = this.pos_opening_shift?.name;
-			if (!openingOfflineId && !openingServerName) return [];
+			if (!openingLocalAnchor && !openingServerName) return [];
 
 			const merged = new Set();
 			try {
@@ -971,28 +990,28 @@ export default {
 					listByStatus("in_flight"),
 					listByStatus("retry_pending"),
 					listByStatus("needs_review"),
+					// handed_off is a tombstone awaiting server-side review, NOT a
+					// terminal state — it must still block closure.
+					listByStatus("handed_off"),
 					listByStatus("synced"),
 				]);
 				const flat = all.flat();
 				const invoiceRows = flat.filter((row) => row.type === "invoice");
 
-				if (openingOfflineId) {
-					invoiceRows
-						.filter((row) => row.shift_offline_id === openingOfflineId)
-						.forEach((row) => merged.add(row.offline_id));
-				} else {
-					for (const row of invoiceRows) {
-						if (row.shift_offline_id) continue;
+				const { selectShiftInvoiceOfflineIds } = await import(
+					"@/offline/shift-invoice-anchors"
+				);
+				selectShiftInvoiceOfflineIds(
+					{ localAnchor: openingLocalAnchor, serverName: openingServerName ?? null },
+					invoiceRows,
+					(row) => {
 						const inner = this.unwrapInnerInvoicePayload(row.payload);
-						if (
-							inner &&
-							(inner.posa_pos_opening_shift === openingServerName ||
-								inner.pos_opening_shift === openingServerName)
-						) {
-							merged.add(row.offline_id);
-						}
-					}
-				}
+						if (!inner) return null;
+						return (
+							inner.posa_pos_opening_shift || inner.pos_opening_shift || null
+						);
+					},
+				).forEach((id) => merged.add(id));
 			} catch (err) {
 				console.warn("[Pos] collectShiftInvoiceOfflineIds local scan failed", err);
 			}

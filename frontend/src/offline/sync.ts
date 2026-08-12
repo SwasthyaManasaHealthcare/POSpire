@@ -23,6 +23,7 @@ import {
 	getEntry,
 	listByStatus,
 	markBlocked,
+	reconcileBlockedParents,
 	markHandedOff,
 	markInFlight,
 	markIntegrityMismatch,
@@ -553,6 +554,19 @@ export class SyncScheduler {
 			} catch (err) {
 				// eslint-disable-next-line no-console
 				console.warn("[sync] gcLocalTombstones threw", err);
+			}
+			// Repair rows latched on a parent that will never arrive. Must run
+			// here rather than in the gate: listReady filters blocked rows out
+			// before evaluateParents ever sees them again.
+			try {
+				const repaired = await reconcileBlockedParents();
+				if (repaired > 0) {
+					// eslint-disable-next-line no-console
+					console.info(`[sync] reconcileBlockedParents repaired ${repaired} row(s)`);
+				}
+			} catch (err) {
+				// eslint-disable-next-line no-console
+				console.warn("[sync] reconcileBlockedParents threw", err);
 			}
 
 			const entry = await nextReady<Record<string, unknown>>();
@@ -1245,7 +1259,7 @@ async function refreshRuntimeConfig(): Promise<void> {
 /** Max tombstones deleted per GC cycle — prevents pathological backlog from blocking a cycle. */
 const GC_MAX_DELETIONS_PER_CYCLE = 1000;
 
-async function gcLocalTombstones(): Promise<void> {
+export async function gcLocalTombstones(): Promise<void> {
 	const retentionDays = runtimeConfig.client_tombstone_retention_days;
 	if (!retentionDays || retentionDays <= 0) return;
 
@@ -1276,21 +1290,34 @@ async function gcLocalTombstones(): Promise<void> {
 	// Oldest-first so we always make progress on the genuine backlog,
 	// not on whatever the status index happened to surface this cycle.
 	all.sort((a, b) => a.ref_ts - b.ref_ts);
-	const toDelete = all.slice(0, GC_MAX_DELETIONS_PER_CYCLE);
 
 	// Single transaction — if it errors, we keep all rows rather than
-	// leaving a half-cleaned state.
+	// leaving a half-cleaned state. The reference scan runs inside it too, so
+	// a child enqueued between scan and delete cannot lose its parent.
+	let deleted = 0;
 	try {
 		await db.transaction("rw", db.outbox, async () => {
+			// A parent still referenced by a non-terminal child must survive.
+			// Deleting it hard-blocks that child forever: evaluateParents
+			// cannot reason about a row that is no longer there.
+			const referenced = new Set<string>();
+			for (const row of await db.outbox.toArray()) {
+				if (row.status === "synced" || row.status === "voided") continue;
+				for (const pid of row.parent_offline_ids ?? []) referenced.add(pid);
+			}
+			const toDelete = all
+				.filter((x) => !referenced.has(x.offline_id))
+				.slice(0, GC_MAX_DELETIONS_PER_CYCLE);
 			for (const { offline_id } of toDelete) {
 				await db.outbox.delete(offline_id);
 			}
+			deleted = toDelete.length;
 		});
 		// eslint-disable-next-line no-console
 		console.info(
-			`[sync] gcLocalTombstones reaped ${toDelete.length} tombstones older than ${retentionDays}d` +
-				(all.length > toDelete.length
-					? ` (${all.length - toDelete.length} more queued for the next cycle)`
+			`[sync] gcLocalTombstones reaped ${deleted} tombstones older than ${retentionDays}d` +
+				(all.length > deleted
+					? ` (${all.length - deleted} still retained or queued for the next cycle)`
 					: ""),
 		);
 	} catch (err) {

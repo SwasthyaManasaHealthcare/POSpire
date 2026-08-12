@@ -396,7 +396,13 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				parentOfflineIds: ([] as string[])
 					.concat(
 						(invoice.pos_material_receipt_offline_ids as string[]) ?? [],
-						invoice.pos_opening_shift_offline_id
+						// Local dependency ONLY while the opening is still
+						// queued. A shift opened online has a pos_offline_id
+						// but no outbox row, so naming it here would block the
+						// invoice on a row that never arrives. The id still
+						// goes to the server above, which resolves it either way.
+						invoice.pos_opening_shift_offline_id &&
+						invoice.pos_opening_shift_pending_sync
 							? [invoice.pos_opening_shift_offline_id as string]
 							: [],
 						customerOfflineId ? [customerOfflineId] : [],
@@ -654,8 +660,13 @@ export const methodRegistry: Record<string, MethodConfig> = {
 			// Parents the scheduler waits on before sending: the opening shift
 			// (must be synced first so its name resolves) and every invoice in
 			// the shift (strict closure).
+			// Same split as the invoice adapter: `opening_entry_ref` below still
+			// carries the id for the server, but a shift already on the server
+			// has no outbox row and must not be named as a local parent.
 			const parentOfflineIds = [
-				...(openingOfflineId ? [openingOfflineId] : []),
+				...(openingOfflineId && cs.pos_opening_shift_pending_sync
+					? [openingOfflineId]
+					: []),
 				...invoiceOfflineIds,
 			];
 
