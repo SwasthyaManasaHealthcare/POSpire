@@ -605,11 +605,35 @@ export default {
 		 * reopen the dialog. When no shift is open the opening dialog owns the
 		 * screen, so the intent is dropped rather than acted on.
 		 */
-		consumeCloseShiftIntent() {
+		async consumeCloseShiftIntent() {
+			if (this._closeShiftIntentConsumed) return;
 			if (this.$route.query.close_shift !== "1") return;
-			this.$router.replace({ path: "/pos", query: {} });
+			// Spend the intent synchronously, before the first await. Vue
+			// Router keeps the old query on `$route` until replace() settles,
+			// so a second call in the meantime would otherwise see the flag
+			// still set and fire a second closing request.
+			this._closeShiftIntentConsumed = true;
+
+			// Strip only our own flag: other params and the hash belong to
+			// whoever put them there.
+			const query = { ...this.$route.query };
+			delete query.close_shift;
+			try {
+				await this.$router.replace({
+					path: this.$route.path,
+					query,
+					hash: this.$route.hash,
+				});
+			} catch (err) {
+				// A cancelled or aborted navigation leaves the flag in the URL,
+				// so a later reload can re-arm it. The guard above still holds
+				// for this instance, which is what prevents the double request.
+				console.warn("[Pos] could not strip close_shift from the URL", err);
+			}
 			if (!this.pos_opening_shift) return;
-			this.get_closing_data();
+			// Returned, not fire-and-forget: the caller's terminal catch owns
+			// any rejection from here.
+			return this.get_closing_data();
 		},
 		async get_closing_data() {
 			let r = null;
@@ -1208,9 +1232,11 @@ export default {
 					// Chained, not merely sequenced: the closing dialog needs
 					// `pos_opening_shift`, which only exists once the shift
 					// check has settled.
-					this.check_opening_entry().finally(() => {
-						this.consumeCloseShiftIntent();
-					});
+					this.check_opening_entry()
+						.finally(() => this.consumeCloseShiftIntent())
+						.catch((err) => {
+							console.warn("[Pos] opening-shift check failed", err);
+						});
 				});
 			this.get_pos_setting();
 			this.onBus("close_opening_dialog", () => {
