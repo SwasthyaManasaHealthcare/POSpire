@@ -156,16 +156,43 @@ export function unwrapStale<T>(value: T | StaleReadResult<T> | null | undefined)
 // Error surfaces (09-api-boundary.md §7)
 // ---------------------------------------------------------------------------
 
+/** Why an offline read could not be served. These are different faults: a
+ *  `policy` read is never cacheable at all, so warming the cache is pointless,
+ *  while `cache_miss` means the same call would have worked with a warm cache. */
+export type OfflineReadUnavailableReason =
+	| "policy"
+	| "no_cache_adapter"
+	| "cache_miss";
+
+function offlineReadDetail(
+	method: string,
+	cacheKey: string,
+	reason: OfflineReadUnavailableReason,
+): string {
+	const prefix = `Offline read for "${method}" is unavailable`;
+	if (reason === "policy") {
+		return `${prefix}: the method is registered offline:false, so it is never cached. Warming the cache cannot help.`;
+	}
+	if (reason === "no_cache_adapter") {
+		return `${prefix}: no read-cache adapter is registered.`;
+	}
+	return `${prefix}: no cache entry for ${cacheKey}.`;
+}
+
 export class OfflineReadUnavailable extends Error {
 	readonly method: string;
 	readonly cacheKey: string;
-	constructor(method: string, cacheKey: string) {
-		super(
-			`Offline read for "${method}" is unavailable: no cache entry for ${cacheKey}.`,
-		);
+	readonly reason: OfflineReadUnavailableReason;
+	constructor(
+		method: string,
+		cacheKey: string,
+		reason: OfflineReadUnavailableReason = "cache_miss",
+	) {
+		super(offlineReadDetail(method, cacheKey, reason));
 		this.name = "OfflineReadUnavailable";
 		this.method = method;
 		this.cacheKey = cacheKey;
+		this.reason = reason;
 	}
 }
 
@@ -380,7 +407,7 @@ async function runRead<T>(opts: CallOptions, config: ReadMethodConfig): Promise<
 			outcome: "error",
 			attempt,
 		});
-		throw new OfflineReadUnavailable(opts.method, cacheKey);
+		throw new OfflineReadUnavailable(opts.method, cacheKey, "policy");
 	}
 	if (!cache) {
 		emit({
@@ -392,7 +419,7 @@ async function runRead<T>(opts: CallOptions, config: ReadMethodConfig): Promise<
 			outcome: "error",
 			attempt,
 		});
-		throw new OfflineReadUnavailable(opts.method, cacheKey);
+		throw new OfflineReadUnavailable(opts.method, cacheKey, "no_cache_adapter");
 	}
 	const cached = await safeCacheRead<T>(cache, cacheKey);
 	if (!cached) {
@@ -405,7 +432,7 @@ async function runRead<T>(opts: CallOptions, config: ReadMethodConfig): Promise<
 			outcome: "error",
 			attempt,
 		});
-		throw new OfflineReadUnavailable(opts.method, cacheKey);
+		throw new OfflineReadUnavailable(opts.method, cacheKey, "cache_miss");
 	}
 	emit({
 		method: opts.method,
