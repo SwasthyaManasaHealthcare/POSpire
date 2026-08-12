@@ -292,7 +292,15 @@ export default {
       win.focus();
     },
     close_shift_dialog() {
-      this.eventBus.emit('open_closing_dialog');
+      // ClosingDialog is owned by Pos.vue, which is only mounted on /pos. From
+      // any other route the event lands on nothing, so the menu item silently
+      // did nothing. Carry the intent through the navigation instead and let
+      // Pos consume it once its opening-shift check has settled.
+      if (this.$route.path === '/pos') {
+        this.eventBus.emit('open_closing_dialog');
+        return;
+      }
+      this.$router.push({ path: '/pos', query: { close_shift: '1' } });
     },
     show_message(data) {
       this.snack = true;

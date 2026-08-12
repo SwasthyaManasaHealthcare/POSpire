@@ -594,6 +594,23 @@ export default {
 		create_opening_voucher() {
 			this.dialog = true;
 		},
+		/**
+		 * One-shot handoff from Navbar's Close Shift when it was tapped from a
+		 * route where this component -- and therefore ClosingDialog -- was not
+		 * mounted. Navbar navigates here with `?close_shift=1` rather than
+		 * emitting into the void.
+		 *
+		 * The flag is stripped before anything else so it is consumed exactly
+		 * once: a refresh, a back-navigation or a later remount must not
+		 * reopen the dialog. When no shift is open the opening dialog owns the
+		 * screen, so the intent is dropped rather than acted on.
+		 */
+		consumeCloseShiftIntent() {
+			if (this.$route.query.close_shift !== "1") return;
+			this.$router.replace({ path: "/pos", query: {} });
+			if (!this.pos_opening_shift) return;
+			this.get_closing_data();
+		},
 		async get_closing_data() {
 			let r = null;
 			try {
@@ -1188,7 +1205,12 @@ export default {
 					console.warn("[Pos] pending-closure reconciliation failed", err);
 				})
 				.finally(() => {
-					this.check_opening_entry();
+					// Chained, not merely sequenced: the closing dialog needs
+					// `pos_opening_shift`, which only exists once the shift
+					// check has settled.
+					this.check_opening_entry().finally(() => {
+						this.consumeCloseShiftIntent();
+					});
 				});
 			this.get_pos_setting();
 			this.onBus("close_opening_dialog", () => {
