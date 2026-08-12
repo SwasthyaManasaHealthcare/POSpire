@@ -398,14 +398,11 @@ fixtures = [
 			]
 		],
 	},
-
 	{
-    "doctype": "Dashboard",
-    "filters": [["name", "in", ("POSpire Dashboard",)]],
-    },
-    
-    
-]    
+		"doctype": "Dashboard",
+		"filters": [["name", "in", ("POSpire Dashboard",)]],
+	},
+]
 
 add_to_apps_screen = [
 	{
@@ -416,4 +413,3 @@ add_to_apps_screen = [
 		"logo": "/assets/pospire/images/app-128x128-rounded.png",
 	}
 ]
-
