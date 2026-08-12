@@ -1158,6 +1158,7 @@ import connectivity from "@/offline/connectivity";
 import { computeOfflineTax } from "@/offline/tax";
 
 import busListeners from "@/utils/busListeners";
+import { loadSalesPersons, readStoredSalesPersons } from "@/utils/salesPersons";
 export default {
 	mixins: [format, hardwareUtils, busListeners],
 	data() {
@@ -1388,18 +1389,14 @@ export default {
 		// Sales Person
 		async get_sales_person_names() {
 			const vm = this;
-			if (vm.pos_profile.posa_local_storage && localStorage.sales_persons_storage) {
-				vm.sales_persons = JSON.parse(localStorage.getItem("sales_persons_storage"));
+			const persist = !!vm.pos_profile.posa_local_storage;
+			if (persist) {
+				const stored = readStoredSalesPersons();
+				if (stored) vm.sales_persons = stored;
 			}
 			try {
-				const r = await call("pospire.pospire.api.posapp.get_sales_person_names");
-				if (r) {
-					vm.sales_persons = r;
-					if (vm.pos_profile.posa_local_storage) {
-						localStorage.setItem("sales_persons_storage", "");
-						localStorage.setItem("sales_persons_storage", JSON.stringify(r));
-					}
-				}
+				const r = await loadSalesPersons({ persist });
+				if (r) vm.sales_persons = r;
 			} catch {
 				/* offline or network error — local cache already loaded above */
 			}

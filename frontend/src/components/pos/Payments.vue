@@ -730,6 +730,7 @@ import { datetime } from "@/utils/datetime";
 import { playSound } from "@/utils/sounds";
 
 import busListeners from "@/utils/busListeners";
+import { loadSalesPersons, readStoredSalesPersons } from "@/utils/salesPersons";
 export default {
 	mixins: [format, hardwareUtils, busListeners],
 	data: () => ({
@@ -1366,27 +1367,20 @@ export default {
 		},
 		async get_sales_person_names() {
 			const vm = this;
-			if (vm.pos_profile.posa_local_storage && localStorage.sales_persons_storage) {
-				vm.sales_persons = JSON.parse(localStorage.getItem("sales_persons_storage"));
+			const persist = !!vm.pos_profile.posa_local_storage;
+			if (persist) {
+				const stored = readStoredSalesPersons();
+				if (stored) vm.sales_persons = stored;
 			}
 			let r = null;
 			try {
-				r = await call("pospire.pospire.api.posapp.get_sales_person_names");
+				r = await loadSalesPersons({ persist });
 			} catch {
 				// Offline: localStorage hydration above (if enabled) leaves a
 				// usable list. Otherwise the dropdown is empty until reconnect.
 				return;
 			}
-			if (r) {
-				vm.sales_persons = r;
-				if (vm.pos_profile.posa_local_storage) {
-					localStorage.setItem("sales_persons_storage", "");
-					localStorage.setItem(
-						"sales_persons_storage",
-						JSON.stringify(r)
-					);
-				}
-			}
+			if (r) vm.sales_persons = r;
 		},
 		salesPersonFilter(itemText, queryText, itemRow) {
 			const item = itemRow.raw;
