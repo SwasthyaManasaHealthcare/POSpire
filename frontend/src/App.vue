@@ -179,6 +179,17 @@ export default {
 		async bootstrapPosProfileForNavbar() {
 			if (!window.user || window.user === "Guest") return;
 
+			// "/" redirects to "/pos", so the path is only trustworthy once the
+			// initial navigation has settled.
+			await this.$router.isReady();
+
+			// On /pos, Pos.vue runs the full opening-shift flow and broadcasts
+			// the result. Bootstrapping here as well duplicated
+			// check_opening_shift and, through register_pos_profile, every read
+			// hanging off it — items, customers, approval, tax, M-Pesa. On every
+			// other route nothing else populates the Navbar, so this stays.
+			if (this.$route.path === "/pos") return;
+
 			const snapshotKey = "pospire.opening_shift_snapshot";
 			const snapshotMetaKey = "pospire.opening_shift_snapshot.meta";
 			const snapshotTTLMs = 24 * 60 * 60 * 1000;
@@ -253,7 +264,11 @@ export default {
 		},
 		emitOpeningSnapshotForNavbar(snapshot) {
 			if (!snapshot?.pos_profile) return;
-			this.eventBus.emit("register_pos_profile", snapshot);
+			// Navbar-only channel. `register_pos_profile` fans out to every POS
+			// child — items, customers, offers, coupons, payments — each of
+			// which answers by firing its own reads. Navbar is the only thing
+			// that needs the profile on these routes.
+			this.eventBus.emit("navbar_pos_profile", snapshot);
 			this.eventBus.emit("set_company", snapshot.company);
 		},
 		navigateTo(page) {

@@ -291,6 +291,16 @@ export default {
       );
       win.focus();
     },
+    apply_pos_profile(data) {
+      this.pos_profile = data.pos_profile;
+      const payments = { text: 'Payments', icon: 'mdi-cash-register' };
+      if (
+        this.pos_profile.posa_use_pos_awesome_payments &&
+        !this.items.some((item) => item.text === 'Payments')
+      ) {
+        this.items.push(payments);
+      }
+    },
     close_shift_dialog() {
       // ClosingDialog is owned by Pos.vue, which is only mounted on /pos. From
       // any other route the event lands on nothing, so the menu item silently
@@ -373,16 +383,12 @@ export default {
           ? data.company_logo
           : this.company_img;
       });
-      this.onBus('register_pos_profile', (data) => {
-        this.pos_profile = data.pos_profile;
-        const payments = { text: 'Payments', icon: 'mdi-cash-register' };
-        if (
-          this.pos_profile.posa_use_pos_awesome_payments &&
-          !this.items.some((item) => item.text === 'Payments')
-        ) {
-          this.items.push(payments);
-        }
-      });
+      // Two sources, same payload shape: Pos.vue broadcasts
+      // `register_pos_profile` on /pos, and App.vue publishes
+      // `navbar_pos_profile` on every other route — a Navbar-only channel, so
+      // that bootstrap doesn't fan out to POS children that aren't mounted.
+      this.onBus('register_pos_profile', this.apply_pos_profile);
+      this.onBus('navbar_pos_profile', this.apply_pos_profile);
       this.onBus('set_last_invoice', (data) => {
         this.last_invoice = data;
       });
