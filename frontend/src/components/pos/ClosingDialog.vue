@@ -159,8 +159,9 @@
 import format from "@/utils/format";
 import { toast } from "vue3-toastify";
 import { amountRules, isAmountValid } from "@/utils/validation";
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format],
+	mixins: [format, busListeners],
 	data: () => ({
 		closingDialog: false,
 		itemsPerPage: 20,
@@ -290,14 +291,14 @@ export default {
 	},
 
 	created: function () {
-	this.eventBus.on("open_ClosingDialog", (data) => {
+	this.onBus("open_ClosingDialog", (data) => {
 		this.closingDialog = true;
 		this.dialog_data = data;
 		this.has_denominations =
 			data.denomination_details && data.denomination_details.length > 0;
 	});
 
-	this.eventBus.on("register_pos_profile", (data) => {
+	this.onBus("register_pos_profile", (data) => {
 		this.pos_profile = data.pos_profile;
 		this.denominations_enabled = this.pos_profile.custom_enable_cash_denominations || false;
 		// Reset to base columns each time — this event fires multiple times

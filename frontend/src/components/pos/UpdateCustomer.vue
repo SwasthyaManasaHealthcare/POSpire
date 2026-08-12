@@ -189,7 +189,9 @@ import { toast } from "vue3-toastify";
 import { putCustomer } from "@/offline/repos/customers";
 import { voidEntry as voidOutboxEntry } from "@/offline/outbox";
 
+import busListeners from "@/utils/busListeners";
 export default {
+	mixins: [busListeners],
 	data: () => ({
 		customerDialog: false,
 		submittingCustomer: false,
@@ -561,7 +563,7 @@ export default {
 		// if the dialog is opened again before the first request resolves.
 		this._fetchingFormOptions = false;
 
-		this.eventBus.on("open_update_customer", (data) => {
+		this.onBus("open_update_customer", (data) => {
 			this.customerDialog = true;
 			// Lazy-load reference data on first open only. Pos.vue
 			// pre-warms the same cache on shift-open so this is usually a
@@ -588,20 +590,15 @@ export default {
 				this.clear_customer();
 			}
 		});
-		this.eventBus.on("register_pos_profile", (data) => {
+		this.onBus("register_pos_profile", (data) => {
 			this.pos_profile = data.pos_profile;
 		});
-		this.eventBus.on("payments_register_pos_profile", (data) => {
+		this.onBus("payments_register_pos_profile", (data) => {
 			this.pos_profile = data.pos_profile;
 		});
 		// set default values for customer group and territory from user defaults
 		this.group = window.user_defaults?.["Customer Group"] || "";
 		this.territory = window.user_defaults?.["Territory"] || "";
-	},
-	beforeUnmount() {
-		this.eventBus.off("open_update_customer");
-		this.eventBus.off("register_pos_profile");
-		this.eventBus.off("payments_register_pos_profile");
 	},
 };
 </script>

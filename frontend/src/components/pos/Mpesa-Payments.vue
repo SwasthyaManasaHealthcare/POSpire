@@ -76,7 +76,9 @@
 
 <script>
 import { call } from "@/utils/call";
+import busListeners from "@/utils/busListeners";
 export default {
+	mixins: [busListeners],
 	data: () => ({
 		dialog: false,
 		singleSelect: true,
@@ -154,7 +156,7 @@ export default {
 		},
 	},
 	created: function () {
-		this.eventBus.on("open_mpesa_payments", (data) => {
+		this.onBus("open_mpesa_payments", (data) => {
 			this.dialog = true;
 			this.full_name = "";
 			this.mobile_no = "";
@@ -164,9 +166,6 @@ export default {
 			this.dialog_data = "";
 			this.selected = [];
 		});
-	},
-	beforeUnmount() {
-		this.eventBus.off("open_mpesa_payments");
 	},
 };
 </script>

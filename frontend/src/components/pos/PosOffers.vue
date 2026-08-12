@@ -90,8 +90,9 @@
 
 <script>
 import format from "@/utils/format";
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format],
+	mixins: [format, busListeners],
 	data: () => ({
 		loading: false,
 		pos_profile: "",
@@ -265,22 +266,22 @@ export default {
 
 	created: function () {
 		this.$nextTick(function () {
-			this.eventBus.on("register_pos_profile", (data) => {
+			this.onBus("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
 			});
 		});
-		this.eventBus.on("update_customer", (customer) => {
+		this.onBus("update_customer", (customer) => {
 			if (this.customer != customer) {
 				this.offers = [];
 			}
 		});
-		this.eventBus.on("update_pos_offers", (data) => {
+		this.onBus("update_pos_offers", (data) => {
 			this.updatePosOffers(data);
 		});
-		this.eventBus.on("update_discount_percentage_offer_name", (data) => {
+		this.onBus("update_discount_percentage_offer_name", (data) => {
 			this.discount_percentage_offer_name = data.value;
 		});
-		this.eventBus.on("set_all_items", (data) => {
+		this.onBus("set_all_items", (data) => {
 			this.allItems = data;
 		});
 	},

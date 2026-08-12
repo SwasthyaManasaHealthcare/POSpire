@@ -381,8 +381,9 @@ import { playSound } from "@/utils/sounds";
 import { useConnectivityStore } from "@/stores/connectivity";
 import _ from "lodash";
 import ItemImage from "./ItemImage.vue";
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format],
+	mixins: [format, busListeners],
 	components: { ItemImage },
 	setup() {
 		// Expose `connectionQuality` so the template and the customer
@@ -1080,34 +1081,34 @@ export default {
 
 	created: function () {
 		this.$nextTick(function () {});
-		this.eventBus.on("register_pos_profile", (data) => {
+		this.onBus("register_pos_profile", (data) => {
 			this.pos_profile = data.pos_profile;
 			this.get_items();
 			this.get_items_groups();
 			this.items_view = this.pos_profile.posa_default_card_view ? "card" : "list";
 		});
-		this.eventBus.on("update_cur_items_details", () => {
+		this.onBus("update_cur_items_details", () => {
 			this.update_cur_items_details();
 		});
-		this.eventBus.on("update_offers_counters", (data) => {
+		this.onBus("update_offers_counters", (data) => {
 			this.offersCount = data.offersCount;
 			this.appliedOffersCount = data.appliedOffersCount;
 		});
-		this.eventBus.on("update_coupons_counters", (data) => {
+		this.onBus("update_coupons_counters", (data) => {
 			this.couponsCount = data.couponsCount;
 			this.appliedCouponsCount = data.appliedCouponsCount;
 		});
-		this.eventBus.on("update_customer_price_list", (data) => {
+		this.onBus("update_customer_price_list", (data) => {
 			this.customer_price_list = data;
 		});
-		this.eventBus.on("update_customer", (data) => {
+		this.onBus("update_customer", (data) => {
 			this.customer = data;
 		});
 
 		// Master-data invalidation: Pos.vue emits refresh_items when a
 		// backend change (Item disabled, price updated, etc.) requires the
 		// item catalog to be re-fetched.  Behavior respects pose_use_limit_search.
-		this.eventBus.on("refresh_items", () => {
+		this.onBus("refresh_items", () => {
 			const profile = this.pos_profile;
 			if (!profile) return;
 			// Clear stale localStorage so hydration does not serve old data.
@@ -1133,15 +1134,6 @@ export default {
 		this.scan_barcoud();
 	},
 
-	beforeUnmount() {
-		this.eventBus.off("register_pos_profile");
-		this.eventBus.off("update_cur_items_details");
-		this.eventBus.off("update_offers_counters");
-		this.eventBus.off("update_coupons_counters");
-		this.eventBus.off("update_customer_price_list");
-		this.eventBus.off("update_customer");
-		this.eventBus.off("refresh_items");
-	},
 };
 </script>
 

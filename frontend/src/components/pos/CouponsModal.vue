@@ -107,8 +107,10 @@
 <script>
 import { call } from "@/utils/call";
 import { toast } from "vue3-toastify";
+import busListeners from "@/utils/busListeners";
 
 export default {
+	mixins: [busListeners],
 	props: {
 		modelValue: {
 			type: Boolean,
@@ -266,11 +268,11 @@ export default {
 
 	created: function () {
 		this.$nextTick(function () {
-			this.eventBus.on("register_pos_profile", (data) => {
+			this.onBus("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
 			});
 		});
-		this.eventBus.on("update_customer", (customer) => {
+		this.onBus("update_customer", (customer) => {
 			if (this.customer != customer) {
 				const to_remove = [];
 				this.posa_coupons.forEach((el) => {
@@ -287,10 +289,10 @@ export default {
 			}
 			this.setActiveGiftCoupons();
 		});
-		this.eventBus.on("update_pos_coupons", (data) => {
+		this.onBus("update_pos_coupons", (data) => {
 			this.updatePosCoupons(data);
 		});
-		this.eventBus.on("set_pos_coupons", (data) => {
+		this.onBus("set_pos_coupons", (data) => {
 			this.posa_coupons = data;
 		});
 	},

@@ -71,7 +71,9 @@ import { call, unwrapStale } from "@/utils/call";
 import UpdateCustomer from "./UpdateCustomer.vue";
 import { onSynced } from "@/offline/outbox";
 import { renameCustomer, listOfflineCreated } from "@/offline/repos/customers";
+import busListeners from "@/utils/busListeners";
 export default {
+	mixins: [busListeners],
 	props: {
 		showActions: {
 			type: Boolean,
@@ -211,39 +213,39 @@ export default {
 
 	created: function () {
 		this.$nextTick(function () {
-			this.eventBus.on("register_pos_profile", (pos_profile) => {
+			this.onBus("register_pos_profile", (pos_profile) => {
 				this.pos_profile = pos_profile;
 				// Reset the list so get_customer_names re-fetches even if customers
 				// were already loaded — profile changes can alter customer group filters.
 				this.customers = [];
 				this.get_customer_names();
 			});
-			this.eventBus.on("payments_register_pos_profile", (pos_profile) => {
+			this.onBus("payments_register_pos_profile", (pos_profile) => {
 				this.pos_profile = pos_profile;
 				this.get_customer_names();
 			});
-			this.eventBus.on("set_customer", (customer) => {
+			this.onBus("set_customer", (customer) => {
 				this.customer = customer;
 				// customer_offline_id is derived in the watcher below from
 				// the customers list — single source of truth, avoids
 				// emit-ordering bugs.
 			});
-			this.eventBus.on("add_customer_to_list", (customer) => {
+			this.onBus("add_customer_to_list", (customer) => {
 				this.customers.push(customer);
 			});
-			this.eventBus.on("set_customer_readonly", (value) => {
+			this.onBus("set_customer_readonly", (value) => {
 				this.readonly = value;
 			});
-			this.eventBus.on("set_customer_info_to_edit", (data) => {
+			this.onBus("set_customer_info_to_edit", (data) => {
 				this.customer_info = data;
 			});
-			this.eventBus.on("fetch_customer_details", () => {
+			this.onBus("fetch_customer_details", () => {
 				this.get_customer_names();
 			});
 
 			// Master-data invalidation: Pos.vue emits refresh_customers when
 			// a Customer doc is saved/deleted from the desk.
-			this.eventBus.on("refresh_customers", () => {
+			this.onBus("refresh_customers", () => {
 				const profile_doc = this.pos_profile?.pos_profile;
 				// Clear stale localStorage so hydration does not serve old data.
 				if (profile_doc?.posa_local_storage) {
@@ -306,14 +308,6 @@ export default {
 	},
 
 	beforeUnmount() {
-		this.eventBus.off("register_pos_profile");
-		this.eventBus.off("payments_register_pos_profile");
-		this.eventBus.off("set_customer");
-		this.eventBus.off("add_customer_to_list");
-		this.eventBus.off("set_customer_readonly");
-		this.eventBus.off("set_customer_info_to_edit");
-		this.eventBus.off("fetch_customer_details");
-		this.eventBus.off("refresh_customers");
 		if (typeof this._unsubOnSynced === "function") {
 			this._unsubOnSynced();
 			this._unsubOnSynced = null;

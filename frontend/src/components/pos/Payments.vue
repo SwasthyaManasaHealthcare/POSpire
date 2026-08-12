@@ -729,8 +729,9 @@ import { toast } from "vue3-toastify"; // <-- make sure this is imported
 import { datetime } from "@/utils/datetime";
 import { playSound } from "@/utils/sounds";
 
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format, hardwareUtils],
+	mixins: [format, hardwareUtils, busListeners],
 	data: () => ({
 		loading: false,
 		submittingPayment: false,
@@ -1609,7 +1610,7 @@ export default {
 
 	mounted: function () {
 		this.$nextTick(function () {
-			this.eventBus.on("send_invoice_doc_payment", (payload) => {
+			this.onBus("send_invoice_doc_payment", (payload) => {
 				this.invoice_doc = payload.invoice_doc;
 				const default_payment = this.invoice_doc.payments.find(
 					(payment) => payment.default == 1
@@ -1636,7 +1637,7 @@ export default {
 				this.get_addresses();
 				this.get_sales_person_names();
 			});
-			this.eventBus.on("register_pos_profile", (data) => {
+			this.onBus("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
 				// Best-effort only: `register_pos_profile` has emitters (App.vue's
 				// boot-time bootstrapPosProfileForNavbar, Pos.vue's
@@ -1658,11 +1659,11 @@ export default {
 				}
 				this.get_mpesa_modes();
 			});
-			this.eventBus.on("add_the_new_address", (data) => {
+			this.onBus("add_the_new_address", (data) => {
 				this.addresses.push(data);
 				this.$forceUpdate();
 			});
-			this.eventBus.on("update_invoice_type", (data) => {
+			this.onBus("update_invoice_type", (data) => {
 				this.invoiceType = data;
 				if (this.invoice_doc && data != "Order") {
 					this.invoice_doc.posa_delivery_date = null;
@@ -1671,7 +1672,7 @@ export default {
 				}
 			});
 		});
-		this.eventBus.on("update_customer", (customer) => {
+		this.onBus("update_customer", (customer) => {
 			if (this.customer != customer) {
 				this.customer_credit_dict = [];
 				this.redeem_customer_credit = false;
@@ -1680,29 +1681,18 @@ export default {
 					this.pos_profile && this.pos_profile.use_cashback == 1 ? true : false;
 			}
 		});
-		this.eventBus.on("set_pos_settings", (data) => {
+		this.onBus("set_pos_settings", (data) => {
 			this.pos_settings = data;
 		});
-		this.eventBus.on("set_customer_info_to_edit", (data) => {
+		this.onBus("set_customer_info_to_edit", (data) => {
 			this.customer_info = data;
 		});
-		this.eventBus.on("set_mpesa_payment", (data) => {
+		this.onBus("set_mpesa_payment", (data) => {
 			this.set_mpesa_payment(data);
 		});
 	},
 	created() {
 		document.addEventListener("keydown", this.shortPay.bind(this));
-	},
-	beforeUnmount() {
-		this.eventBus.off("send_invoice_doc_payment");
-		this.eventBus.off("register_pos_profile");
-		this.eventBus.off("add_the_new_address");
-		this.eventBus.off("update_invoice_type");
-		this.eventBus.off("update_customer");
-		this.eventBus.off("set_pos_settings");
-		this.eventBus.off("set_customer_info_to_edit");
-		this.eventBus.off("update_invoice_coupons");
-		this.eventBus.off("set_mpesa_payment");
 	},
 
 	unmounted() {

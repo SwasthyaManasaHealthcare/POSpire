@@ -69,8 +69,9 @@
 
 <script>
 import format from "@/utils/format";
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format],
+	mixins: [format, busListeners],
 	data: () => ({
 		page: 1,
 		itemsPerPage: 5,
@@ -128,7 +129,7 @@ export default {
 		},
 	},
 	created: function () {
-		this.eventBus.on("open_paid", (data) => {
+		this.onBus("open_paid", (data) => {
 			this.paidDialog = true;
 			this.dialog_data = data;
 		});

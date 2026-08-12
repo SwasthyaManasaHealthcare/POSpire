@@ -271,8 +271,9 @@
 import { call } from "@/utils/call";
 import { toast } from "vue3-toastify";
 import format from '@/utils/format';
+import busListeners from "@/utils/busListeners";
 export default {
-  mixins: [format],
+  mixins: [format, busListeners],
   data: () => ({
     page: 1,
     itemsPerPage: 5,
@@ -699,7 +700,7 @@ export default {
     },
   },
   created: function () {
-    this.eventBus.on('open_returns', (data) => {
+    this.onBus('open_returns', (data) => {
       this.invoicesDialog = true;
       this.company = data.company || data;
       this.customer = data.customer || '';

@@ -75,7 +75,9 @@ import { onSynced, readDeviceId } from "@/offline/outbox";
 import { setBeaconContext } from "@/offline/beacon";
 import connectivity from "@/offline/connectivity";
 
+import busListeners from "@/utils/busListeners";
 export default {
+	mixins: [busListeners],
 	data: function () {
 		return {
 				dialog: false,
@@ -1189,10 +1191,10 @@ export default {
 					this.check_opening_entry();
 				});
 			this.get_pos_setting();
-			this.eventBus.on("close_opening_dialog", () => {
+			this.onBus("close_opening_dialog", () => {
 				this.dialog = false;
 			});
-			this.eventBus.on("register_pos_data", (data) => {
+			this.onBus("register_pos_data", (data) => {
 				// FIRST, before anything can observe the new shift. `pos_opening_shift`
 				// below is assigned synchronously but `shiftLifecycleId` is only
 				// assigned tens of ms later, inside registerShiftLifecycle(), after
@@ -1223,34 +1225,34 @@ export default {
 				this.warm_customer_form_options_cache();
 				console.info("LoadPosProfile");
 			});
-			this.eventBus.on("show_payment", (data) => {
+			this.onBus("show_payment", (data) => {
 				this.payment = data === "true";
 			});
-			this.eventBus.on("show_offers", (data) => {
+			this.onBus("show_offers", (data) => {
 				this.showOffersModal = data === "true";
 			});
-			this.eventBus.on("show_coupons", (data) => {
+			this.onBus("show_coupons", (data) => {
 				this.showCouponsModal = data === "true";
 			});
-			this.eventBus.on("open_closing_dialog", () => {
+			this.onBus("open_closing_dialog", () => {
 				this.get_closing_data();
 			});
-			this.eventBus.on("submit_closing_pos", (data) => {
+			this.onBus("submit_closing_pos", (data) => {
 				this.submit_closing_pos(data);
 			});
 
 			// Track whether the cart has items so the profile refresh
 			// can decide to apply immediately or defer.
-			this.eventBus.on("add_item", () => {
+			this.onBus("add_item", () => {
 				this.cartHasItems = true;
 			});
-			this.eventBus.on("load_invoice", () => {
+			this.onBus("load_invoice", () => {
 				this.cartHasItems = true;
 			});
-			this.eventBus.on("load_order", () => {
+			this.onBus("load_order", () => {
 				this.cartHasItems = true;
 			});
-			this.eventBus.on("load_return_invoice", () => {
+			this.onBus("load_return_invoice", () => {
 				this.cartHasItems = true;
 			});
 
@@ -1280,9 +1282,9 @@ export default {
 			};
 
 			// Cart cleared via payment or Save-and-Clear.
-			this.eventBus.on("clear_invoice", onCartEmpty);
+			this.onBus("clear_invoice", onCartEmpty);
 			// Cart emptied by manually removing the last item.
-			this.eventBus.on("cart_emptied", onCartEmpty);
+			this.onBus("cart_emptied", onCartEmpty);
 
 			// F2: when an offline-opened shift finally syncs, swap the cart's
 			// `pos_opening_shift.name` from the provisional `OFFLINE-OPN-...`
@@ -1488,20 +1490,6 @@ export default {
 		});
 	},
 	beforeUnmount() {
-		this.eventBus.off("close_opening_dialog");
-		this.eventBus.off("register_pos_data");
-		this.eventBus.off("LoadPosProfile");
-		this.eventBus.off("show_offers");
-		this.eventBus.off("show_coupons");
-		this.eventBus.off("show_payment");
-		this.eventBus.off("open_closing_dialog");
-		this.eventBus.off("submit_closing_pos");
-		this.eventBus.off("add_item");
-		this.eventBus.off("load_invoice");
-		this.eventBus.off("load_order");
-		this.eventBus.off("load_return_invoice");
-		this.eventBus.off("clear_invoice");
-		this.eventBus.off("cart_emptied");
 		window.frappe?.realtime?.off("pos_profile_updated");
 		window.frappe?.realtime?.off("pos_master_data_invalidated");
 		if (typeof this._unsubConnectivity === "function") {

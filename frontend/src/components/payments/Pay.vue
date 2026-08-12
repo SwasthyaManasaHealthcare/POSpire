@@ -525,8 +525,9 @@ import Customer from "@/components/pos/Customer.vue";
 import PaidInvoice from "@/components/pos/PaidInvoice.vue";
 import UpdateCustomer from "@/components/pos/UpdateCustomer.vue";
 
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format],
+	mixins: [format, busListeners],
 	data: function () {
 		return {
 			page: 1,
@@ -973,7 +974,7 @@ export default {
 	mounted: function () {
 		this.$nextTick(function () {
 			this.check_opening_entry();
-			this.eventBus.on("update_customer", (customer_name) => {
+			this.onBus("update_customer", (customer_name) => {
 				this.clear_all(true);
 				this.customer_name = customer_name;
 				this.fetch_customer_details();
@@ -981,14 +982,10 @@ export default {
 				this.get_unallocated_payments();
 				this.get_draft_mpesa_payments_register();
 			});
-			this.eventBus.on("fetch_customer_details", () => {
+			this.onBus("fetch_customer_details", () => {
 				this.fetch_customer_details();
 			});
 		});
-	},
-	beforeUnmount() {
-		this.eventBus.off("update_customer");
-		this.eventBus.off("fetch_customer_details");
 	},
 };
 </script>

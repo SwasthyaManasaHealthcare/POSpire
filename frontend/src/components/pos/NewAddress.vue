@@ -77,8 +77,10 @@
 <script>
 import { call } from "@/utils/call";
 import { toast } from "vue3-toastify";
+import busListeners from "@/utils/busListeners";
 
 export default {
+	mixins: [busListeners],
 	data: () => ({
 		addressDialog: false,
 		address: {},
@@ -107,7 +109,7 @@ export default {
 		},
 	},
 	created: function () {
-		this.eventBus.on("open_new_address", (data) => {
+		this.onBus("open_new_address", (data) => {
 			this.addressDialog = true;
 			this.customer = data;
 		});

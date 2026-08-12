@@ -1157,8 +1157,9 @@ import { datetime } from "@/utils/datetime";
 import connectivity from "@/offline/connectivity";
 import { computeOfflineTax } from "@/offline/tax";
 
+import busListeners from "@/utils/busListeners";
 export default {
-	mixins: [format, hardwareUtils],
+	mixins: [format, hardwareUtils, busListeners],
 	data() {
 		return {
 			//
@@ -4304,7 +4305,7 @@ export default {
 			this.invoice_doc.inclusive_tax = this.inclusive_tax;
 			}
 			//
-			this.eventBus.on("register_pos_profile", (data) => {
+			this.onBus("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
 				this.customer = data.pos_profile.customer;
 				this.pos_opening_shift = data.pos_opening_shift;
@@ -4319,7 +4320,7 @@ export default {
 				// Prime the tax config while online so it's cached for offline use.
 				this.load_offline_tax_config();
 		});
-		this.eventBus.on("auto_set_delivery_charge", () => {
+		this.onBus("auto_set_delivery_charge", () => {
 			if (this.delivery_charges.length > 0 && !this.selected_delivery_charge) {
 				// optionally pick based on is_default
 				const default_charge = this.delivery_charges.find((dc) => dc.is_default);
@@ -4327,7 +4328,7 @@ export default {
 				this.update_delivery_charges();
 			}
 		});
-		this.eventBus.on("add_item", async (item) => {
+		this.onBus("add_item", async (item) => {
 			if (await this.isShiftLocked()) {
 				toast.warning(
 					__(
@@ -4348,11 +4349,11 @@ export default {
 		// them would halt sales during exactly the outage offline mode exists
 		// for. These three listeners are the fast in-session signal only;
 		// isShiftLocked() below is the durable answer.
-		this.eventBus.on("shift_closing_pending", (payload) => {
+		this.onBus("shift_closing_pending", (payload) => {
 			this.closingPendingShiftId = payload?.shift_lifecycle_id ?? null;
 			this.shiftClosingPending = true;
 		});
-		this.eventBus.on("shift_closing_complete", (payload) => {
+		this.onBus("shift_closing_complete", (payload) => {
 			if (
 				payload?.shift_lifecycle_id &&
 				this.closingPendingShiftId &&
@@ -4363,7 +4364,7 @@ export default {
 			this.closingPendingShiftId = null;
 			this.shiftClosingPending = false;
 		});
-		this.eventBus.on("register_pos_data", () => {
+		this.onBus("register_pos_data", () => {
 			// A new shift was just opened, so whatever was closing is no longer
 			// the shift the cashier is on. Clearing the in-session flag hands
 			// the decision back to isShiftLocked(), which reads the NEW shift's
@@ -4371,7 +4372,7 @@ export default {
 			this.closingPendingShiftId = null;
 			this.shiftClosingPending = false;
 		});
-		this.eventBus.on("update_customer", (customer) => {
+		this.onBus("update_customer", (customer) => {
 			// Customer.vue's watcher pairs `update_customer` with
 			// `update_customer_offline_id` in the same tick (it derives the
 			// offline_id from the customers list). So we MUST NOT reset
@@ -4379,7 +4380,7 @@ export default {
 			// listener just set.
 			this.customer = customer;
 		});
-		this.eventBus.on("update_customer_offline_id", (offlineId) => {
+		this.onBus("update_customer_offline_id", (offlineId) => {
 			this.customer_offline_id = offlineId;
 		});
 
@@ -4390,7 +4391,7 @@ export default {
 		// longer needed (the link is now stable). Future invoices reference
 		// the real name natively; the server-side `_resolve_customer_by_offline_id`
 		// path stays correct for any invoice already queued under the old id.
-		this.eventBus.on("customer_renamed", ({ old_name, new_name } = {}) => {
+		this.onBus("customer_renamed", ({ old_name, new_name } = {}) => {
 			if (!old_name || !new_name || old_name === new_name) return;
 			if (this.customer === old_name) {
 				this.customer = new_name;
@@ -4407,13 +4408,13 @@ export default {
 				}
 			}
 		});
-		this.eventBus.on("fetch_customer_details", () => {
+		this.onBus("fetch_customer_details", () => {
 			this.fetch_customer_details();
 		});
-		this.eventBus.on("clear_invoice", ({ submitted = false } = {}) => {
+		this.onBus("clear_invoice", ({ submitted = false } = {}) => {
 			this.clear_invoice({ submitted });
 		});
-		this.eventBus.on("load_invoice", (data) => {
+		this.onBus("load_invoice", (data) => {
 			this.load_invoice(data);
 			// Sales Person
 			this.items = data.items.map((item) => ({
@@ -4422,48 +4423,35 @@ export default {
 			}));
 			//
 		});
-		this.eventBus.on("load_order", (data) => {
+		this.onBus("load_order", (data) => {
 			this.new_order(data);
 			// this.eventBus.emit("set_pos_coupons", data.posa_coupons);
 		});
-		this.eventBus.on("set_offers", (data) => {
+		this.onBus("set_offers", (data) => {
 			this.posOffers = data;
 		});
-		this.eventBus.on("update_invoice_offers", (data) => {
+		this.onBus("update_invoice_offers", (data) => {
 			this.updateInvoiceOffers(data);
 		});
-		this.eventBus.on("update_invoice_coupons", (data) => {
+		this.onBus("update_invoice_coupons", (data) => {
 			this.posa_coupons = data;
 			this.handelOffers();
 		});
-		this.eventBus.on("set_all_items", (data) => {
+		this.onBus("set_all_items", (data) => {
 			this.allItems = data;
 			this.items.forEach((item) => {
 				this.update_item_detail(item);
 			});
 		});
-		this.eventBus.on("load_return_invoice", (data) => {
+		this.onBus("load_return_invoice", (data) => {
 			this.load_invoice(data.invoice_doc);
 			this.discount_amount = -data.return_doc.discount_amount;
 			this.additional_discount_percentage = -data.return_doc.additional_discount_percentage;
 			this.return_doc = data.return_doc;
 		});
-		this.eventBus.on("set_new_line", (data) => {
+		this.onBus("set_new_line", (data) => {
 			this.new_line = data;
 		});
-	},
-	beforeUnmount() {
-		this.eventBus.off("register_pos_profile");
-		this.eventBus.off("add_item");
-		this.eventBus.off("update_customer");
-		this.eventBus.off("update_customer_offline_id");
-		this.eventBus.off("customer_renamed");
-		this.eventBus.off("fetch_customer_details");
-		this.eventBus.off("clear_invoice");
-		this.eventBus.off("set_offers");
-		this.eventBus.off("update_invoice_offers");
-		this.eventBus.off("update_invoice_coupons");
-		this.eventBus.off("set_all_items");
 	},
 	created() {
 		document.addEventListener("keydown", this.shortOpenPayment.bind(this));

@@ -71,8 +71,10 @@
 </template>
 <script>
 import ItemImage from "./ItemImage.vue";
+import busListeners from "@/utils/busListeners";
 
 export default {
+	mixins: [busListeners],
 	components: { ItemImage },
 	data: () => ({
 		varaintsDialog: false,
@@ -135,7 +137,7 @@ export default {
 		},
 	},
 	created: function () {
-		this.eventBus.on("open_variants_model", ([item, items]) => {
+		this.onBus("open_variants_model", ([item, items]) => {
 			this.varaintsDialog = true;
 			this.parentItem = item || null;
 			this.items = items;
