@@ -136,6 +136,9 @@ describe("registry adapter — submit_invoice", () => {
 				data: {},
 				invoice: {
 					pos_opening_shift_offline_id: "shift-42",
+					// The opening is a local parent only while it is itself
+					// queued; an online-opened shift has an id but no row.
+					pos_opening_shift_pending_sync: true,
 					pos_material_receipt_offline_ids: ["mr-1"],
 					posting_date: "2026-04-25",
 					owner: "cashier@example.com",
