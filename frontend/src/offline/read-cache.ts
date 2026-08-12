@@ -99,6 +99,22 @@ const DURABLE_KEYS: ReadonlySet<string> = new Set([
 	"offline.opening_dialog_data",
 ]);
 
+/**
+ * Durable key PREFIXES, for datasets that are scoped to something the exact
+ * allowlist can't enumerate. `offline.tax_config:<pos profile>` is per
+ * profile: one fixed key would serve the previous profile's tax rates after a
+ * switch, which undercharges. Same non-PII contract as DURABLE_KEYS above:
+ * tax config is account heads and rates, admin configuration only.
+ */
+const DURABLE_KEY_PREFIXES: readonly string[] = ["offline.tax_config:"];
+
+function isDurableKey(cacheKey: string): boolean {
+	return (
+		DURABLE_KEYS.has(cacheKey) ||
+		DURABLE_KEY_PREFIXES.some((prefix) => cacheKey.startsWith(prefix))
+	);
+}
+
 export class DexieMetadataReadCache implements ReadCache {
 	/** In-memory layer: fast reads within the session, original cachedAt kept. */
 	private readonly mem = new Map<string, CacheEntry>();
@@ -114,7 +130,7 @@ export class DexieMetadataReadCache implements ReadCache {
 		}
 
 		// Non-durable keys are memory-only — skip the Dexie lookup entirely.
-		if (!DURABLE_KEYS.has(cacheKey)) return null;
+		if (!isDurableKey(cacheKey)) return null;
 
 		// Persistent fallback: Dexie metadata table (survives reload).
 		try {
@@ -138,7 +154,7 @@ export class DexieMetadataReadCache implements ReadCache {
 		const entry: CacheEntry = { data: value, cachedAt, ttlMs: ttlMs ?? null };
 		this.mem.set(cacheKey, entry);
 		// Only persist allowlisted non-PII keys to the unencrypted metadata table.
-		if (!DURABLE_KEYS.has(cacheKey)) return;
+		if (!isDurableKey(cacheKey)) return;
 		try {
 			await db.metadata.put({
 				key: RC_PREFIX + cacheKey,
@@ -153,7 +169,7 @@ export class DexieMetadataReadCache implements ReadCache {
 	/** Drop a single cached key from both layers. Used on logout. */
 	async invalidate(cacheKey: string): Promise<void> {
 		this.mem.delete(cacheKey);
-		if (!DURABLE_KEYS.has(cacheKey)) return;
+		if (!isDurableKey(cacheKey)) return;
 		try {
 			await db.metadata.delete(RC_PREFIX + cacheKey);
 		} catch {

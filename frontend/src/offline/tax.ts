@@ -88,7 +88,9 @@ export function computeOfflineTax(
 		grand_total: round(netTotal, precision),
 	};
 
-	if (!config) return empty;
+	// Fail closed. Reporting `supported: true` with zero tax let the
+	// exclusive-tax Pay guard pass and the till collect the untaxed amount.
+	if (!config) return { ...empty, supported: false };
 
 	// Guardrail: we only compute flat "On Net Total" percentage taxes.
 	const unsupported = config.sales_taxes_and_charges.some(

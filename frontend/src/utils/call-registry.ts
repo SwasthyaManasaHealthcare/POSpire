@@ -143,6 +143,11 @@ const HOUR = 60 * 60 * 1000;
 /** Stable cache key for `get_opening_dialog_data`. Must match DURABLE_KEYS. */
 export const OPENING_DIALOG_CACHE_KEY = "offline.opening_dialog_data";
 
+/** Per-profile durable key for the offline tax config. Must match the prefix
+ *  allowlisted in read-cache.ts DURABLE_KEY_PREFIXES. Append the POS Profile
+ *  name so switching profiles cannot serve the previous profile's rates. */
+export const TAX_CONFIG_CACHE_KEY_PREFIX = "offline.tax_config:";
+
 /**
  * The canonical registry. Names are the exact server method paths.
  *

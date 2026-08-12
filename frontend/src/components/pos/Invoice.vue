@@ -1146,7 +1146,8 @@
 </template>
 
 <script>
-import { call } from "@/utils/call";
+import { call, unwrapStale } from "@/utils/call";
+import { TAX_CONFIG_CACHE_KEY_PREFIX } from "@/utils/call-registry";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import Customer from "./Customer.vue";
@@ -2163,12 +2164,31 @@ export default {
 		},
 
 		async load_offline_tax_config() {
-			if (!this.pos_profile?.name) return;
+			const requestedProfile = this.pos_profile?.name;
+			if (!requestedProfile) return;
+			// Clear first: on a profile switch the catch below would otherwise
+			// leave the PREVIOUS profile's rates installed, and computeOfflineTax
+			// would happily price this profile's cart with them.
+			this.offline_tax_config = null;
 			try {
-				const config = await call("pospire.pospire.api.posapp.get_offline_tax_config", {
-					pos_profile: this.pos_profile.name,
-				});
-				if (config) this.offline_tax_config = config;
+				// Cached reads return a StaleReadResult wrapper; assigning it raw
+				// makes computeOfflineTax dereference an absent
+				// `sales_taxes_and_charges` and throw.
+				const config = unwrapStale(
+					await call({
+						method: "pospire.pospire.api.posapp.get_offline_tax_config",
+						args: { pos_profile: requestedProfile },
+						intent: "read",
+						// Per-profile durable key: one slot per POS Profile, so a
+						// profile switch can't serve the previous profile's rates.
+						cacheKey: TAX_CONFIG_CACHE_KEY_PREFIX + requestedProfile,
+					}),
+				);
+				// A slow response for a profile we've since switched away from
+				// must not overwrite the active profile's config.
+				if (config && this.pos_profile?.name === requestedProfile) {
+					this.offline_tax_config = config;
+				}
 			} catch {
 				// Non-fatal: offline tax falls back to the untaxed subtotal seed.
 			}
