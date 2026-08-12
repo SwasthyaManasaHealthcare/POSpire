@@ -947,9 +947,8 @@ export default {
 			// Resolved at sale time rather than trusted off whichever
 			// `pos_opening_shift` object this component currently holds:
 			// `register_pos_profile` has emitters beyond Pos.vue's own stamped
-			// snapshot — App.vue's boot-time bootstrapPosProfileForNavbar, and
-			// Pos.vue's `pos_profile_updated` / `pendingProfileData` replays —
-			// that hand out a live `check_opening_shift` response the server
+			// snapshot — its `pos_profile_updated` / `pendingProfileData`
+			// replays — that hand out a live `check_opening_shift` response the server
 			// never echoes `pospire_lifecycle_id` on and that never passes
 			// through `registerShiftLifecycle`. On a common warm-boot ordering
 			// one of those fires last, leaving `pospire_lifecycle_id` undefined
@@ -1639,8 +1638,7 @@ export default {
 			});
 			this.onBus("register_pos_profile", (data) => {
 				this.pos_profile = data.pos_profile;
-				// Best-effort only: `register_pos_profile` has emitters (App.vue's
-				// boot-time bootstrapPosProfileForNavbar, Pos.vue's
+				// Best-effort only: `register_pos_profile` has emitters (Pos.vue's
 				// pos_profile_updated / pendingProfileData replays) that hand out
 				// a live check_opening_shift response never stamped with
 				// pospire_lifecycle_id, and any of them can be the last one to
