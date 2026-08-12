@@ -67,14 +67,35 @@ describe("loadSalesPersons", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
 	});
 
-	it("force bypasses the session cache", async () => {
+	// Invoice mounts before `register_pos_profile` lands, so its load usually
+	// runs with persist:false. Payments then asks with persist:true. If the
+	// shared result is handed over without writing storage, the offline
+	// fallback silently rots.
+	it("writes storage when a persisting caller reuses a cached result", async () => {
 		const fetchSpy = okFetch(LIST);
 		vi.stubGlobal("fetch", fetchSpy);
 
-		await loadSalesPersons();
-		await loadSalesPersons({ force: true });
+		await loadSalesPersons({ persist: false });
+		expect(localStorage.getItem("sales_persons_storage")).toBeNull();
 
-		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		await loadSalesPersons({ persist: true });
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(JSON.parse(localStorage.getItem("sales_persons_storage") as string)).toEqual(LIST);
+	});
+
+	it("writes storage when a persisting caller joins a request in flight", async () => {
+		const fetchSpy = okFetch(LIST);
+		vi.stubGlobal("fetch", fetchSpy);
+
+		const [, joined] = await Promise.all([
+			loadSalesPersons({ persist: false }),
+			loadSalesPersons({ persist: true }),
+		]);
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(joined).toEqual(LIST);
+		expect(JSON.parse(localStorage.getItem("sales_persons_storage") as string)).toEqual(LIST);
 	});
 
 	it("persists only when asked", async () => {
