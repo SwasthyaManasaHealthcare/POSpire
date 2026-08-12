@@ -507,6 +507,9 @@ export default {
 			// newer grid fresh. Bumping the token supersedes any in-flight one.
 			this.stock_request_seq += 1;
 			this.stock_details_fresh = false;
+			// The token above stops a stale response being applied; this frees
+			// the connection it is still holding.
+			this.abortStockEnrichment();
 			const catalogSeq = ++this.catalog_request_seq;
 			if (!this.pos_profile) {
 				return;
@@ -823,21 +826,92 @@ export default {
 			this.qty = 1;
 			this.$refs.debounce_search.focus();
 		},
+		/**
+		 * Identity of a stock-enrichment request. Warehouse and profile are in
+		 * the key because the server resolves quantities against
+		 * `pos_profile.warehouse`, so the same item codes under a different
+		 * profile are a genuinely different question.
+		 */
+		stockEnrichmentKey(itemCodes) {
+			return JSON.stringify([
+				this.pos_profile?.name ?? "",
+				this.pos_profile?.warehouse ?? "",
+				itemCodes,
+			]);
+		},
+
+		/** Cancel the in-flight enrichment, if any. Safe to call unconditionally. */
+		abortStockEnrichment() {
+			if (!this._stockSlot) return;
+			this._stockSlot.controller.abort();
+			this._stockSlot = null;
+		},
+
+		/**
+		 * Single-slot in-flight coordinator for `get_items_details`.
+		 *
+		 * Deliberately NOT a result cache: stock, serial and batch data are
+		 * live-only (the method is `offline: false`), so once a request settles
+		 * the next one must go to the wire again. This only collapses requests
+		 * that overlap in time — the boot path fires two for the same catalogue
+		 * (the `filtered_items` watcher and the explicit post-fetch call), and
+		 * both are asking the identical question.
+		 *
+		 * An identical key joins the in-flight promise. Because a request can
+		 * run for seconds, a joiner may receive stock read slightly before it
+		 * asked; that is still a live read. An emitter wanting
+		 * invalidate-now semantics would need to force a new request rather
+		 * than join.
+		 */
+		requestStockDetails(key, itemCodes) {
+			if (this._stockSlot?.key === key) return this._stockSlot.promise;
+			// A different question supersedes the old one — free the socket
+			// rather than let a doomed response finish.
+			this.abortStockEnrichment();
+
+			const controller = new AbortController();
+			const slot = { key, controller, promise: null };
+			slot.promise = call({
+				method: "pospire.pospire.api.posapp.get_items_details",
+				// Only `item_code` is read server-side; every other field is
+				// echoed straight back into the response, so sending whole rows
+				// puts the catalogue on the wire in both directions.
+				args: {
+					pos_profile: this.pos_profile,
+					items_data: itemCodes.map((item_code) => ({ item_code })),
+				},
+				abortSignal: controller.signal,
+			}).finally(() => {
+				// Only if we still own the slot: a newer request may have
+				// replaced it already.
+				if (this._stockSlot === slot) this._stockSlot = null;
+			});
+			this._stockSlot = slot;
+			return slot.promise;
+		},
+
 		async update_items_details(items) {
 			const vm = this;
 			// Quantities are unknown from the moment the request starts, not
 			// from the moment it fails.
 			const seq = ++vm.stock_request_seq;
 			vm.stock_details_fresh = false;
+			const itemCodes = [...new Set(items.map((i) => i.item_code))].sort();
+			if (!itemCodes.length) {
+				// An empty grid has no quantity that could be stale. The old
+				// code reached the same state via a pointless round trip that
+				// returned []; skip the wire, keep the flag.
+				vm.stock_details_fresh = true;
+				return;
+			}
 			let r = null;
 			try {
-				r = await call("pospire.pospire.api.posapp.get_items_details", {
-					pos_profile: vm.pos_profile,
-					items_data: items,
-				});
+				r = await vm.requestStockDetails(vm.stockEnrichmentKey(itemCodes), itemCodes);
 			} catch {
-				// get_items_details is live-only. Offline it throws, and
-				// get_items leaves actual_qty at 0, so the grid must report
+				// AbortError is expected supersession, not a failure — call.ts
+				// keeps it out of connectivity accounting. Otherwise:
+				// get_items_details is live-only, so offline it throws and
+				// get_items leaves actual_qty at 0, meaning the grid must report
 				// stock as unknown rather than render a confident "OUT".
 				return;
 			}
@@ -1132,6 +1206,12 @@ export default {
 
 	mounted() {
 		this.scan_barcoud();
+	},
+
+	beforeUnmount() {
+		// Nothing left to apply the response to. Bus listeners are torn down by
+		// the busListeners mixin's own hook.
+		this.abortStockEnrichment();
 	},
 
 };
