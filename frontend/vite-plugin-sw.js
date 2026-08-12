@@ -9,8 +9,8 @@
  *      install precaches these too, but tolerates failures (auth redirect,
  *      route disabled). Without them, hard-reload offline falls through to
  *      `/offline.html` instead of booting the cached SPA.
- *   3. Computes BUILD_HASH from the sorted precache list AND shell routes.
- *      Changing either invalidates the cache.
+ *   3. Computes BUILD_HASH from the sorted precache list, shell routes, and
+ *      checksums of the app's static assets. Changing any invalidates the cache.
  *   4. Replaces `__BUILD_HASH__`, `__PRECACHE_URLS__`, and `__SHELL_ROUTES__`
  *      placeholders in the emitted sw.js chunk.
  *   5. Mirrors sw.js + offline.html into `../pospire/www/` so a Frappe
@@ -32,6 +32,54 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const SW_FILENAME = "sw.js";
 const OFFLINE_FILENAME = "offline.html";
+
+// `frontend` is Vite's own output, already covered by precacheUrls. `dist` is
+// Frappe's bundle output, whose filenames already carry a content hash.
+const STATIC_SKIP_TOP_LEVEL = new Set(["frontend", "node_modules", "dist"]);
+
+// Only files a browser actually requests. Anything else under public/ (backup
+// folders, notes, .gitkeep) must not force every client to refetch its shell.
+const SERVED_ASSET_EXT =
+	/\.(?:css|js|mjs|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|eot)$/i;
+
+// Returns a checksum per file for the images, css, js and fonts Frappe serves
+// under /assets/pospire/. These filenames never change when their contents do,
+// and the service worker only re-downloads them when the build hash changes.
+// So unless they are part of that hash, an icon-only change never reaches users.
+function appAssetChecksums(rootDir) {
+	if (!fs.existsSync(rootDir)) return [];
+
+	const entries = [];
+	const walk = (dir, rel) => {
+		const dirents = fs
+			.readdirSync(dir, { withFileTypes: true })
+			.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+		for (const dirent of dirents) {
+			if (!rel && STATIC_SKIP_TOP_LEVEL.has(dirent.name)) continue;
+			if (dirent.name === "node_modules") continue;
+			// Backups, scratch folders and dotfiles are never served.
+			if (dirent.name.startsWith("_") || dirent.name.startsWith(".")) continue;
+			// public/ is symlinked into sites/assets; don't follow it back out.
+			if (dirent.isSymbolicLink()) continue;
+
+			const relPath = rel ? `${rel}/${dirent.name}` : dirent.name;
+			const absPath = path.join(dir, dirent.name);
+
+			if (dirent.isDirectory()) {
+				walk(absPath, relPath);
+			} else if (dirent.isFile() && SERVED_ASSET_EXT.test(dirent.name)) {
+				const digest = crypto
+					.createHash("sha1")
+					.update(fs.readFileSync(absPath))
+					.digest("hex");
+				entries.push(`${relPath}:${digest}`);
+			}
+		}
+	};
+
+	walk(rootDir, "");
+	return entries.sort();
+}
 
 export default function posspireServiceWorkerPlugin(options = {}) {
 	const frappeAppRoot = options.frappeAppRoot || "../pospire";
@@ -100,6 +148,8 @@ export default function posspireServiceWorkerPlugin(options = {}) {
 				...Array.from(precacheUrls).sort(),
 				"---shell---",
 				...Array.from(shellRoutes).sort(),
+				"---static---",
+				...appAssetChecksums(path.resolve(__dirname, frappeAppRoot, "public")),
 			].join("\n");
 			const buildHash = crypto
 				.createHash("sha1")

@@ -115,6 +115,18 @@ function isNavigationRequest(request) {
 	);
 }
 
+// POSpire assets whose filenames stay the same when their contents change.
+// Frappe serves /assets with `immutable`, so a plain fetch can answer from the
+// browser's HTTP cache and refill a freshly rotated shell cache with the old
+// copy. `frontend` (Vite) and `dist` (Frappe bundle) filenames are hashed.
+function isUnhashedAppAsset(url) {
+	return (
+		url.pathname.startsWith("/assets/pospire/") &&
+		!url.pathname.startsWith("/assets/pospire/frontend/") &&
+		!url.pathname.startsWith("/assets/pospire/dist/")
+	);
+}
+
 function isShellAsset(url) {
 	// Vite emits hashed assets under /assets/. We also accept common font
 	// extensions and the root index.html.
@@ -388,7 +400,13 @@ async function handleShellAsset(request) {
 	const cache = await caches.open(SHELL_CACHE);
 	const cached = await cache.match(request, { ignoreSearch: true });
 
-	const networkFetch = fetch(request)
+	// Skip the HTTP cache for unhashed app assets so a rotated shell cache is
+	// refilled from the network, not from a superseded `immutable` response.
+	const networkRequest = isUnhashedAppAsset(new URL(request.url))
+		? new Request(request, { cache: "reload" })
+		: request;
+
+	const networkFetch = fetch(networkRequest)
 		.then((res) => {
 			if (res && res.ok && res.type === "basic") {
 				cache.put(request, res.clone()).catch(() => {
