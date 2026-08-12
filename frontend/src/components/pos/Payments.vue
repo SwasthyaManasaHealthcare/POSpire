@@ -1475,14 +1475,18 @@ export default {
 		},
 		async get_mpesa_modes() {
 			const vm = this;
-			const r = await call("pospire.pospire.api.m_pesa.get_mpesa_mode_of_payment", {
-				company: vm.pos_profile.company,
-			});
-			if (r) {
-				vm.mpesa_modes = r;
-			} else {
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.m_pesa.get_mpesa_mode_of_payment", {
+					company: vm.pos_profile.company,
+				});
+			} catch {
+				// Live-only lookup, and this runs on every shift open. Offline
+				// it threw an unhandled rejection on the opening path.
 				vm.mpesa_modes = [];
+				return;
 			}
+			vm.mpesa_modes = r || [];
 		},
 		is_mpesa_c2b_payment(payment) {
 			if (this.mpesa_modes.includes(payment.mode_of_payment) && payment.type == "Bank") {

@@ -404,6 +404,19 @@ export default {
 		items_view: "list",
 		item_group: "ALL",
 		loading: false,
+		// True only once get_items_details has filled real quantities. Until
+		// then actual_qty is 0 by default, not by observation. Reset whenever a
+		// catalog or enrichment request starts, so a hung request cannot leave
+		// stale quantities looking authoritative.
+		stock_details_fresh: false,
+		// Monotonic token: only the newest enrichment response may mark the
+		// grid fresh, otherwise a slow earlier reply marks the wrong generation.
+		stock_request_seq: 0,
+		// Separate token for the catalog fetch itself. Two get_items() calls can
+		// resolve out of order, and without this an older response replaces the
+		// newer catalog and then launches enrichment for it — marking a stale
+		// item list fresh.
+		catalog_request_seq: 0,
 		items_group: ["ALL"],
 		items: [],
 		search: "",
@@ -488,6 +501,12 @@ export default {
 			this.eventBus.emit("show_coupons", "true");
 		},
 		get_items() {
+			// Invalidate BEFORE the profile guard: an enrichment request started
+			// against the previous catalog must not survive this call and mark a
+			// newer grid fresh. Bumping the token supersedes any in-flight one.
+			this.stock_request_seq += 1;
+			this.stock_details_fresh = false;
+			const catalogSeq = ++this.catalog_request_seq;
 			if (!this.pos_profile) {
 				return;
 			}
@@ -552,6 +571,10 @@ export default {
 				search_value: sr,
 				customer: vm.customer,
 			}).then((r) => {
+				// Superseded by a newer get_items(): dropping this response keeps
+				// an older catalog from replacing a newer one and then being
+				// enriched under a fresh token.
+				if (catalogSeq !== vm.catalog_request_seq) return;
 				if (r) {
 					// `get_items` is registered as offline:true with a TTL.
 					// On a stale-cache hit call() returns a StaleReadResult
@@ -801,11 +824,26 @@ export default {
 		},
 		async update_items_details(items) {
 			const vm = this;
-			const r = await call("pospire.pospire.api.posapp.get_items_details", {
-				pos_profile: vm.pos_profile,
-				items_data: items,
-			});
+			// Quantities are unknown from the moment the request starts, not
+			// from the moment it fails.
+			const seq = ++vm.stock_request_seq;
+			vm.stock_details_fresh = false;
+			let r = null;
+			try {
+				r = await call("pospire.pospire.api.posapp.get_items_details", {
+					pos_profile: vm.pos_profile,
+					items_data: items,
+				});
+			} catch {
+				// get_items_details is live-only. Offline it throws, and
+				// get_items leaves actual_qty at 0, so the grid must report
+				// stock as unknown rather than render a confident "OUT".
+				return;
+			}
+			// Superseded by a newer request — its response owns the flag.
+			if (seq !== vm.stock_request_seq) return;
 			if (r) {
+				vm.stock_details_fresh = true;
 				items.forEach((item) => {
 					const updated_item = r.find(
 						(element) => element.item_code == item.item_code
@@ -925,7 +963,12 @@ export default {
 		 * the cache.
 		 */
 		stockContextReliable() {
-			return this.connectionQuality === "online";
+			// Online is necessary but not sufficient: get_items always returns
+			// actual_qty 0 unless posa_display_items_in_stock is set, and only
+			// a successful get_items_details fills it in. Gating on
+			// connectivity alone showed "OUT" on every item after a reconnect,
+			// before the enrichment call had landed.
+			return this.connectionQuality === "online" && this.stock_details_fresh;
 		},
 		filtered_items() {
 			this.search = this.get_search(this.first_search);
