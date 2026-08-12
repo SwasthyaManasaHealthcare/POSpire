@@ -373,7 +373,8 @@
 </template>
 
 <script>
-import { call, unwrapStale } from "@/utils/call";
+import { call, unwrapStale, MethodPolicyError } from "@/utils/call";
+import { UnregisteredMethod } from "@/utils/call-registry";
 import { toast } from "vue3-toastify";
 import { storeToRefs } from "pinia";
 import format from "@/utils/format";
@@ -873,6 +874,10 @@ export default {
 			const slot = { key, controller, promise: null };
 			slot.promise = call({
 				method: "pospire.pospire.api.posapp.get_items_details",
+				// Required on the object form: unlike the positional form, it is
+				// NOT inferred from the registry, and validateIntent rejects the
+				// call outright when it disagrees.
+				intent: "read",
 				// Only `item_code` is read server-side; every other field is
 				// echoed straight back into the response, so sending whole rows
 				// puts the catalogue on the wire in both directions.
@@ -900,19 +905,30 @@ export default {
 			if (!itemCodes.length) {
 				// An empty grid has no quantity that could be stale. The old
 				// code reached the same state via a pointless round trip that
-				// returned []; skip the wire, keep the flag.
+				// returned []; skip the wire, keep the flag. A request for the
+				// previous, non-empty grid is now answering a question nobody
+				// is asking, so drop it rather than let it run to completion.
+				vm.abortStockEnrichment();
 				vm.stock_details_fresh = true;
 				return;
 			}
 			let r = null;
 			try {
 				r = await vm.requestStockDetails(vm.stockEnrichmentKey(itemCodes), itemCodes);
-			} catch {
+			} catch (err) {
 				// AbortError is expected supersession, not a failure — call.ts
-				// keeps it out of connectivity accounting. Otherwise:
-				// get_items_details is live-only, so offline it throws and
+				// keeps it out of connectivity accounting. Offline is expected
+				// too: get_items_details is live-only, so it throws and
 				// get_items leaves actual_qty at 0, meaning the grid must report
 				// stock as unknown rather than render a confident "OUT".
+				//
+				// A policy error is neither. It means this call site disagrees
+				// with the registry and NO request was ever made — a bug that
+				// silently zeroes enrichment, which this catch would otherwise
+				// hide behind an indistinguishable "stock unknown" grid.
+				if (err instanceof MethodPolicyError || err instanceof UnregisteredMethod) {
+					console.error("[ItemsSelector] stock enrichment misconfigured", err);
+				}
 				return;
 			}
 			// Superseded by a newer request — its response owns the flag.
@@ -1211,6 +1227,13 @@ export default {
 	beforeUnmount() {
 		// Nothing left to apply the response to. Bus listeners are torn down by
 		// the busListeners mixin's own hook.
+		//
+		// Both tokens are bumped, not just the stock one: an in-flight
+		// get_items() is unaffected by abortStockEnrichment and would otherwise
+		// resolve into a dead component, mutate its state and schedule a fresh
+		// enrichment from the .then handler.
+		this.catalog_request_seq += 1;
+		this.stock_request_seq += 1;
 		this.abortStockEnrichment();
 	},
 
