@@ -2,7 +2,8 @@
   <nav>
     <v-app-bar height="72" class="modern-header" elevation="1">
       <v-app-bar-nav-icon @click.stop="drawer = !drawer" class="modern-nav-icon"></v-app-bar-nav-icon>
-      <v-toolbar-title @click="go_desk" class="stylish-brand">
+      <!-- Presentational only: v-toolbar-title is flex:1, so a click handler here covers the whole empty app-bar strip. -->
+      <v-toolbar-title class="stylish-brand">
         <div class="brand-container-modern hover-vibrant">
           <!-- Client branding (left) -->
           <div class="client-brand-section">
@@ -283,9 +284,6 @@ export default {
       this.$emit('changePage', key);
       this.drawer = false;
     },
-    go_desk() {
-      window.location.href = "/app";
-    },
     go_about() {
       const win = window.open(
         'https://github.com/promantia-ltd/POSpire',
@@ -421,7 +419,6 @@ export default {
 
 /* Brand Title */
 .stylish-brand {
-  cursor: pointer;
   transition: all 0.3s ease;
   padding: 8px 0;
   background: none;
@@ -456,8 +453,6 @@ export default {
 .brand-container-modern:hover {
   background: linear-gradient(135deg, rgba(0, 188, 212, 0.12) 0%, rgba(52, 73, 94, 0.08) 100%);
   border-color: rgba(0, 188, 212, 0.25);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 188, 212, 0.15);
 }
 
 .brand-icon {
@@ -606,7 +601,6 @@ export default {
   overflow: hidden;
   padding: 4px 8px;
   border-radius: 6px;
-  cursor: pointer;
 }
 
 .brand-pos-modern {
