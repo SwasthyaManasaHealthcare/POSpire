@@ -138,8 +138,9 @@
   {
    "color": "Green",
    "label": "POSpire App",
-   "link_to": "/pospire",
-   "type": "URL"
+   "link_to": "",
+   "type": "URL",
+   "url": "/pospire"
   }
  ],
  "title": "POSpire"
