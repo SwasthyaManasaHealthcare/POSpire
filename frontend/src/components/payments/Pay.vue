@@ -724,7 +724,6 @@ export default {
 		},
 
 		calculateDifference() {
-			console.log("New difference calculated:", this.total_of_diff);
 		},
 		async get_available_pos_profiles() {
 			if (!this.pos_profile.posa_allow_mpesa_reconcile_payments) return;

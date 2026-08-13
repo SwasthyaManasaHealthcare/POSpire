@@ -374,7 +374,6 @@ export default {
   created: function () {
     this.$nextTick(function () {
       this.onBus('show_message', (data) => {
-        console.log("GOT Something: <s>")
         this.show_message(data);
       });
       this.onBus('set_company', (data) => {

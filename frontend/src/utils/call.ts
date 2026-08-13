@@ -838,9 +838,7 @@ async function safeCacheRead<T>(
 ): Promise<{ data: T; cachedAt: number } | null> {
 	if (!cache) return null;
 	try {
-		console.log("Reading", key);
 		const entry = await cache.read<T>(key);
-		console.log(entry);
 		if (!entry) return null;
 		return { data: entry.data, cachedAt: entry.cachedAt };
 	} catch (err) {

@@ -177,7 +177,6 @@ export default {
 						this.pos_opening_shift.pospire_lifecycle_id = stamped;
 					}
 				}
-				console.info("LoadPosProfile");
 			} else if (liveCallSucceeded && !cachedSnapshot?.pos_opening_shift?.pospire_pending_sync) {
 				this.invalidateOpeningSnapshot(SNAPSHOT_KEY, SNAPSHOT_META_KEY);
 				this.pos_profile = "";
@@ -1128,7 +1127,6 @@ export default {
 				}
 			}
 			if (offers) {
-				console.info("LoadOffers");
 				this.eventBus.emit("set_offers", offers);
 			}
 		},
@@ -1271,7 +1269,6 @@ export default {
 					);
 				}
 				this.warm_customer_form_options_cache();
-				console.info("LoadPosProfile");
 			});
 			this.onBus("show_payment", (data) => {
 				this.payment = data === "true";
