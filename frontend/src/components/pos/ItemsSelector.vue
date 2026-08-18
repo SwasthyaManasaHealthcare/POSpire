@@ -381,6 +381,7 @@ import format from "@/utils/format";
 import { playSound } from "@/utils/sounds";
 import { useConnectivityStore } from "@/stores/connectivity";
 import _ from "lodash";
+import onScan from "onscan.js";
 import ItemImage from "./ItemImage.vue";
 import busListeners from "@/utils/busListeners";
 export default {
@@ -481,11 +482,17 @@ export default {
 			this.eventBus.emit("set_new_line", this.new_line);
 		},
 		/**
-		 * Mirrors trigger_onscan(): auto-add on any exact barcode/serial/batch
-		 * match so typed or pasted codes work without pressing Enter, same as
-		 * a hardware scanner. enter_event() itself no-ops unless it finds an
-		 * exact match, and clears first_search on a successful add, so this
-		 * can't loop or double-fire on partial/in-progress input.
+		 * Auto-add on any exact barcode/serial/batch match, so a typed or
+		 * pasted code works without pressing Enter. This covers input the
+		 * hardware-scanner path does not: onScan rejects anything slower than
+		 * avgTimeByChar or shorter than minLength, i.e. everything a human
+		 * enters. enter_event() no-ops unless it finds an exact match and
+		 * clears first_search on a successful add, so this cannot loop or
+		 * double-fire on partial input.
+		 *
+		 * It cannot double-add a scan either: handle_scan() sets first_search
+		 * and calls enter_event() synchronously, so by the time this watcher
+		 * flushes, first_search is back to null and enter_event() bails.
 		 */
 		first_search(newValue) {
 			if (!newValue) {
@@ -732,16 +739,30 @@ export default {
 			}
 		},
 
+		/**
+		 * Add the item the current search term exactly identifies, if any.
+		 *
+		 * Returns TRUE when an item was added, so callers (handle_scan in
+		 * particular) can tell a real miss from a no-op and report it.
+		 *
+		 * The comparisons run against a local `term` rather than `this.search`.
+		 * `this.search` is assigned as a side effect of evaluating the
+		 * `filtered_items` computed, so reading it here made the result depend
+		 * on when that computed last re-evaluated.
+		 */
 		enter_event() {
 			let match = false;
+			// Read filtered_items first: evaluating it is also what populates
+			// this.flags.serial_no / batch_no consulted further down.
 			if (!this.filtered_items.length || !this.first_search) {
-				return;
+				return match;
 			}
+			const term = this.get_search(this.first_search);
 			const qty = this.get_item_qty(this.first_search);
 			const new_item = { ...this.filtered_items[0] };
 			new_item.qty = flt(qty);
 			new_item.item_barcode.forEach((element) => {
-				if (this.search == element.barcode) {
+				if (term == element.barcode) {
 					new_item.uom = element.posa_uom;
 					match = true;
 				}
@@ -752,7 +773,7 @@ export default {
 				this.pos_profile.posa_search_serial_no
 			) {
 				new_item.serial_no_data.forEach((element) => {
-					if (this.search && element.serial_no == this.search) {
+					if (term && element.serial_no == term) {
 						new_item.to_set_serial_no = this.first_search;
 						match = true;
 					}
@@ -767,7 +788,7 @@ export default {
 				this.pos_profile.posa_search_batch_no
 			) {
 				new_item.batch_no_data.forEach((element) => {
-					if (this.search && element.batch_no == this.search) {
+					if (term && element.batch_no == term) {
 						new_item.to_set_batch_no = this.first_search;
 						new_item.batch_no = this.first_search;
 						match = true;
@@ -779,22 +800,62 @@ export default {
 			}
 			if (match) {
 				this.add_item(new_item);
-				this.search = null;
-				this.first_search = null;
-				this.debounce_search = null;
-				this.flags.serial_no = null;
-				this.flags.batch_no = null;
+				// reset_search() cancels the pending debounced write before
+				// clearing. The old code assigned `this.debounce_search = null`
+				// here, which went back through the 200ms debounce -- so the
+				// clear was itself deferred, and the next scan's keystrokes
+				// simply re-armed the timer and replaced it. That is why the
+				// previous code was still sitting in the box when the second
+				// scan arrived.
+				this.reset_search();
 				this.qty = 1;
-				this.$refs.debounce_search.focus();
+				this.$refs.debounce_search?.focus();
 			}
+			return match;
+		},
+		/**
+		 * Clear the search box now, not in 200ms. Cancelling `_applySearch`
+		 * first is the important part: without it a write scheduled from an
+		 * earlier keystroke lands after the clear and resurrects the term.
+		 */
+		reset_search() {
+			this._applySearch.cancel();
+			this.search = null;
+			this.first_search = null;
+			this.flags.serial_no = null;
+			this.flags.batch_no = null;
 		},
 		search_onchange() {
-			const vm = this;
-			if (vm.pos_profile.pose_use_limit_search) {
-				vm.get_items();
-			} else {
-				vm.enter_event();
+			// onScan is mid-burst, so this Enter is almost certainly the
+			// scanner's suffix key. Let the scan callback finish the job --
+			// running the manual path too would add the item twice, once now
+			// and once when handle_scan() fires. If the burst turns out to
+			// have been fast human typing, onScanError replays it.
+			if (this.scan_in_progress()) {
+				this._deferred_enter = true;
+				return;
 			}
+			this.run_search();
+		},
+		run_search() {
+			// Enter must act on what is in the box right now. Without the
+			// flush this ran against the previous term, because the current
+			// one was still sitting in the 200ms debounce.
+			this._applySearch.flush();
+			if (this.pos_profile.pose_use_limit_search) {
+				this.get_items();
+			} else {
+				this.enter_event();
+			}
+		},
+		/**
+		 * TRUE while onScan is accumulating characters -- i.e. between the
+		 * first character of a burst and the moment it is validated as a scan
+		 * (or rejected as typing). `firstCharTime` is set on the first
+		 * accumulated character and zeroed by onScan's own reinitialize.
+		 */
+		scan_in_progress() {
+			return !!document.scannerDetectionData?.vars?.firstCharTime;
 		},
 		get_item_qty(first_search) {
 			let scal_qty = Math.abs(this.qty);
@@ -829,10 +890,9 @@ export default {
 			return search_term;
 		},
 		esc_event() {
-			this.search = null;
-			this.first_search = null;
+			this.reset_search();
 			this.qty = 1;
-			this.$refs.debounce_search.focus();
+			this.$refs.debounce_search?.focus();
 		},
 		/**
 		 * Identity of a stock-enrichment request. Warehouse and profile are in
@@ -976,31 +1036,86 @@ export default {
 		update_cur_items_details() {
 			this.update_items_details(this.filtered_items);
 		},
-		scan_barcoud() {
-			const vm = this;
-			try {
-				onScan.attachTo(document, {
-					suffixKeyCodes: [],
-					keyCodeMapper: function (oEvent) {
-						oEvent.stopImmediatePropagation();
-						return onScan.decodeKeyEvent(oEvent);
-					},
-					onScan: function (sCode) {
-						setTimeout(() => {
-							vm.trigger_onscan(sCode);
-						}, 300);
-					},
-				});
-			} catch (error) {}
+		/**
+		 * Attach the hardware-scanner listener.
+		 *
+		 * onScan was previously referenced without ever being imported, so
+		 * `onScan.attachTo` threw a ReferenceError that the bare `catch {}`
+		 * swallowed -- no listener was attached and no scan was ever framed.
+		 * The only thing separating one scan from the next was the 200ms
+		 * search debounce, which two scans inside that window simply re-armed,
+		 * concatenating both codes into one unmatchable term.
+		 *
+		 * The old custom keyCodeMapper is gone: it called
+		 * stopImmediatePropagation() on every keydown reaching document, which
+		 * would have killed keyboard input app-wide had it ever run.
+		 */
+		attach_scanner() {
+			if (onScan.isAttachedTo(document)) {
+				onScan.detachFrom(document);
+			}
+			onScan.attachTo(document, {
+				// reactToPaste stays off: a pasted code already reaches
+				// first_search through v-model, and the watcher adds it. Also
+				// reacting here would add the item twice.
+				keyCodeMapper: (oEvent) => {
+					const decoded = onScan.decodeKeyEvent(oEvent);
+					if (decoded !== "") {
+						return decoded;
+					}
+					// decodeKeyEvent only covers letters, digits and keypad
+					// operators; it drops '-', '.', '/' and friends, which
+					// appear in Code 39 / Code 128 barcodes. Keep any single
+					// printable character so the framed code matches what the
+					// scanner actually emitted. Named keys ("Enter", "Shift")
+					// are longer than one character and stay filtered out.
+					return oEvent.key?.length === 1 ? oEvent.key : "";
+				},
+				onScan: (sCode) => this.handle_scan(sCode),
+				onScanError: () => {
+					// The burst was human typing, not a scan. If Enter arrived
+					// during it, search_onchange deferred to us -- run it now
+					// so manual search and the Enter-to-add shortcut still work.
+					if (this._deferred_enter) {
+						this._deferred_enter = false;
+						this.run_search();
+					}
+				},
+			});
 		},
-		trigger_onscan(sCode) {
-			if (this.filtered_items.length == 0) {
+		/**
+		 * Handle one framed scan. `sCode` is authoritative.
+		 *
+		 * The scanner's keystrokes also landed in the focused search box, so a
+		 * debounced write of that raw text is pending -- and after two quick
+		 * scans that text is both codes concatenated. Cancelling it and
+		 * writing sCode ourselves is what makes consecutive scans independent:
+		 * onScan reinitializes its accumulator after every scan, so each
+		 * callback carries exactly one code and runs to completion (adding the
+		 * item and clearing the box) before the next one can fire.
+		 */
+		handle_scan(sCode) {
+			this._deferred_enter = false;
+			this._applySearch.cancel();
+			if (!this.pos_profile) {
+				return;
+			}
+			this.first_search = sCode;
+			if (this.pos_profile.pose_use_limit_search) {
+				// Limit-search profiles keep only the last server result in the
+				// grid, so the scanned code is not in filtered_items yet and
+				// enter_event() would report a false miss. get_items() re-queries
+				// with it and runs enter_event() itself once the response lands.
+				this.get_items();
+				return;
+			}
+			if (!this.enter_event()) {
 				toast.error(`No Item has this barcode "${sCode}"`);
 				playSound("error");
-			} else {
-				this.enter_event();
-				this.debounce_search = null;
-				this.search = null;
+				// Clear anyway. Leaving an unmatched code in the box meant the
+				// next scan appended to it and could never match either.
+				this.reset_search();
+				this.$refs.debounce_search?.focus();
 			}
 		},
 		generateWordCombinations(inputString) {
@@ -1028,10 +1143,8 @@ export default {
 
 		// Enhanced UI helper methods
 		clearSearch() {
-			this.search = null;
-			this.first_search = null;
-			this.debounce_search = null;
-			this.$refs.debounce_search.focus();
+			this.reset_search();
+			this.$refs.debounce_search?.focus();
 		},
 
 		getStockColorClass(qty) {
@@ -1166,18 +1279,37 @@ export default {
 				return this.items.slice(0, 50);
 			}
 		},
+		/**
+		 * Typing latch for the search box. The setter is deliberately NOT a
+		 * `_.debounce(...)` literal any more: that built one shared debounced
+		 * function at module-evaluation time with no handle to cancel or flush
+		 * it, so nothing could stop a pending write from landing. The
+		 * per-instance `_applySearch` created in created() gives us
+		 * `.cancel()` (used by handle_scan / reset_search to drop a stale
+		 * write) and `.flush()` (used by run_search so Enter acts on what is
+		 * in the box right now, not on the previous value).
+		 */
 		debounce_search: {
 			get() {
 				return this.first_search;
 			},
-			set: _.debounce(function (newValue) {
-				this.first_search = newValue;
-			}, 200),
+			set(newValue) {
+				this._applySearch(newValue);
+			},
 		},
 	},
 
 	created: function () {
 		this.$nextTick(function () {});
+		// Backs the `debounce_search` setter. Per-instance so its pending
+		// timer belongs to this component and can be cancelled on unmount.
+		this._applySearch = _.debounce((newValue) => {
+			this.first_search = newValue;
+		}, 200);
+		// Set when Enter arrives while onScan is still accumulating a code,
+		// so the manual search can be replayed from onScanError if the burst
+		// turns out to have been human typing rather than a scan.
+		this._deferred_enter = false;
 		this.onBus("register_pos_profile", (data) => {
 			this.pos_profile = data.pos_profile;
 			this.get_items();
@@ -1228,10 +1360,18 @@ export default {
 	},
 
 	mounted() {
-		this.scan_barcoud();
+		this.attach_scanner();
 	},
 
 	beforeUnmount() {
+		// Drop the scanner listener and any pending search write, otherwise
+		// both keep firing into a dead component (and a remount would hit
+		// onScan's "already initialized" throw).
+		if (onScan.isAttachedTo(document)) {
+			onScan.detachFrom(document);
+		}
+		this._applySearch.cancel();
+
 		// Nothing left to apply the response to. Bus listeners are torn down by
 		// the busListeners mixin's own hook.
 		//
