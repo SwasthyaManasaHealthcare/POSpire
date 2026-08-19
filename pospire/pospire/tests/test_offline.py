@@ -29,7 +29,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_days, getdate, nowdate
+from frappe.utils import add_days, cint, getdate, now_datetime, nowdate
 
 from pospire.pospire.api.offline import (
 	ERROR_ACCOUNTING_PERIOD_CLOSED,
@@ -49,11 +49,13 @@ from pospire.pospire.api.offline import (
 	_idempotent_submit,
 	_resolve_opening_shift,
 	_resolve_opening_shift_flexible,
+	create_closing_entry,
 	get_offline_flags_for_shift,
 	is_offline_enabled,
 	snapshot_profile_flags_onto_opening_shift,
 )
 from pospire.pospire.tests.test_utils import (
+	create_test_opening_shift,
 	ensure_test_company,
 	ensure_test_customer,
 	get_test_pos_profile,
@@ -249,6 +251,68 @@ class TestEnrichClosingPayload(FrappeTestCase):
 		self.assertEqual(len(agg["pos_transactions"]), 1)
 		self.assertEqual(agg["pos_transactions"][0]["sales_invoice"], "INV-OFFLINE-001")
 
+	def test_grand_total_rounded_to_currency_precision(self):
+		"""IEEE-754 sum of invoice totals must not leak past currency precision.
+
+		20000.05 + 44660.05 is 64660.100000000006 in IEEE-754 (the same
+		class of noise as the prospect OSR-2026-00005 Grand Total error).
+		Quantity uses the same sum-then-round pattern with float precision.
+		"""
+		noisy_a = 20000.05
+		noisy_b = 44660.05
+		self.assertNotEqual(noisy_a + noisy_b, 64660.1)
+		self.assertNotEqual(0.1 + 0.2, 0.3)
+
+		def fake_get_all(doctype, filters=None, pluck=None, fields=None, **kwargs):
+			filters = filters or {}
+			if doctype == "POS Opening Shift Detail":
+				return []
+			if doctype == "Sales Invoice" and pluck == "name":
+				return ["INV-A", "INV-B"] if filters.get("posa_pos_opening_shift") else []
+			if doctype == "Sales Invoice":
+				return [
+					frappe._dict(
+						name="INV-A",
+						posting_date="2026-08-18",
+						grand_total=noisy_a,
+						net_total=noisy_a,
+						total_qty=0.1,
+						customer="Cust A",
+						change_amount=0,
+					),
+					frappe._dict(
+						name="INV-B",
+						posting_date="2026-08-18",
+						grand_total=noisy_b,
+						net_total=noisy_b,
+						total_qty=0.2,
+						customer="Cust B",
+						change_amount=0,
+					),
+				]
+			if doctype in ("Sales Invoice Payment", "Sales Taxes and Charges", "Payment Entry"):
+				return []
+			return []
+
+		def fake_get_cached_value(doctype, name=None, field=None, **kwargs):
+			if doctype == "System Settings":
+				return 2
+			return None
+
+		with (
+			patch("pospire.pospire.api.offline.frappe.get_all", side_effect=fake_get_all),
+			patch(
+				"pospire.pospire.api.offline.frappe.get_cached_value",
+				side_effect=fake_get_cached_value,
+			),
+			patch("pospire.pospire.api.offline.frappe.db.get_value", return_value=None),
+		):
+			agg = _aggregate_closing_from_invoices("POSA-OS-TEST", None)
+
+		self.assertEqual(agg["grand_total"], 64660.1)
+		self.assertEqual(agg["net_total"], 64660.1)
+		self.assertEqual(agg["total_quantity"], 0.3)
+
 
 # ---------------------------------------------------------------------------
 # Idempotency tests — `_idempotent_submit` docstatus-aware branches (C2/RM2)
@@ -262,6 +326,121 @@ class TestIdempotentSubmit(FrappeTestCase):
 		"""The cheap existence probe returns None when the offline_id has
 		never been seen for the given doctype."""
 		self.assertIsNone(_existing_by_offline_id("Sales Invoice", _make_offline_id()))
+
+	def test_insert_payload_strips_cart_docstatus(self):
+		"""Cart closing payloads stamp `docstatus: 1`. If that leaks into
+		`frappe.get_doc` + insert, Frappe writes a submitted row and the
+		follow-up `.submit()` becomes update-after-submit — which is how
+		the prospect Grand Total float noise turned into UpdateAfterSubmitError.
+		"""
+		captured: dict = {}
+
+		def fake_get_doc(payload):
+			captured["payload"] = dict(payload)
+			raise AssertionError("stop-after-get-doc")
+
+		with (
+			patch("pospire.pospire.api.offline._existing_by_offline_id", return_value=None),
+			patch("pospire.pospire.api.offline.frappe.get_doc", side_effect=fake_get_doc),
+		):
+			with self.assertRaises(AssertionError):
+				_idempotent_submit(
+					"POS Closing Shift",
+					{
+						"docstatus": 1,
+						"name": "POSA-CS-SHOULD-NOT-LEAK",
+						"owner": "ravneet.bedi@promantia.com",
+						"grand_total": 64660.10000000002,
+					},
+					_UUID_VALID,
+					device_id=_UUID_VALID_2,
+				)
+
+		payload = captured["payload"]
+		self.assertNotIn("docstatus", payload)
+		self.assertNotIn("name", payload)
+		self.assertNotIn("owner", payload)
+		self.assertEqual(payload["doctype"], "POS Closing Shift")
+		self.assertEqual(payload["pos_offline_id"], _UUID_VALID)
+		self.assertEqual(payload["pos_device_id"], _UUID_VALID_2)
+
+	def test_closing_submit_closes_opening_without_repair(self):
+		"""Cart `docstatus: 1` must still insert a draft and run on_submit.
+
+		That is the real repair: POSClosingShift.on_submit marks the opening
+		Closed. `_ensure_opening_closed` is a safety net and must be a no-op
+		on this path (`opening_shift_repaired` stays unset).
+		"""
+		# Profile-first, NOT the `ensure_test_company()` + `get_test_pos_profile()`
+		# idiom used elsewhere in this file. Both helpers are "first row" lookups,
+		# not fixtures, so that idiom silently skips on any site whose first
+		# Company happens to own no POS Profile. Taking the profile and reading
+		# its company back off it keeps the pair consistent and the test running.
+		profile_row = frappe.get_all("POS Profile", fields=["name", "company"], limit=1)
+		if profile_row:
+			company, pos_profile = profile_row[0].company, profile_row[0].name
+		else:
+			company = ensure_test_company()
+			pos_profile = get_test_pos_profile(company)
+		if not pos_profile:
+			self.skipTest("No POS Profile available for testing")
+
+		# NB: if that profile has `posa_allow_delete`, POSClosingShift.on_submit
+		# also runs delete_draft_invoices(). Harmless here — the opening shift is
+		# created fresh, so no Sales Invoice links to it.
+		opening = create_test_opening_shift(company, pos_profile)
+		closing_name = None
+		try:
+			result = create_closing_entry(
+				data={
+					"doctype": "POS Closing Shift",
+					"period_start_date": opening.period_start_date,
+					"period_end_date": now_datetime(),
+					"posting_date": nowdate(),
+					"user": "Administrator",
+					"pos_profile": pos_profile,
+					"company": company,
+					"docstatus": 1,
+					"name": "POSA-CS-SHOULD-NOT-LEAK",
+					"payment_reconciliation": [
+						{
+							"mode_of_payment": "Cash",
+							"opening_amount": 0,
+							"closing_amount": 0,
+							"expected_amount": 0,
+						}
+					],
+					"grand_total": 64660.10000000002,
+					"owner_user": "Administrator",
+					"invoice_offline_ids": [],
+					"pos_opening_shift": opening.name,
+				},
+				offline_id=_make_offline_id(),
+				device_id=_make_offline_id(),
+				opening_entry_ref=opening.name,
+			)
+			closing_name = result.get("name")
+			self.assertTrue(closing_name)
+			self.assertNotEqual(closing_name, "POSA-CS-SHOULD-NOT-LEAK")
+			self.assertEqual(cint(result.get("docstatus")), 1)
+			self.assertFalse(result.get("was_already_submitted"))
+			self.assertNotIn("opening_shift_repaired", result)
+
+			opening.reload()
+			self.assertEqual(opening.status, "Closed")
+			self.assertEqual(opening.pos_closing_shift, closing_name)
+		finally:
+			with suppress(Exception):
+				if closing_name:
+					closing = frappe.get_doc("POS Closing Shift", closing_name)
+					if cint(closing.docstatus) == 1:
+						closing.cancel()
+					frappe.delete_doc("POS Closing Shift", closing_name, force=True, ignore_permissions=True)
+			with suppress(Exception):
+				opening.reload()
+				if cint(opening.docstatus) == 1:
+					opening.cancel()
+				frappe.delete_doc("POS Opening Shift", opening.name, force=True, ignore_permissions=True)
 
 	def test_replay_against_cancelled_doc_throws_validation_error(self):
 		"""docstatus=2 → cannot replay; throws ERROR_VALIDATION so client
