@@ -96,21 +96,46 @@ _UUID_V4_RE = re.compile(
 )
 
 # Framework-managed fields that the offline payload carries from the cart but
-# the server must own at replay time. Letting these leak through corrupts
-# server-side identity / optimistic-concurrency state:
-#   - name         → autoname series assigns; cart-stamped name causes
-#                    DoesNotExistError on subsequent get_doc lookups
+# the server must own at replay time. Used on both write paths: to filter cart
+# fields on the invoice-update flows, and to strip a fresh insert payload in
+# `_idempotent_submit` (which re-applies `doctype` afterwards). Letting these
+# leak through corrupts server-side identity / optimistic-concurrency state:
+#   - name         → autoname assigns the real name. Frappe's `set_new_name`
+#                    already nulls a cart-stamped one for every autoname we
+#                    use (naming_series / series), so a leaked name is inert —
+#                    stripping it keeps the payload from implying otherwise
 #   - modified     → cart-stamped value defeats Frappe's check_if_latest
 #                    (TimestampMismatchError on every save)
 #   - creation     → audit trail; the cart only knew the online-load time,
 #                    not the actual server insert time
 #   - modified_by  → set_user_and_timestamp owns this from session.user
 #   - owner        → _acting_as_user already attributes correctly
-#   - docstatus    → posapp.submit_invoice transitions this; cart's value
-#                    (typically 0) shouldn't override mid-flow
+#   - docstatus    → the cart stamps `1` on opening/closing payloads. Inserting
+#                    an already-submitted row turns the follow-up `.submit()`
+#                    into an update-after-submit, which (a) never runs
+#                    `on_submit`, so POSClosingShift never closes the opening
+#                    shift, and (b) compares in-memory floats against the
+#                    rounded DB values — the UpdateAfterSubmitError on
+#                    Grand Total that broke offline close on the prospect site
 _OFFLINE_PAYLOAD_RESERVED = frozenset(
 	{"doctype", "name", "modified", "creation", "modified_by", "owner", "docstatus"}
 )
+
+
+def _currency_precision() -> int:
+	"""Site currency precision used when aggregating closing totals."""
+	return cint(frappe.get_cached_value("System Settings", None, "currency_precision")) or 3
+
+
+def _float_precision() -> int:
+	"""Site float precision used when aggregating closing quantities.
+
+	The `or 3` fallback mirrors Frappe's own default for non-Currency fields
+	(`get_field_precision` in frappe/model/meta.py). Falling back to anything
+	tighter would round `total_quantity` below the precision of the Float
+	field it lands on — visible on sites selling by weight.
+	"""
+	return cint(frappe.get_cached_value("System Settings", None, "float_precision")) or 3
 
 
 def _throw(error_code: str, message: str, details: dict[str, Any] | None = None) -> None:
@@ -235,6 +260,11 @@ def _idempotent_submit(
 	When `owner_user` is supplied, the insert + submit run inside
 	`_acting_as_user(owner_user)` so the doc is attributed to the original
 	cashier rather than the replay session (P-5).
+
+	Cart-stamped fields in `_OFFLINE_PAYLOAD_RESERVED` (see the note on that
+	constant for why each one) are stripped before `frappe.get_doc`, so a
+	closing payload with `docstatus: 1` is inserted as a draft and then
+	submitted properly. `doctype` is re-applied after the strip.
 	"""
 	existing = _existing_by_offline_id(doctype, offline_id)
 	if existing:
@@ -276,7 +306,9 @@ def _idempotent_submit(
 		}
 
 	payload = dict(payload)
-	payload.setdefault("doctype", doctype)
+	for key in _OFFLINE_PAYLOAD_RESERVED:
+		payload.pop(key, None)
+	payload["doctype"] = doctype
 	payload["pos_offline_id"] = offline_id
 	if device_id is not None:
 		payload["pos_device_id"] = device_id
@@ -1764,14 +1796,16 @@ def _aggregate_closing_from_invoices(
 		)
 		pay_expected[py.mode_of_payment] = pay_expected.get(py.mode_of_payment, 0.0) + flt(py.paid_amount)
 
+	precision = _currency_precision()
+	qty_precision = _float_precision()
 	return {
 		"pos_transactions": pos_transactions,
-		"taxes": taxes,
+		"taxes": [{**tx, "amount": flt(tx["amount"], precision)} for tx in taxes],
 		"pos_payments": pos_payments,
-		"grand_total": grand_total,
-		"net_total": net_total,
-		"total_quantity": total_quantity,
-		"pay_expected": pay_expected,
+		"grand_total": flt(grand_total, precision),
+		"net_total": flt(net_total, precision),
+		"total_quantity": flt(total_quantity, qty_precision),
+		"pay_expected": {mop: flt(amt, precision) for mop, amt in pay_expected.items()},
 	}
 
 
