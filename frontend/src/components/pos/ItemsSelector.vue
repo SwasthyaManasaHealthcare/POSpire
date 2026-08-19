@@ -424,6 +424,16 @@ export default {
 		items: [],
 		search: "",
 		first_search: "",
+		// What is physically in the search box right now.
+		//
+		// It has to be a separate, synchronously-written field. A scanner
+		// types straight into the DOM input, and `first_search` only catches
+		// up 200ms later via the debounce -- so while a scan is in flight
+		// Vuetify's model (which reads the bound value, not the element)
+		// believes the box is empty. Clearing then patches null over null,
+		// Vue skips the update as a no-op, and the scanner's characters stay
+		// in the element and accumulate into the next scan.
+		raw_search: "",
 		itemsPerPage: 1000,
 		offersCount: 0,
 		appliedOffersCount: 0,
@@ -820,6 +830,7 @@ export default {
 		 */
 		reset_search() {
 			this._applySearch.cancel();
+			this.raw_search = "";
 			this.search = null;
 			this.first_search = null;
 			this.flags.serial_no = null;
@@ -857,9 +868,27 @@ export default {
 		scan_in_progress() {
 			return !!document.scannerDetectionData?.vars?.firstCharTime;
 		},
+		/**
+		 * TRUE when `code` is a weighing-scale barcode.
+		 *
+		 * The emptiness check matters: posa_scale_barcode_start is an Int, so
+		 * an unset profile yields 0 (or null), and `"0812...".startsWith(0)`
+		 * is TRUE -- which silently truncated such a barcode to 7 characters
+		 * in get_search() and derived a nonsense weight from it in
+		 * get_item_qty(), so the item could never be matched.
+		 */
+		is_scale_barcode(code) {
+			const prefix = this.pos_profile?.posa_scale_barcode_start;
+			// 0 counts as unconfigured: as a prefix it would match every
+			// barcode beginning with a zero.
+			if (!code || !prefix) {
+				return false;
+			}
+			return code.startsWith(String(prefix));
+		},
 		get_item_qty(first_search) {
 			let scal_qty = Math.abs(this.qty);
-			if (first_search.startsWith(this.pos_profile.posa_scale_barcode_start)) {
+			if (this.is_scale_barcode(first_search)) {
 				let pesokg1 = first_search.substr(7, 5);
 				let pesokg;
 				if (pesokg1.startsWith("0000")) {
@@ -879,10 +908,7 @@ export default {
 		},
 		get_search(first_search) {
 			let search_term = "";
-			if (
-				first_search &&
-				first_search.startsWith(this.pos_profile.posa_scale_barcode_start)
-			) {
+			if (this.is_scale_barcode(first_search)) {
 				search_term = first_search.substr(0, 7);
 			} else {
 				search_term = first_search;
@@ -1100,6 +1126,9 @@ export default {
 			if (!this.pos_profile) {
 				return;
 			}
+			// Show the framed code, replacing whatever raw characters the
+			// scanner typed into the element.
+			this.raw_search = sCode;
 			this.first_search = sCode;
 			if (this.pos_profile.pose_use_limit_search) {
 				// Limit-search profiles keep only the last server result in the
@@ -1291,9 +1320,12 @@ export default {
 		 */
 		debounce_search: {
 			get() {
-				return this.first_search;
+				return this.raw_search;
 			},
 			set(newValue) {
+				// Written through immediately so the bound value always mirrors
+				// the element; only the *search* is debounced.
+				this.raw_search = newValue ?? "";
 				this._applySearch(newValue);
 			},
 		},
