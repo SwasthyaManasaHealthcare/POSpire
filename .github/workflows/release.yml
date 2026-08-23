@@ -58,11 +58,29 @@ jobs:
           git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
+      - name: Locate release notes
+        id: notes
+        run: |
+          FILE=".github/releases/${{ steps.version.outputs.tag }}.md"
+          : > "$RUNNER_TEMP/body.md"
+          if [ -f "$FILE" ]; then
+            TITLE=$(sed -n '1s/^#*[[:space:]]*//p' "$FILE")
+            tail -n +2 "$FILE" | sed '/./,$!d' > "$RUNNER_TEMP/body.md"
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+            echo "Using curated notes from $FILE"
+          else
+            TITLE="${{ steps.version.outputs.tag }}"
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+            echo "No notes at $FILE, falling back to generated notes"
+          fi
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.tag }}
-          generate_release_notes: true
+          name: ${{ steps.notes.outputs.title }}
+          body_path: ${{ runner.temp }}/body.md
+          generate_release_notes: ${{ steps.notes.outputs.generate }}
           make_latest: true
