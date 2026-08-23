@@ -21,12 +21,21 @@ jobs:
       - name: Extract version from __init__.py
         id: version
         run: |
-          VERSION=$(python3 -c "
+          VERSION=$(python3 - <<'PY'
           import re
-          with open('pospire/__init__.py') as f:
-              match = re.search(r'__version__\s*=\s*[\"'\''](.*?)[\"'\'']', f.read())
-              print(match.group(1) if match else '')
-          ")
+          from pathlib import Path
+
+          m = re.search(
+              r"""__version__\s*=\s*["'](.*?)["']""",
+              Path("pospire/__init__.py").read_text(),
+          )
+          print(m.group(1) if m else "")
+          PY
+          )
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read __version__ from pospire/__init__.py"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
