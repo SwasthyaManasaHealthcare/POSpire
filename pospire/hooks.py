@@ -406,6 +406,49 @@ fixtures = [
 		"doctype": "Workspace",
 		"filters": [["name", "in", ("POSpire",)]],
 	},
+	{
+		"doctype": "Number Card",
+		"filters": [
+			[
+				"name",
+				"in",
+				(
+					"Total POS Sales",
+					"Total POS Transactions",
+					"Average Transaction Value",
+					"Active Promotions",
+					"Held Bills",
+					"New Customers via POS",
+					"Total Returns (Value)",
+				),
+			]
+		],
+	},
+	{
+		"doctype": "Dashboard Chart",
+		"filters": [
+			[
+				"name",
+				"in",
+				(
+					"POS Sales Trend (Daily)",
+					"Sales by POS Terminal",
+					"Sales by Payment Mode",
+					"Sales by Branch / Store",
+					"Top 10 Selling Items (Revenue)",
+					"Sales by Item Group",
+					"Shifts Opened by Cashier",
+					"Returns Trend (Daily)",
+					"Qty Sold by Warehouse",
+					"POS Sales Trend by Terminal & Store",
+				),
+			]
+		],
+	},
+	{
+		"doctype": "Report",
+		"filters": [["name", "in", ("POS Sales Trend by Terminal and Store",)]],
+	},
 ]
 
 add_to_apps_screen = [
