@@ -402,6 +402,10 @@ fixtures = [
 		"doctype": "Dashboard",
 		"filters": [["name", "in", ("POSpire Dashboard",)]],
 	},
+	{
+		"doctype": "Workspace",
+		"filters": [["name", "in", ("POSpire",)]],
+	},
 ]
 
 add_to_apps_screen = [
