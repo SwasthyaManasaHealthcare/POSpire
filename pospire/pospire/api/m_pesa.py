@@ -19,10 +19,25 @@ def get_token(app_key: str, app_secret: str, base_url: str) -> str:
 	return r.json()["access_token"]
 
 
+def _is_registered_shortcode(shortcode: str | None) -> bool:
+	"""Accept callbacks only for a C2B shortcode configured on this site."""
+	if not shortcode:
+		return False
+
+	filters = {"register_status": "Success"}
+	return bool(
+		frappe.db.exists("Mpesa C2B Register URL", {**filters, "business_shortcode": shortcode})
+		or frappe.db.exists("Mpesa C2B Register URL", {**filters, "till_number": shortcode})
+	)
+
+
 @frappe.whitelist(allow_guest=True)  # nosemgrep: guest-whitelisted-method -- M-Pesa payment gateway webhook
 def confirmation(**kwargs) -> dict:
 	try:
 		args = frappe._dict(kwargs)
+		if not _is_registered_shortcode(args.get("BusinessShortCode")):
+			return {"ResultCode": 1, "ResultDesc": "Rejected"}
+
 		doc = frappe.new_doc("Mpesa Payment Register")
 		doc.transactiontype = args.get("TransactionType")
 		doc.transid = args.get("TransID")
@@ -48,6 +63,10 @@ def confirmation(**kwargs) -> dict:
 
 @frappe.whitelist(allow_guest=True)  # nosemgrep: guest-whitelisted-method -- M-Pesa payment gateway webhook
 def validation(**kwargs) -> dict:
+	shortcode = frappe._dict(kwargs).get("BusinessShortCode")
+	if not _is_registered_shortcode(shortcode):
+		return {"ResultCode": 1, "ResultDesc": "Rejected"}
+
 	context = {"ResultCode": 0, "ResultDesc": "Accepted"}
 	return dict(context)
 

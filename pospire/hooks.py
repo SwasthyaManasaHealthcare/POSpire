@@ -8,7 +8,7 @@ app_icon = "octicon octicon-file-directory"
 app_color = "grey"
 app_email = "rajit@example.com"
 app_license = "GPLv3"
-required_apps = ["erpnext"]
+required_apps = ["erpnext", "payments"]
 
 POSPIRE_COLOR = "#0CC2D1"
 POSPIRE_MANAGER_PIN_EMAIL_TEMPLATE = "POSpire Manager PIN"
