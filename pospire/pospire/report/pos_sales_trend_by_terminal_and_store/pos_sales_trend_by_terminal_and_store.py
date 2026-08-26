@@ -28,17 +28,16 @@ def get_conditions(filters):
 
 def get_pos_profiles(filters):
 	conditions = get_conditions(filters)
-	return frappe.db.sql_list(
-		f"""
-		select distinct pos_profile
-		from `tabSales Invoice`
-		where is_pos = 1 and docstatus = 1 and is_return = 0
-			and pos_profile is not null and pos_profile != ''
-			{conditions}
-		order by pos_profile
-		""",
-		filters,
-	)
+	query_lines = [
+		"select distinct pos_profile",
+		"from `tabSales Invoice`",
+		"where is_pos = 1 and docstatus = 1 and is_return = 0",
+		"and pos_profile is not null and pos_profile != ''",
+	]
+	if conditions:
+		query_lines.append(conditions)
+	query_lines.append("order by pos_profile")
+	return frappe.db.sql_list("\n".join(query_lines), filters)
 
 
 def get_columns(profiles):
@@ -59,16 +58,18 @@ def get_columns(profiles):
 
 def get_data(filters, profiles):
 	conditions = get_conditions(filters)
+	query_lines = [
+		"select posting_date, pos_profile, sum(base_grand_total) as amount",
+		"from `tabSales Invoice`",
+		"where is_pos = 1 and docstatus = 1 and is_return = 0",
+		"and pos_profile is not null and pos_profile != ''",
+	]
+	if conditions:
+		query_lines.append(conditions)
+	query_lines.append("group by posting_date, pos_profile")
+	query_lines.append("order by posting_date")
 	rows = frappe.db.sql(
-		f"""
-		select posting_date, pos_profile, sum(base_grand_total) as amount
-		from `tabSales Invoice`
-		where is_pos = 1 and docstatus = 1 and is_return = 0
-			and pos_profile is not null and pos_profile != ''
-			{conditions}
-		group by posting_date, pos_profile
-		order by posting_date
-		""",
+		"\n".join(query_lines),
 		filters,
 		as_dict=True,
 	)
