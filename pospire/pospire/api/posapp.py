@@ -38,7 +38,7 @@ from erpnext.accounts.doctype.payment_request.payment_request import (
 )
 from erpnext.accounts.doctype.pos_profile.pos_profile import get_item_groups
 from erpnext.accounts.doctype.sales_invoice.sales_invoice import get_bank_cash_account
-from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
+from erpnext.selling.doctype.sales_order.mapper import make_sales_invoice
 from erpnext.stock.doctype.batch.batch import (
 	get_batch_no,
 	get_batch_qty,
