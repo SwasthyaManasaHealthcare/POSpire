@@ -544,9 +544,10 @@ def get_item_group_condition(pos_profile):
 	cond = " and 1=1"
 	item_groups = get_item_groups(pos_profile)
 	if item_groups:
-		cond = " and item_group in (%s)" % (", ".join(["%s"] * len(item_groups)))  # noqa: UP031
+		escaped_groups = [frappe.db.escape(item_group) for item_group in item_groups]
+		cond = f" and item_group in ({', '.join(escaped_groups)})"
 
-	return cond % tuple(item_groups)
+	return cond
 
 
 def get_root_of(doctype):
