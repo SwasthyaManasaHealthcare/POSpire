@@ -391,12 +391,23 @@ fixtures = [
 				"in",
 				(
 					"Sales Invoice-posa_pos_opening_shift-no_copy",
-					"POS Profile-posa_tax_inclusive-hidden",
 					"Sales Invoice-main-field_order",
 					"POS Profile-main-field_order",
 				),
 			]
 		],
+	},
+	{
+		"doctype": "Dashboard",
+		"filters": [["module", "=", "POSpire"]],
+	},
+	{
+		"doctype": "Number Card",
+		"filters": [["module", "=", "POSpire"]],
+	},
+	{
+		"doctype": "Dashboard Chart",
+		"filters": [["module", "=", "POSpire"]],
 	},
 ]
 add_to_apps_screen = [
