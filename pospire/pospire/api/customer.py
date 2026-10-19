@@ -192,3 +192,43 @@ def get_default_customer_group(pos_profile: str | None) -> str | None:
 	if default and not frappe.db.get_value("Customer Group", default, "is_group"):
 		return default
 	return None
+
+
+@frappe.whitelist()
+def search_customers(pos_profile: str, query: str) -> list[dict]:
+	"""Server fallback for the POS picker when the customers loaded on the till have no match.
+
+	Partial matches (every word of the name, email, or mobile digits) stay within the profile's
+	customer groups. An exact Customer Identifier match is returned from any group: it proves
+	the cashier has the right customer.
+	"""
+	frappe.has_permission("Customer", "read", throw=True)
+	query = (query or "").strip()
+	if len(query) < 3:
+		return []
+
+	fields = ["name", "customer_name", "mobile_no", "email_id", "tax_id", "primary_address"]
+	exact = find_customer_by_identifier(query)
+	rows = frappe.get_all("Customer", filters={"name": exact, "disabled": 0}, fields=fields) if exact else []
+
+	conditions, values = ["disabled = 0"], []
+	groups = get_allowed_customer_groups(pos_profile)
+	if groups:
+		conditions.append("customer_group IN ({})".format(", ".join(["%s"] * len(groups))))
+		values += groups
+	words = query.lower().split()
+	matches = [" AND ".join(["LOWER(customer_name) LIKE %s"] * len(words)), "LOWER(email_id) LIKE %s"]
+	values += [f"%{w}%" for w in words] + [f"%{query.lower()}%"]
+	digits = re.sub(r"\D", "", query)
+	if len(digits) >= 3:
+		matches.append("REGEXP_REPLACE(IFNULL(mobile_no, ''), '[^0-9]', '') LIKE %s")
+		values.append(f"%{digits}%")
+	conditions.append("({})".format(" OR ".join(f"({m})" for m in matches)))
+
+	columns, where = ", ".join(fields), " AND ".join(conditions)
+	# Only fixed column names and %s placeholders are interpolated; values go through `values`.
+	# nosemgrep: frappe-semgrep-rules.rules.security.frappe-sql-format-injection
+	sql = f"SELECT {columns} FROM `tabCustomer` WHERE {where} ORDER BY customer_name LIMIT 20"
+	seen = {row.name for row in rows}
+	rows += [row for row in frappe.db.sql(sql, values, as_dict=True) if row.name not in seen]
+	return rows

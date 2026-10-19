@@ -23,6 +23,7 @@
 				:label="__('Customer')"
 				v-model="customer"
 				v-model:search="search_text"
+				:loading="searching"
 				:items="customers"
 				item-title="customer_name"
 				item-value="name"
@@ -32,12 +33,12 @@
 			>
 				<template v-slot:no-data>
 					<v-list-item
-						v-if="showActions && !readonly && search_text"
+						v-if="showActions && !readonly && search_text && !searching"
 						prepend-icon="mdi-account-plus"
 						:title="__('Create customer with {0}', [search_text])"
 						@click="new_customer_from_search"
 					/>
-					<v-list-item v-else :title="__('Customers not found')" />
+					<v-list-item v-else :title="searching ? __('Searching...') : __('Customers not found')" />
 				</template>
 				<template v-slot:item="{ props, item }">
 					<v-list-item v-bind="props">
@@ -83,6 +84,7 @@ import { onSynced } from "@/offline/outbox";
 import { renameCustomer, listOfflineCreated } from "@/offline/repos/customers";
 import busListeners from "@/utils/busListeners";
 import { mobileMatches } from "@/utils/mobileMatch";
+import connectivity from "@/offline/connectivity";
 export default {
 	mixins: [busListeners],
 	props: {
@@ -103,6 +105,7 @@ export default {
 		readonly: false,
 		customer_info: {},
 		search_text: "",
+		searching: false,
 	}),
 
 	components: {
@@ -210,22 +213,32 @@ export default {
 			return false;
 		},
 		customFilter(itemText, queryText, itemRow) {
-			const item = itemRow.raw;
-			const textOne = item.customer_name ? item.customer_name.toLowerCase() : "";
-			const textTwo = item.tax_id ? item.tax_id.toLowerCase() : "";
-			const textThree = item.email_id ? item.email_id.toLowerCase() : "";
-			const textFour = item.mobile_no ? item.mobile_no.toLowerCase() : "";
-			const textFifth = item.name.toLowerCase();
-			const searchText = queryText.toLowerCase();
-
-			return (
-				textOne.indexOf(searchText) > -1 ||
-				textTwo.indexOf(searchText) > -1 ||
-				textThree.indexOf(searchText) > -1 ||
-				textFour.indexOf(searchText) > -1 ||
-				textFifth.indexOf(searchText) > -1 ||
-				mobileMatches(queryText, item.mobile_no)
-			);
+			return this.matchesCustomer(itemRow.raw, queryText);
+		},
+		// Every word must appear in name, ID, tax ID, email or mobile, same as the server search.
+		matchesCustomer(item, queryText) {
+			const haystack = [item.customer_name, item.name, item.tax_id, item.email_id, item.mobile_no]
+				.filter(Boolean)
+				.join(" ")
+				.toLowerCase();
+			const words = queryText.toLowerCase().split(/\s+/).filter(Boolean);
+			return words.every((w) => haystack.includes(w)) || mobileMatches(queryText, item.mobile_no);
+		},
+		// Customers outside the loaded list (other groups, or created since the list loaded).
+		async search_server(text) {
+			this.searching = true;
+			try {
+				const rows = await call("pospire.pospire.api.customer.search_customers", {
+					pos_profile: this.pos_profile?.pos_profile?.name,
+					query: text,
+				});
+				const known = new Set(this.customers.map((c) => c.name));
+				this.customers.push(...(Array.isArray(rows) ? rows : []).filter((r) => !known.has(r.name)));
+			} catch {
+				// Offline or server error: the local results stand.
+			} finally {
+				this.searching = false;
+			}
 		},
 	},
 
@@ -328,6 +341,7 @@ export default {
 	},
 
 	beforeUnmount() {
+		clearTimeout(this._searchTimer);
 		if (typeof this._unsubOnSynced === "function") {
 			this._unsubOnSynced();
 			this._unsubOnSynced = null;
@@ -335,6 +349,13 @@ export default {
 	},
 
 	watch: {
+		search_text(query) {
+			clearTimeout(this._searchTimer);
+			const text = (query || "").trim();
+			if (text.length < 3 || !connectivity.isOnline()) return;
+			if (this.customers.some((c) => c && this.matchesCustomer(c, text))) return;
+			this._searchTimer = setTimeout(() => this.search_server(text), 300);
+		},
 		customer(newName) {
 			// Derive offline_id from the customers list (the single source of
 			// truth for offline-created customers — UpdateCustomer.vue pushes

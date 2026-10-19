@@ -229,6 +229,8 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	"pospire.pospire.api.posapp.get_items_details": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_item_detail": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_customer_info": { intent: "read", offline: false },
+	// Picker fallback when the customers loaded on the till have no match. Live-only.
+	"pospire.pospire.api.customer.search_customers": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_customer_addresses": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_sales_person_names": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_available_credit": { intent: "read", offline: false },

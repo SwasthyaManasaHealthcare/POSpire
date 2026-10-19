@@ -150,3 +150,42 @@ class TestOfflineCustomerMatch(FrappeTestCase):
 		):
 			_, result = self._sync("9845012345")
 		self.assertEqual(result["name"], self.existing.name)
+
+
+class TestSearchCustomers(FrappeTestCase):
+	def setUp(self):
+		region = patch.object(customer_api, "_default_region", return_value="IN")
+		region.start()
+		self.addCleanup(region.stop)
+		self.addCleanup(frappe.db.rollback)
+		_use_identifier("Mobile No")
+		self.inside = _customer(
+			"_Test Search Rajit Kadimi", mobile_no="98450 81818", email_id="rk@example.com"
+		)
+		self.outside = _customer("_Test Search Outside", mobile_no="9845082828", customer_group="Commercial")
+		# Profile allows only "Individual".
+		groups = patch.object(customer_api, "get_allowed_customer_groups", return_value=["Individual"])
+		groups.start()
+		self.addCleanup(groups.stop)
+
+	def _names(self, query):
+		return [row.name for row in customer_api.search_customers("any profile", query)]
+
+	def test_name_words_in_any_order(self):
+		self.assertIn(self.inside.name, self._names("kadimi rajit"))
+
+	def test_partial_mobile_and_email(self):
+		self.assertIn(self.inside.name, self._names("81818"))
+		self.assertIn(self.inside.name, self._names("RK@EXAMPLE"))
+
+	def test_partial_match_stays_in_profile_groups(self):
+		self.assertNotIn(self.outside.name, self._names("_Test Search Outside"))
+		self.assertNotIn(self.outside.name, self._names("82828"))
+
+	def test_exact_identifier_found_in_any_group(self):
+		self.assertEqual(self._names("+91 98450 82828"), [self.outside.name])
+
+	def test_disabled_and_short_queries_excluded(self):
+		frappe.db.set_value("Customer", self.inside.name, "disabled", 1)
+		self.assertNotIn(self.inside.name, self._names("kadimi"))
+		self.assertEqual(self._names("ka"), [])
