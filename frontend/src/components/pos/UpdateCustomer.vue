@@ -49,10 +49,11 @@
 								/>
 							</v-col>
 
-							<!-- Hidden when the profile allows a single group: it is pre-filled. -->
-							<v-col cols="6" order="4" v-if="groups.length !== 1">
+							<!-- Read-only when the profile allows a single group: it is pre-filled. -->
+							<v-col cols="6" order="4">
 								<v-autocomplete
-									clearable
+									:clearable="groups.length !== 1"
+									:readonly="groups.length === 1"
 									density="comfortable"
 									variant="outlined"
 									color="primary"
@@ -64,7 +65,7 @@
 									class="mb-3"
 								/>
 							</v-col>
-							<v-col :cols="groups.length === 1 ? 12 : 6" order="5">
+							<v-col cols="6" order="5">
 								<v-autocomplete
 									clearable
 									density="comfortable"
