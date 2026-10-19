@@ -85,6 +85,10 @@ import { renameCustomer, listOfflineCreated } from "@/offline/repos/customers";
 import busListeners from "@/utils/busListeners";
 import { mobileMatches } from "@/utils/mobileMatch";
 import connectivity from "@/offline/connectivity";
+
+// Digits with phone punctuation only: treated as a mobile number search.
+const PHONE_LIKE = /^[\d\s+()-]+$/;
+
 export default {
 	mixins: [busListeners],
 	props: {
@@ -191,7 +195,7 @@ export default {
 			const text = this.search_text.trim();
 			let field = "customer_name";
 			if (text.includes("@")) field = "email_id";
-			else if (/^[\d\s+()-]+$/.test(text)) field = "mobile_no";
+			else if (PHONE_LIKE.test(text)) field = "mobile_no";
 			this.eventBus.emit("open_update_customer", { prefill: { [field]: text } });
 		},
 		edit_customer() {
@@ -222,11 +226,11 @@ export default {
 				.join(" ")
 				.toLowerCase();
 			const words = queryText.toLowerCase().split(/\s+/).filter(Boolean);
-			return words.every((w) => haystack.includes(w)) || mobileMatches(queryText, item.mobile_no);
+			if (words.every((w) => haystack.includes(w))) return true;
+			return PHONE_LIKE.test(queryText) && mobileMatches(queryText, item.mobile_no);
 		},
 		// Customers outside the loaded list (other groups, or created since the list loaded).
-		async search_server(text) {
-			this.searching = true;
+		async search_server(text, seq) {
 			try {
 				const rows = await call("pospire.pospire.api.customer.search_customers", {
 					pos_profile: this.pos_profile?.pos_profile?.name,
@@ -237,7 +241,8 @@ export default {
 			} catch {
 				// Offline or server error: the local results stand.
 			} finally {
-				this.searching = false;
+				// An older request finishing must not hide the spinner of a newer one.
+				if (seq === this._searchSeq) this.searching = false;
 			}
 		},
 	},
@@ -301,7 +306,11 @@ export default {
 				const entry = this.customers.find(
 					(c) => c && c.name === event.provisional_name,
 				);
-				if (entry) {
+				if (entry && this.customers.some((c) => c && c.name === event.server_doc_name)) {
+					// Sync attached it to a customer already listed (Customer Identifier
+					// match): drop the provisional row instead of listing that ID twice.
+					this.customers = this.customers.filter((c) => c !== entry);
+				} else if (entry) {
 					entry.name = event.server_doc_name;
 					// Clear pos_offline_id once the customer has a real
 					// server doc name. Otherwise the watcher below would
@@ -351,10 +360,14 @@ export default {
 	watch: {
 		search_text(query) {
 			clearTimeout(this._searchTimer);
+			const seq = (this._searchSeq = (this._searchSeq || 0) + 1);
+			this.searching = false;
 			const text = (query || "").trim();
 			if (text.length < 3 || !connectivity.isOnline()) return;
 			if (this.customers.some((c) => c && this.matchesCustomer(c, text))) return;
-			this._searchTimer = setTimeout(() => this.search_server(text), 300);
+			// Set now, not after the debounce, so "Create customer with ..." waits for the search.
+			this.searching = true;
+			this._searchTimer = setTimeout(() => this.search_server(text, seq), 300);
 		},
 		customer(newName) {
 			// Derive offline_id from the customers list (the single source of

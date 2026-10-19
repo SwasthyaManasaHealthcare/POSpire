@@ -17,7 +17,7 @@
 					<v-container>
 						<v-row dense>
 							<!-- The Customer Identifier (Selling Settings) field comes first and is required. -->
-							<v-col cols="12" :order="identifier === 'Customer Name' ? 2 : 1">
+							<v-col cols="12" :order="fieldOrder.mobile_no">
 								<v-text-field
 									variant="outlined"
 									density="comfortable"
@@ -28,7 +28,7 @@
 									class="mb-3"
 								/>
 							</v-col>
-							<v-col cols="12" :order="identifier === 'Customer Name' ? 1 : 2">
+							<v-col cols="12" :order="fieldOrder.customer_name">
 								<v-text-field
 									variant="outlined"
 									density="comfortable"
@@ -38,7 +38,7 @@
 									class="mb-3"
 								/>
 							</v-col>
-							<v-col cols="12" order="3" v-if="identifier === 'Email'">
+							<v-col cols="12" :order="fieldOrder.email_id" v-if="identifier === 'Email'">
 								<v-text-field
 									variant="outlined"
 									density="comfortable"
@@ -248,6 +248,15 @@ export default {
 		todayAsDate() {
 			return new Date();
 		},
+		// Grid order of the top fields: the identifier first, then the name (name first when blank).
+		fieldOrder() {
+			const first =
+				{ "Mobile No": "mobile_no", Email: "email_id", "Customer Name": "customer_name" }[
+					this.identifier
+				] || "customer_name";
+			const rest = ["customer_name", "mobile_no", "email_id"].filter((f) => f !== first);
+			return Object.fromEntries([first, ...rest].map((f, i) => [f, i + 1]));
+		},
 	},
 	watch: {
 		// When the calendar picker selects a date, sync it into the text field.
@@ -438,7 +447,8 @@ export default {
 				tax_id: this.tax_id,
 				mobile_no: this.mobile_no,
 				email_id: this.email_id,
-				referral_code: this.referral_code,
+				// Set once at creation; the edit form neither shows nor sends it.
+				referral_code: isEdit ? undefined : this.referral_code,
 				birthday: this.birthday ? datetime.obj_to_str(this.birthday, "yyyy-mm-dd") : null,
 				customer_group: this.group,
 				territory: this.territory,

@@ -9,6 +9,12 @@ describe("mobileMatches", () => {
 		expect(mobileMatches("9845012345", "+91 98450 12345")).toBe(true);
 	});
 
+	it("matches a leading 0 against a country code, both ways", () => {
+		expect(mobileMatches("098450 12345", "+91 98450 12345")).toBe(true);
+		expect(mobileMatches("+91 98450 12345", "09845012345")).toBe(true);
+		expect(mobileMatches("0984", "+91 98450 12345")).toBe(true);
+	});
+
 	it("matches a partial number from 3 digits", () => {
 		expect(mobileMatches("984", "9845012345")).toBe(true);
 		expect(mobileMatches("98", "9845012345")).toBe(false);

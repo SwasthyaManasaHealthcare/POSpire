@@ -99,13 +99,17 @@ def set_identifier_key(doc) -> None:
 	if not doc.posa_identifier_key:
 		return
 	existing = frappe.db.get_value(
-		"Customer", {"posa_identifier_key": doc.posa_identifier_key, "name": ["!=", doc.name]}, "name"
+		"Customer",
+		{"posa_identifier_key": doc.posa_identifier_key, "name": ["!=", doc.name]},
+		["name", "disabled"],
+		as_dict=True,
 	)
 	if existing:
-		frappe.throw(
-			_("{0} {1} is already used by customer {2}.").format(_(identifier), value, existing),
-			DuplicateCustomerIdentifier,
-		)
+		message = _("{0} {1} is already used by customer {2}.").format(_(identifier), value, existing.name)
+		if existing.disabled:
+			# The POS hides disabled customers, so say why the cashier cannot find them.
+			message += " " + _("That customer is disabled. Ask a manager to enable it.")
+		frappe.throw(message, DuplicateCustomerIdentifier)
 
 
 def find_customer_by_identifier(value: str | None) -> str | None:
@@ -227,7 +231,7 @@ def search_customers(pos_profile: str, query: str) -> list[dict]:
 
 	columns, where = ", ".join(fields), " AND ".join(conditions)
 	# Only fixed column names and %s placeholders are interpolated; values go through `values`.
-	# nosemgrep: frappe-semgrep-rules.rules.security.frappe-sql-format-injection
+	# nosemgrep: frappe-sql-format-injection
 	sql = f"SELECT {columns} FROM `tabCustomer` WHERE {where} ORDER BY customer_name LIMIT 20"
 	seen = {row.name for row in rows}
 	rows += [row for row in frappe.db.sql(sql, values, as_dict=True) if row.name not in seen]

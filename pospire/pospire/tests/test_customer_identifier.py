@@ -9,7 +9,12 @@ from frappe.tests.utils import FrappeTestCase
 
 from pospire.pospire.api import customer as customer_api
 from pospire.pospire.api.customer import DuplicateCustomerIdentifier, get_identifier_key
-from pospire.pospire.api.offline import _existing_by_offline_id, create_customer
+from pospire.pospire.api.offline import (
+	_existing_by_offline_id,
+	_resolve_customer_by_offline_id,
+	create_customer,
+)
+from pospire.pospire.api.posapp import create_customer as pos_create_customer
 from pospire.pospire.api.posapp import get_customer_group_condition, set_customer_info
 
 
@@ -59,6 +64,43 @@ class TestCustomerIdentifier(FrappeTestCase):
 		with self.assertRaises(DuplicateCustomerIdentifier):
 			_customer("_Test Ident Other", mobile_no="+91 9845012345")
 		_customer("_Test Ident Ravi", mobile_no="9845012346")  # same name, different mobile
+
+	def test_duplicate_of_disabled_customer_says_so(self):
+		_use_identifier("Mobile No")
+		holder = _customer("_Test Ident Disabled", mobile_no="9845012377")
+		frappe.db.set_value("Customer", holder.name, "disabled", 1)
+		with self.assertRaisesRegex(DuplicateCustomerIdentifier, "disabled"):
+			_customer("_Test Ident New", mobile_no="9845012377")
+
+	def test_pos_update_keeps_referral_code_and_other_phones(self):
+		_use_identifier("Mobile No")
+		cust = _customer("_Test Ident Edit", mobile_no="9845012355")
+		frappe.db.set_value("Customer", cust.name, "posa_referral_code", "REF-KEEP")
+		contact = frappe.get_doc(
+			"Contact", frappe.db.get_value("Customer", cust.name, "customer_primary_contact")
+		)
+		contact.add_phone("080 4000 1234")
+		contact.save(ignore_permissions=True)
+
+		profile = {"name": None, "company": frappe.defaults.get_global_default("company")}
+		with patch.object(customer_api, "validate_referral_code"):
+			pos_create_customer(
+				customer_id=cust.name,
+				customer_name=cust.customer_name,
+				company=profile["company"],
+				pos_profile_doc=profile,
+				mobile_no="9845012366",
+				email_id="",  # the POS form sends blanks as empty strings
+				customer_group="Individual",
+				customer_type="Individual",  # the POS form always sends it
+				method="update",
+			)
+
+		self.assertEqual(frappe.db.get_value("Customer", cust.name, "posa_referral_code"), "REF-KEEP")
+		phones = [p.phone for p in frappe.get_doc("Contact", contact.name).phone_nos]
+		self.assertIn("080 4000 1234", phones)
+		self.assertIn("9845012366", phones)
+		self.assertEqual(frappe.db.get_value("Customer", cust.name, "posa_identifier_key"), "+919845012366")
 
 	def test_customers_without_identifier_never_collide(self):
 		_use_identifier("Mobile No")
@@ -128,6 +170,8 @@ class TestOfflineCustomerMatch(FrappeTestCase):
 		self.assertEqual(result["name"], self.existing.name)
 		self.assertTrue(result["matched_existing"])
 		self.assertEqual(_existing_by_offline_id("Customer", offline_id), self.existing.name)
+		# What a queued invoice uses to find its customer.
+		self.assertEqual(_resolve_customer_by_offline_id(offline_id), self.existing.name)
 		# Replay of the same queued create returns the same customer.
 		_, again = self._sync("+91 98450 12345", offline_id=offline_id)
 		self.assertEqual(again["name"], self.existing.name)
