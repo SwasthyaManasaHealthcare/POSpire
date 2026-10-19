@@ -51,6 +51,7 @@ from frappe.query_builder.functions import IfNull
 from frappe.utils import cint, cstr, flt, getdate, nowdate
 from frappe.utils.background_jobs import enqueue
 
+from pospire.pospire.api.customer import get_default_customer_group, get_identifier
 from pospire.pospire.api.stock_reconcile import (
 	ensure_stock_for_invoice,
 	ensure_typed_batches_exist_for_invoice,
@@ -627,7 +628,7 @@ def get_customer_group_condition(pos_profile):
 	cond = "disabled = 0"
 	customer_groups = get_customer_groups(pos_profile)
 	if customer_groups:
-		cond = " customer_group in (%s)" % (", ".join(["%s"] * len(customer_groups)))  # noqa: UP031
+		cond += " and customer_group in (%s)" % (", ".join(["%s"] * len(customer_groups)))  # noqa: UP031
 
 	return cond % tuple(customer_groups)
 
@@ -1718,7 +1719,8 @@ def create_customer(
 
 	pos_profile = _load(pos_profile_doc)
 	if method == "create":
-		is_exist = frappe.db.exists("Customer", {"customer_name": customer_name})
+		# With a Customer Identifier set, uniqueness is enforced on that field by the Customer validate hook.
+		is_exist = not get_identifier() and frappe.db.exists("Customer", {"customer_name": customer_name})
 		if pos_profile.get("posa_allow_duplicate_customer_names") or not is_exist:
 			customer = frappe.get_doc(
 				{
@@ -1734,14 +1736,8 @@ def create_customer(
 					"gender": gender,
 				}
 			)
-			if customer_group:
-				customer.customer_group = customer_group
-			else:
-				customer.customer_group = "All Customer Groups"
-			if territory:
-				customer.territory = territory
-			else:
-				customer.territory = "All Territories"
+			customer.customer_group = customer_group or get_default_customer_group(pos_profile.get("name"))
+			customer.territory = territory or frappe.db.get_single_value("Selling Settings", "territory")
 			# Stamp offline_id so a network-failure replay (or the offline
 			# endpoint's own dedup) finds this row instead of inserting a
 			# duplicate.
@@ -1757,10 +1753,11 @@ def create_customer(
 		customer_doc.customer_name = customer_name
 		customer_doc.posa_referral_company = company
 		customer_doc.tax_id = tax_id
-		customer_doc.posa_referral_code = referral_code
+		# posa_referral_code is set once at creation; the edit dialog does not load it, so never overwrite it here.
 		customer_doc.posa_birthday = birthday
 		customer_doc.customer_type = customer_type
-		customer_doc.territory = territory
+		if territory:
+			customer_doc.territory = territory
 		customer_doc.customer_group = customer_group
 		customer_doc.gender = gender
 		customer_doc.save()
@@ -1849,12 +1846,11 @@ def set_customer_info(customer: str, fieldname: str, value: str = ""):
 
 	if contact:
 		contact_doc = frappe.get_doc("Contact", contact)
+		# Only the primary row changes; the Contact on_update hook copies it onto the Customer.
 		if fieldname == "email_id":
-			contact_doc.set("email_ids", [{"email_id": value, "is_primary": 1}])
-			frappe.db.set_value("Customer", customer, "email_id", value)
+			_set_primary_contact_row(contact_doc, "email_ids", "email_id", "is_primary", value)
 		elif fieldname == "mobile_no":
-			contact_doc.set("phone_nos", [{"phone": value, "is_primary_mobile_no": 1}])
-			frappe.db.set_value("Customer", customer, "mobile_no", value)
+			_set_primary_contact_row(contact_doc, "phone_nos", "phone", "is_primary_mobile_no", value)
 		contact_doc.save()
 
 	else:
@@ -1873,6 +1869,17 @@ def set_customer_info(customer: str, fieldname: str, value: str = ""):
 		contact_doc.flags.ignore_mandatory = True
 		contact_doc.save()
 		frappe.set_value("Customer", customer, "customer_primary_contact", contact_doc.name)
+
+
+def _set_primary_contact_row(contact_doc, table: str, field: str, flag: str, value: str) -> None:
+	row = next((r for r in contact_doc.get(table) if r.get(flag)), None)
+	if not value:
+		if row:
+			contact_doc.remove(row)
+	elif row:
+		row.set(field, value)
+	else:
+		contact_doc.append(table, {field: value, flag: 1})
 
 
 @frappe.whitelist()
