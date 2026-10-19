@@ -22,14 +22,23 @@
 				color="primary"
 				:label="__('Customer')"
 				v-model="customer"
+				v-model:search="search_text"
 				:items="customers"
 				item-title="customer_name"
 				item-value="name"
-				:no-data-text="__('Customers not found')"
 				hide-details
 				:customFilter="customFilter"
 				:disabled="readonly"
 			>
+				<template v-slot:no-data>
+					<v-list-item
+						v-if="showActions && !readonly && search_text"
+						prepend-icon="mdi-account-plus"
+						:title="__('Create customer with {0}', [search_text])"
+						@click="new_customer_from_search"
+					/>
+					<v-list-item v-else :title="__('Customers not found')" />
+				</template>
 				<template v-slot:item="{ props, item }">
 					<v-list-item v-bind="props">
 						<template v-slot:append v-if="isPendingSync(item.raw)">
@@ -43,6 +52,9 @@
 								{{ __('pending sync') }}
 							</v-chip>
 						</template>
+						<v-list-item-subtitle v-if="item.raw.mobile_no">
+							<div>Mobile No: {{ item.raw.mobile_no }}</div>
+						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.customer_name != item.raw.name">
 							<div>ID: {{ item.raw.name }}</div>
 						</v-list-item-subtitle>
@@ -51,9 +63,6 @@
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.email_id">
 							<div>Email: {{ item.raw.email_id }}</div>
-						</v-list-item-subtitle>
-						<v-list-item-subtitle v-if="item.raw.mobile_no">
-							<div>Mobile No: {{ item.raw.mobile_no }}</div>
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.primary_address">
 							<div>Primary Address: {{ item.raw.primary_address }}</div>
@@ -73,6 +82,7 @@ import UpdateCustomer from "./UpdateCustomer.vue";
 import { onSynced } from "@/offline/outbox";
 import { renameCustomer, listOfflineCreated } from "@/offline/repos/customers";
 import busListeners from "@/utils/busListeners";
+import { mobileMatches } from "@/utils/mobileMatch";
 export default {
 	mixins: [busListeners],
 	props: {
@@ -92,6 +102,7 @@ export default {
 		customer_offline_id: null,
 		readonly: false,
 		customer_info: {},
+		search_text: "",
 	}),
 
 	components: {
@@ -173,6 +184,13 @@ export default {
 		new_customer() {
 			this.eventBus.emit("open_update_customer", null);
 		},
+		new_customer_from_search() {
+			const text = this.search_text.trim();
+			let field = "customer_name";
+			if (text.includes("@")) field = "email_id";
+			else if (/^[\d\s+()-]+$/.test(text)) field = "mobile_no";
+			this.eventBus.emit("open_update_customer", { prefill: { [field]: text } });
+		},
 		edit_customer() {
 			this.eventBus.emit("open_update_customer", this.customer_info);
 		},
@@ -205,7 +223,8 @@ export default {
 				textTwo.indexOf(searchText) > -1 ||
 				textThree.indexOf(searchText) > -1 ||
 				textFour.indexOf(searchText) > -1 ||
-				textFifth.indexOf(searchText) > -1
+				textFifth.indexOf(searchText) > -1 ||
+				mobileMatches(queryText, item.mobile_no)
 			);
 		},
 	},

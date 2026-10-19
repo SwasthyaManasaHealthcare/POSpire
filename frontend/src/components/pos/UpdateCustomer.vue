@@ -16,7 +16,19 @@
 				<v-card-text>
 					<v-container>
 						<v-row dense>
-							<v-col cols="12">
+							<!-- The Customer Identifier (Selling Settings) field comes first and is required. -->
+							<v-col cols="12" :order="identifier === 'Customer Name' ? 2 : 1">
+								<v-text-field
+									variant="outlined"
+									density="comfortable"
+									color="primary"
+									type="tel"
+									:label="__('Mobile No') + (identifier === 'Mobile No' ? ' *' : '')"
+									v-model="mobile_no"
+									class="mb-3"
+								/>
+							</v-col>
+							<v-col cols="12" :order="identifier === 'Customer Name' ? 1 : 2">
 								<v-text-field
 									variant="outlined"
 									density="comfortable"
@@ -26,95 +38,19 @@
 									class="mb-3"
 								/>
 							</v-col>
-
-							<v-col cols="6">
+							<v-col cols="12" order="3" v-if="identifier === 'Email'">
 								<v-text-field
 									variant="outlined"
 									density="comfortable"
 									color="primary"
-									:label="__('Tax ID')"
-									v-model="tax_id"
-									class="mb-3"
-								/>
-							</v-col>
-							<v-col cols="6">
-								<v-text-field
-									variant="outlined"
-									density="comfortable"
-									color="primary"
-									:label="__('Mobile No')"
-									v-model="mobile_no"
-									class="mb-3"
-								/>
-							</v-col>
-
-							<v-col cols="6">
-								<v-text-field
-									variant="outlined"
-									density="comfortable"
-									color="primary"
-									:label="__('Email Id')"
+									:label="__('Email Id') + ' *'"
 									v-model="email_id"
 									class="mb-3"
 								/>
 							</v-col>
-							<v-col cols="6">
-								<v-select
-									variant="outlined"
-									density="comfortable"
-									color="primary"
-									:items="genders"
-									:label="__('Gender')"
-									v-model="gender"
-									class="mb-3"
-								/>
-							</v-col>
 
-							<v-col cols="6">
-								<v-text-field
-									variant="outlined"
-									density="comfortable"
-									color="primary"
-									:label="__('Referral Code')"
-									v-model="referral_code"
-									class="mb-3"
-								/>
-							</v-col>
-							<v-col cols="6">
-								<v-menu
-									v-model="birthday_menu"
-									:close-on-content-click="false"
-									transition="scale-transition"
-									offset-y
-									min-width="290px"
-								>
-									<template v-slot:activator="{ props }">
-										<v-text-field
-											variant="outlined"
-											density="comfortable"
-											color="primary"
-											v-model="birthday_input_str"
-											:label="__('Birthday')"
-											placeholder="dd-mm-yyyy"
-											clearable
-											v-bind="props"
-											@click:clear="clearBirthday"
-											@blur="onBirthdayInput"
-											@keyup.enter="onBirthdayInput"
-											class="mb-3"
-										/>
-									</template>
-									<v-date-picker
-										v-model="birthday"
-										color="primary"
-										:max="todayAsDate"
-										show-adjacent-months
-										@update:model-value="birthday_menu = false"
-									/>
-								</v-menu>
-							</v-col>
-
-							<v-col cols="6">
+							<!-- Hidden when the profile allows a single group: it is pre-filled. -->
+							<v-col cols="6" order="4" v-if="groups.length !== 1">
 								<v-autocomplete
 									clearable
 									density="comfortable"
@@ -128,22 +64,21 @@
 									class="mb-3"
 								/>
 							</v-col>
-							<v-col cols="6">
+							<v-col :cols="groups.length === 1 ? 12 : 6" order="5">
 								<v-autocomplete
 									clearable
 									density="comfortable"
 									variant="outlined"
 									color="primary"
-									:label="__('Territory') + ' *'"
+									:label="__('Territory')"
 									v-model="territory"
 									:items="territorys"
 									:no-data-text="__('Territory not found')"
-									required
 									class="mb-3"
 								/>
 							</v-col>
 
-							<v-col cols="6" v-if="loyalty_program != null">
+							<v-col cols="6" order="6" v-if="loyalty_program != null">
 								<v-text-field
 									v-model="loyalty_program"
 									:label="__('Loyalty Program')"
@@ -153,7 +88,7 @@
 									class="mb-3"
 								/>
 							</v-col>
-							<v-col cols="6" v-if="loyalty_points != null">
+							<v-col cols="6" order="6" v-if="loyalty_points != null">
 								<v-text-field
 									v-model="loyalty_points"
 									:label="__('Loyalty Points')"
@@ -162,6 +97,92 @@
 									readonly
 									class="mb-3"
 								/>
+							</v-col>
+
+							<v-col cols="12" order="7">
+								<v-expansion-panels variant="accordion" flat>
+									<v-expansion-panel :title="__('More details')">
+										<v-expansion-panel-text>
+											<v-row dense>
+												<v-col cols="6">
+													<v-text-field
+														variant="outlined"
+														density="comfortable"
+														color="primary"
+														:label="__('Tax ID')"
+														v-model="tax_id"
+														class="mb-3"
+													/>
+												</v-col>
+												<v-col cols="6" v-if="identifier !== 'Email'">
+													<v-text-field
+														variant="outlined"
+														density="comfortable"
+														color="primary"
+														:label="__('Email Id')"
+														v-model="email_id"
+														class="mb-3"
+													/>
+												</v-col>
+												<v-col cols="6">
+													<v-select
+														variant="outlined"
+														density="comfortable"
+														color="primary"
+														:items="genders"
+														:label="__('Gender')"
+														v-model="gender"
+														class="mb-3"
+													/>
+												</v-col>
+												<!-- Set once at creation; the edit dialog never loads or sends it. -->
+												<v-col cols="6" v-if="!customer_id">
+													<v-text-field
+														variant="outlined"
+														density="comfortable"
+														color="primary"
+														:label="__('Referral Code')"
+														v-model="referral_code"
+														class="mb-3"
+													/>
+												</v-col>
+												<v-col cols="6">
+													<v-menu
+														v-model="birthday_menu"
+														:close-on-content-click="false"
+														transition="scale-transition"
+														offset-y
+														min-width="290px"
+													>
+														<template v-slot:activator="{ props }">
+															<v-text-field
+																variant="outlined"
+																density="comfortable"
+																color="primary"
+																v-model="birthday_input_str"
+																:label="__('Birthday')"
+																placeholder="dd-mm-yyyy"
+																clearable
+																v-bind="props"
+																@click:clear="clearBirthday"
+																@blur="onBirthdayInput"
+																@keyup.enter="onBirthdayInput"
+																class="mb-3"
+															/>
+														</template>
+														<v-date-picker
+															v-model="birthday"
+															color="primary"
+															:max="todayAsDate"
+															show-adjacent-months
+															@update:model-value="birthday_menu = false"
+														/>
+													</v-menu>
+												</v-col>
+											</v-row>
+										</v-expansion-panel-text>
+									</v-expansion-panel>
+								</v-expansion-panels>
 							</v-col>
 						</v-row>
 					</v-container>
@@ -214,6 +235,10 @@ export default {
 		gender: "",
 		loyalty_points: null,
 		loyalty_program: null,
+		// From get_customer_form_options: Selling Settings identifier and defaults.
+		identifier: null,
+		default_group: "",
+		default_territory: "",
 	}),
 	setup() {
 		return { datetime };
@@ -302,8 +327,8 @@ export default {
 			this.birthday = null;
 			this.birthday_input_str = "";
 			this.birthday_menu = false;
-			this.group = window.user_defaults?.["Customer Group"] || "";
-			this.territory = window.user_defaults?.["Territory"] || "";
+			this.group = this.default_group;
+			this.territory = this.default_territory;
 			this.customer_id = "";
 			this.customer_type = "Individual";
 			this.gender = "";
@@ -323,20 +348,15 @@ export default {
 		 * "Territory not found" affordance rather than a crash.
 		 */
 		async loadCustomerFormOptions() {
-			if (this._fetchingFormOptions) return;
-			if (
-				this.groups.length > 0 &&
-				this.territorys.length > 0 &&
-				this.genders.length > 0
-			) {
-				return;
-			}
+			const profile = this.pos_profile?.name;
+			if (this._fetchingFormOptions || !profile || this._formOptionsProfile === profile) return;
 			this._fetchingFormOptions = true;
 			try {
 				const res = await call({
 					method: "pospire.pospire.api.offline.get_customer_form_options",
+					args: { pos_profile: profile },
 					intent: "read",
-					cacheKey: "offline.customer_form_options",
+					cacheKey: `offline.customer_form_options:${profile}`,
 				});
 				// Read calls served from the offline cache return a
 				// StaleReadResult<{...}> wrapper; live reads return the
@@ -356,6 +376,14 @@ export default {
 				if (Array.isArray(payload.genders)) {
 					this.genders = payload.genders;
 				}
+				this.identifier = payload.customer_identifier || null;
+				this.default_group = payload.default_customer_group || "";
+				this.default_territory = payload.default_territory || "";
+				this._formOptionsProfile = profile;
+				if (!this.customer_id) {
+					this.group = this.group || this.default_group;
+					this.territory = this.territory || this.default_territory;
+				}
 			} catch (err) {
 				// Offline + cold cache, or transient server issue. Leave
 				// the dropdowns empty rather than crashing the dialog.
@@ -374,12 +402,13 @@ export default {
 				toast.error(__("Customer name is required."));
 				return;
 			}
-			if (!this.group) {
-				toast.error(__("Customer group is required."));
+			const identifierField = { "Mobile No": "mobile_no", Email: "email_id" }[this.identifier];
+			if (identifierField && !this[identifierField]) {
+				toast.error(__("{0} is required.", [__(this.identifier)]));
 				return;
 			}
-			if (!this.territory) {
-				toast.error(__("Customer territory is required."));
+			if (!this.group) {
+				toast.error(__("Customer group is required."));
 				return;
 			}
 			if (this.birthday_input_str.trim()) {
@@ -562,6 +591,8 @@ export default {
 		// Non-reactive in-flight flag — prevents duplicate concurrent fetches
 		// if the dialog is opened again before the first request resolves.
 		this._fetchingFormOptions = false;
+		// Profile whose form options are loaded; a profile switch refetches.
+		this._formOptionsProfile = null;
 
 		this.onBus("open_update_customer", (data) => {
 			this.customerDialog = true;
@@ -569,7 +600,7 @@ export default {
 			// pre-warms the same cache on shift-open so this is usually a
 			// cache hit (including when offline).
 			this.loadCustomerFormOptions();
-			if (data) {
+			if (data?.name) {
 				// Update mode: populate every field directly from the selected customer
 				this.customer_id = data.name;
 				this.customer_name = data.customer_name;
@@ -586,8 +617,13 @@ export default {
 				this.loyalty_points = data.loyalty_points ?? null;
 				this.loyalty_program = data.loyalty_program ?? null;
 			} else {
-				// Create mode: start from a clean slate with user defaults
+				// Create mode: clean slate with the profile defaults, plus any
+				// value typed in the picker ("Create customer with ...").
 				this.clear_customer();
+				const prefill = data?.prefill || {};
+				for (const key of ["mobile_no", "email_id", "customer_name"]) {
+					if (prefill[key]) this[key] = prefill[key];
+				}
 			}
 		});
 		this.onBus("register_pos_profile", (data) => {
@@ -596,9 +632,6 @@ export default {
 		this.onBus("payments_register_pos_profile", (data) => {
 			this.pos_profile = data.pos_profile;
 		});
-		// set default values for customer group and territory from user defaults
-		this.group = window.user_defaults?.["Customer Group"] || "";
-		this.territory = window.user_defaults?.["Territory"] || "";
 	},
 };
 </script>
