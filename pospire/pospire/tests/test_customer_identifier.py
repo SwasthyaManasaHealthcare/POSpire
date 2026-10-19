@@ -16,6 +16,7 @@ from pospire.pospire.api.offline import (
 )
 from pospire.pospire.api.posapp import create_customer as pos_create_customer
 from pospire.pospire.api.posapp import get_customer_group_condition, set_customer_info
+from pospire.pospire.tests.test_utils import ensure_test_company
 
 
 def _territory():
@@ -82,7 +83,7 @@ class TestCustomerIdentifier(FrappeTestCase):
 		contact.add_phone("080 4000 1234")
 		contact.save(ignore_permissions=True)
 
-		profile = {"name": None, "company": frappe.defaults.get_global_default("company")}
+		profile = {"name": None, "company": ensure_test_company()}
 		with patch.object(customer_api, "validate_referral_code"):
 			pos_create_customer(
 				customer_id=cust.name,
