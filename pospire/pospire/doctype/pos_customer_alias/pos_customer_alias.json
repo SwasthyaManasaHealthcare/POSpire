@@ -1,0 +1,60 @@
+{
+ "actions": [],
+ "autoname": "field:offline_id",
+ "creation": "2026-10-19 12:00:00.000000",
+ "description": "Offline-created customer that sync matched to an existing Customer by its Customer Identifier.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "offline_id",
+  "customer",
+  "device_id"
+ ],
+ "fields": [
+  {
+   "fieldname": "offline_id",
+   "fieldtype": "Data",
+   "label": "Offline ID",
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "reqd": 1,
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "device_id",
+   "fieldtype": "Data",
+   "label": "Device ID",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-19 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POSpire",
+ "name": "POS Customer Alias",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "title_field": "customer",
+ "track_changes": 0
+}

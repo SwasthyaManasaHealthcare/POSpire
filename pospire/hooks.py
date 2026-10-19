@@ -130,6 +130,12 @@ doc_events = {
 		"on_update": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 		"on_trash": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 	},
+	"Contact": {
+		"on_update": "pospire.pospire.api.customer.sync_customer_from_contact",
+	},
+	"Selling Settings": {
+		"validate": "pospire.pospire.api.customer.on_selling_settings_update",
+	},
 	"POS Profile": {
 		"validate": "pospire.pospire.doctype.pos_profile.pos_profile.validate_pos_profile",
 		"on_update": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
@@ -307,6 +313,8 @@ fixtures = [
 					"Customer-posa_referral_company",
 					"Customer-posa_referral_section",
 					"Customer-posa_birthday",
+					"Customer-posa_identifier_key",
+					"Selling Settings-posa_customer_identifier",
 					"Sales Order-posa_offers",
 					"Sales Order-posa_coupons",
 					"Sales Order Item-posa_row_id",

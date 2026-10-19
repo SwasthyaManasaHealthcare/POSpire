@@ -1145,12 +1145,15 @@ export default {
 		 * when it can't load.
 		 */
 		async warm_customer_form_options_cache() {
+			const profile = this.pos_profile?.name;
+			if (!profile) return;
 			try {
 				await call({
 					method:
 						"pospire.pospire.api.offline.get_customer_form_options",
+					args: { pos_profile: profile },
 					intent: "read",
-					cacheKey: "offline.customer_form_options",
+					cacheKey: `offline.customer_form_options:${profile}`,
 				});
 			} catch (err) {
 				// eslint-disable-next-line no-console
