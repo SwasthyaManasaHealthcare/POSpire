@@ -148,6 +148,13 @@ export const OPENING_DIALOG_CACHE_KEY = "offline.opening_dialog_data";
  *  name so switching profiles cannot serve the previous profile's rates. */
 export const TAX_CONFIG_CACHE_KEY_PREFIX = "offline.tax_config:";
 
+/** Per-profile durable key for the offline print config (printer URL,
+ *  default XML template + its modified timestamp, company address, and
+ *  the site's date/time/number/currency formatting). Must match the
+ *  prefix allowlisted in read-cache.ts DURABLE_KEY_PREFIXES. Same
+ *  per-profile-switch rationale as TAX_CONFIG_CACHE_KEY_PREFIX. */
+export const PRINT_CONFIG_CACHE_KEY_PREFIX = "offline.print_config:";
+
 /**
  * The canonical registry. Names are the exact server method paths.
  *
@@ -186,6 +193,14 @@ export const methodRegistry: Record<string, MethodConfig> = {
 		offline: true,
 		cacheTTLMs: 24 * HOUR,
 	},
+	// Print config (printer URL, default XML template, company address,
+	// site formatting) for offline receipts. Admin configuration, changes
+	// rarely — same long window as the tax config it's primed alongside.
+	"pospire.pospire.api.hardware_manager.get_offline_print_config": {
+		intent: "read",
+		offline: true,
+		cacheTTLMs: 24 * HOUR,
+	},
 	"pospire.pospire.api.dashboard.get_shift_dashboard": {
 		intent: "read",
 		offline: true,
@@ -214,6 +229,8 @@ export const methodRegistry: Record<string, MethodConfig> = {
 	"pospire.pospire.api.posapp.get_items_details": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_item_detail": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_customer_info": { intent: "read", offline: false },
+	// Picker fallback when the customers loaded on the till have no match. Live-only.
+	"pospire.pospire.api.customer.search_customers": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_customer_addresses": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_sales_person_names": { intent: "read", offline: false },
 	"pospire.pospire.api.posapp.get_available_credit": { intent: "read", offline: false },
@@ -499,14 +516,16 @@ export const methodRegistry: Record<string, MethodConfig> = {
 				doctype: "Customer",
 				customer_name: args.customer_name,
 				customer_type: args.customer_type ?? "Individual",
-				customer_group: args.customer_group ?? "All Customer Groups",
-				territory: args.territory ?? "All Territories",
 				owner_user: user,
 				owner: user,
 			};
 			// Optional fields — only include if the UI supplied them so we don't
 			// override doctype defaults with empty strings / null.
+			// customer_group / territory: no fallback. The old "All Customer Groups"
+			// default is a group node ERPNext refuses; the dialog pre-fills a leaf group.
 			for (const key of [
+				"customer_group",
+				"territory",
 				"tax_id",
 				"mobile_no",
 				"email_id",

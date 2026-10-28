@@ -1124,7 +1124,7 @@
 
 <script>
 import { call, unwrapStale } from "@/utils/call";
-import { TAX_CONFIG_CACHE_KEY_PREFIX } from "@/utils/call-registry";
+import { TAX_CONFIG_CACHE_KEY_PREFIX, PRINT_CONFIG_CACHE_KEY_PREFIX } from "@/utils/call-registry";
 import format from "@/utils/format";
 import hardwareUtils from "@/utils/hardwareUtils";
 import Customer from "./Customer.vue";
@@ -1146,6 +1146,9 @@ export default {
 			// Cached tax config + last offline tax estimate (see @/offline/tax).
 			offline_tax_config: null,
 			offline_tax_supported: true,
+			// Cached printer/template/formatting config for offline receipts
+			// (see @/offline/print). Primed the same way as offline_tax_config.
+			offline_print_config: null,
 			sales_persons: [],
 			//
 			pos_profile: "",
@@ -1153,6 +1156,9 @@ export default {
 			stock_settings: "",
 			invoice_doc: "",
 			return_doc: "",
+			// Percentage form of the original sale's Additional Discount. null
+			// outside return mode; see recompute_return_discount().
+			return_discount_percentage: null,
 			customer: "",
 			// Set when the cart's customer was offline-created. Forwarded onto
 			// the invoice doc as `customer_offline_id`; server resolves to the
@@ -1944,6 +1950,7 @@ export default {
 			this.customer_offline_id = null;
 			this.invoice_doc = "";
 			this.return_doc = "";
+			this.return_discount_percentage = null;
 			this.discount_amount = 0;
 			this.additional_discount_percentage = 0;
 			this.delivery_charges_rate = 0;
@@ -2023,8 +2030,11 @@ export default {
 				}
 			});
 			if (data.is_return) {
-				this.discount_amount = -data.discount_amount;
-				this.additional_discount_percentage = -data.additional_discount_percentage;
+				// A return's discount is already stored negative, so negating it
+				// here would turn it back into an amount the customer owes.
+				this.discount_amount = flt(data.discount_amount);
+				this.additional_discount_percentage = flt(data.additional_discount_percentage);
+				this.return_discount_percentage = this.get_return_discount_percentage(data);
 				this.return_doc = data;
 			} else {
 				this.eventBus.emit("set_pos_coupons", data.posa_coupons);
@@ -2116,6 +2126,7 @@ export default {
 			this.eventBus.emit("set_pos_coupons", []);
 			this.posa_coupons = [];
 			this.return_doc = "";
+			this.return_discount_percentage = null;
 			if (!data.name && !data.is_return) {
 				this.items = [];
 				this.deleted_items = [];
@@ -2148,6 +2159,9 @@ export default {
 				this.posting_date = data.posting_date || datetime.nowdate();
 				this.discount_amount = data.discount_amount;
 				this.additional_discount_percentage = data.additional_discount_percentage;
+				if (data.is_return) {
+					this.return_discount_percentage = this.get_return_discount_percentage(data);
+				}
 				this.items.forEach((item) => {
 					if (item.serial_no) {
 						item.serial_no_selected = [];
@@ -2195,8 +2209,38 @@ export default {
 			}
 		},
 
-		// Estimate cart tax from the cached config. Returns null when it can't be
-		// computed offline (no config / unsupported charge type).
+		/**
+		 * Prime the printer/template/formatting config for offline receipts
+		 * — mirrors load_offline_tax_config() exactly, including the
+		 * clear-first and stale-response guards, for the same reasons.
+		 */
+		async load_print_config() {
+			const requestedProfile = this.pos_profile?.name;
+			if (!requestedProfile) return;
+			this.offline_print_config = null;
+			try {
+				const config = unwrapStale(
+					await call({
+						method: "pospire.pospire.api.hardware_manager.get_offline_print_config",
+						args: { pos_profile: requestedProfile },
+						intent: "read",
+						cacheKey: PRINT_CONFIG_CACHE_KEY_PREFIX + requestedProfile,
+					}),
+				);
+				if (config && this.pos_profile?.name === requestedProfile) {
+					this.offline_print_config = config;
+				}
+			} catch {
+				// Non-fatal: printReceipt() surfaces its own error if it ever
+				// needs a config that never got cached.
+			}
+		},
+
+		// Estimate cart tax from the cached config. Always returns the full
+		// OfflineTaxResult, including `supported: false` when it can't be
+		// computed offline (no config / unsupported charge type) — callers
+		// that only care whether it worked read this.offline_tax_supported
+		// (kept in sync here) or result.supported directly.
 		compute_offline_taxes() {
 			const lines = this.items.map((item) => ({
 				net: flt(item.qty) * flt(item.rate),
@@ -2213,7 +2257,7 @@ export default {
 				precision: this.currency_precision,
 			});
 			this.offline_tax_supported = result.supported;
-			return result.supported ? result : null;
+			return result;
 		},
 
 		get_invoice_doc() {
@@ -2244,7 +2288,7 @@ export default {
 			// cashier collects the right amount. `doc.taxes` stays empty on
 			// purpose: the server re-expands taxes on sync and stays authoritative.
 			const offlineTax = this.compute_offline_taxes();
-			if (offlineTax) {
+			if (offlineTax.supported) {
 				const delivery = this.flt(this.delivery_charges_rate || 0, this.currency_precision);
 				const grand = this.flt(offlineTax.grand_total + delivery, this.currency_precision);
 				doc.total = offlineTax.net_total;
@@ -2260,6 +2304,20 @@ export default {
 				doc.rounded_total = this.subtotal;
 				doc.net_total = this.subtotal;
 			}
+			// Print-only: a snapshot of exactly what was computed (and whether
+			// it was even supported) at the moment this sale was made, so
+			// buildPrintContext() can print the SAME numbers on reprint
+			// instead of recomputing from whatever the tax config happens to
+			// be by then (e.g. after an admin edits a rate). Popped server-side
+			// before insert — see offline.py::submit_invoice — never reaches
+			// the real Sales Invoice doc.
+			doc.pospire_print_tax_snapshot = offlineTax;
+			// Same idea for precision: printing later reads a value fetched at
+			// a different time via a different call (System Settings via
+			// get_offline_print_config) than this checkout used (bootinfo's
+			// sys_defaults). Stamp what was actually used here so the two
+			// never disagree on a reprint.
+			doc.currency_precision = this.currency_precision;
 			doc.discount_amount = flt(this.discount_amount);
 			doc.additional_discount_percentage = flt(this.additional_discount_percentage);
 			doc.custom_delivery_charge_rate = this.delivery_charges_rate || 0;
@@ -2730,7 +2788,15 @@ export default {
 						value = false;
 					}
 				}
-				if (this.pos_profile.posa_allow_user_to_edit_additional_discount) {
+				// The cap limits what a cashier may give away, not what a return
+				// reverses: a return's discount was already granted and approved on
+				// the sale. On a return both figures are negative, so the ratio
+				// below reads as the sale's own discount percentage and would block
+				// PAY on any sale discounted above the cap.
+				if (
+					this.pos_profile.posa_allow_user_to_edit_additional_discount &&
+					!this.invoice_doc.is_return
+				) {
 					const clac_percentage = (this.discount_amount / this.Total) * 100;
 					if (clac_percentage > this.pos_profile.posa_max_discount_allowed) {
 						toast.error(
@@ -3116,6 +3182,39 @@ export default {
 			}
 			this.eventBus.emit("update_customer_price_list", price_list);
 		},
+		// The original sale's Additional Discount as a percentage of the total it
+		// was taken off. Mirrors get_return_discount_percentage() on the server,
+		// and works unchanged on a return doc, whose figures are all negative.
+		get_return_discount_percentage(sale) {
+			const discount = flt(sale?.discount_amount);
+			if (!discount) return 0;
+			const charged = flt(
+				sale.apply_discount_on === "Net Total" ? sale.net_total : sale.grand_total,
+			);
+			const base = charged + discount;
+			return base ? (discount / base) * 100 : 0;
+		},
+
+		// A return reverses only the discount belonging to the goods coming back.
+		// The customer never paid the discounted portion, so copying the whole
+		// invoice discount onto a partial return overshoots the returned lines and
+		// turns the credit note into a debit, which blocks PAY. Applying the
+		// sale's percentage to the return's own total is what prorates it, and
+		// keeps it exact when lines are taxed at different rates. Recomputed from
+		// the lines rather than copied once, so qty edits and removals stay in step.
+		//
+		// This is the cashier's figure: `Total` is pre-tax, while the server reads
+		// the same percentage against the return's pre-discount grand total. They
+		// agree for tax-inclusive lines, and the server stays authoritative for
+		// what is actually booked (see set_return_additional_discount).
+		recompute_return_discount() {
+			if (!this.invoice_doc?.is_return || this.return_discount_percentage === null) return;
+			this.discount_amount = this.flt(
+				(this.Total * this.return_discount_percentage) / 100,
+				this.currency_precision,
+			);
+		},
+
 		update_discount_umount() {
 			let value = flt(this.additional_discount_percentage);
 			value = parseFloat(value.toFixed(11));
@@ -4164,30 +4263,8 @@ export default {
 				}, 0);
 			}
 		},
-		load_print_page(invoice_name) {
-			const print_format =
-				this.pos_profile.print_format_for_online || this.pos_profile.print_format;
-			const letter_head = this.pos_profile.letter_head || 0;
-			const url =
-				window.location.origin +
-				"/printview?doctype=Sales%20Invoice&name=" +
-				invoice_name +
-				"&trigger_print=1" +
-				"&format=" +
-				print_format +
-				"&no_letterhead=" +
-				letter_head;
-			const printWindow = window.open(url, "Print");
-			printWindow.addEventListener(
-				"load",
-				function () {
-					printWindow.print();
-					// printWindow.close();
-					// NOTE : uncomoent this to auto closing printing window
-				},
-				true,
-			);
-		},
+		// load_print_page() moved to hardwareUtils.js (shared with Payments.vue
+		// and printReceipt()) — this mixin already provides it.
 
 		async print_draft_invoice() {
 			if (this.printingDraft) return;
@@ -4203,23 +4280,17 @@ export default {
 					return;
 				}
 				invoice_name = invoice_doc.name ? invoice_doc.name : invoice_name;
-				await this.handlePrint(invoice_name);
+				// Routed through the shared printReceipt() entry point (same as
+				// every other print path) instead of this component's own
+				// hardwareConfiguration + /printview fallback — that duplicate
+				// path had no offline handling: it would open a broken /printview
+				// window instead of the "needs a connection" message everywhere
+				// else shows. A draft invoice is always a real, saved server
+				// document (save_and_clear_invoice already ran), never an
+				// offline/outbox one, so the plain `{ name }` shape is correct.
+				await this.printReceipt({ name: invoice_name });
 			} finally {
 				this.printingDraft = false;
-			}
-		},
-		async handlePrint(invoice_name) {
-			try {
-				await this.hardwareConfiguration(this.pos_profile.name).then((res) => {
-					if (res === true) {
-						this.custom_print(invoice_name);
-					} else {
-						this.load_print_page(invoice_name);
-					}
-				});
-			} catch (err) {
-				console.error("Hardware config check failed:", err);
-				this.load_print_page(invoice_name); // fallback
 			}
 		},
 		async set_delivery_charges() {
@@ -4320,6 +4391,9 @@ export default {
 				this.load_approval_config();
 				// Prime the tax config while online so it's cached for offline use.
 				this.load_offline_tax_config();
+				// Same for the printer/template/formatting config — required
+				// for offline receipts to print at all.
+				this.load_print_config();
 		});
 		this.onBus("auto_set_delivery_charge", () => {
 			if (this.delivery_charges.length > 0 && !this.selected_delivery_charge) {
@@ -4446,9 +4520,9 @@ export default {
 		});
 		this.onBus("load_return_invoice", (data) => {
 			this.load_invoice(data.invoice_doc);
-			this.discount_amount = -data.return_doc.discount_amount;
-			this.additional_discount_percentage = -data.return_doc.additional_discount_percentage;
 			this.return_doc = data.return_doc;
+			this.return_discount_percentage = this.get_return_discount_percentage(data.return_doc);
+			this.recompute_return_discount();
 		});
 		this.onBus("set_new_line", (data) => {
 			this.new_line = data;
@@ -4505,6 +4579,7 @@ export default {
 				// Sales Person
 				this.updateSalesTeam();
 				//
+				this.recompute_return_discount();
 				this.handelOffers();
 				this.$forceUpdate();
 			},

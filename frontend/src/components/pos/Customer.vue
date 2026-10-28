@@ -22,14 +22,24 @@
 				color="primary"
 				:label="__('Customer')"
 				v-model="customer"
+				v-model:search="search_text"
+				:loading="searching"
 				:items="customers"
 				item-title="customer_name"
 				item-value="name"
-				:no-data-text="__('Customers not found')"
 				hide-details
 				:customFilter="customFilter"
 				:disabled="readonly"
 			>
+				<template v-slot:no-data>
+					<v-list-item
+						v-if="showActions && !readonly && search_text && !searching"
+						prepend-icon="mdi-account-plus"
+						:title="__('Create customer with {0}', [search_text])"
+						@click="new_customer_from_search"
+					/>
+					<v-list-item v-else :title="searching ? __('Searching...') : __('Customers not found')" />
+				</template>
 				<template v-slot:item="{ props, item }">
 					<v-list-item v-bind="props">
 						<template v-slot:append v-if="isPendingSync(item.raw)">
@@ -43,6 +53,9 @@
 								{{ __('pending sync') }}
 							</v-chip>
 						</template>
+						<v-list-item-subtitle v-if="item.raw.mobile_no">
+							<div>Mobile No: {{ item.raw.mobile_no }}</div>
+						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.customer_name != item.raw.name">
 							<div>ID: {{ item.raw.name }}</div>
 						</v-list-item-subtitle>
@@ -51,9 +64,6 @@
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.email_id">
 							<div>Email: {{ item.raw.email_id }}</div>
-						</v-list-item-subtitle>
-						<v-list-item-subtitle v-if="item.raw.mobile_no">
-							<div>Mobile No: {{ item.raw.mobile_no }}</div>
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.primary_address">
 							<div>Primary Address: {{ item.raw.primary_address }}</div>
@@ -73,6 +83,12 @@ import UpdateCustomer from "./UpdateCustomer.vue";
 import { onSynced } from "@/offline/outbox";
 import { renameCustomer, listOfflineCreated } from "@/offline/repos/customers";
 import busListeners from "@/utils/busListeners";
+import { mobileMatches } from "@/utils/mobileMatch";
+import connectivity from "@/offline/connectivity";
+
+// Digits with phone punctuation only: treated as a mobile number search.
+const PHONE_LIKE = /^[\d\s+()-]+$/;
+
 export default {
 	mixins: [busListeners],
 	props: {
@@ -92,6 +108,8 @@ export default {
 		customer_offline_id: null,
 		readonly: false,
 		customer_info: {},
+		search_text: "",
+		searching: false,
 	}),
 
 	components: {
@@ -173,6 +191,13 @@ export default {
 		new_customer() {
 			this.eventBus.emit("open_update_customer", null);
 		},
+		new_customer_from_search() {
+			const text = this.search_text.trim();
+			let field = "customer_name";
+			if (text.includes("@")) field = "email_id";
+			else if (PHONE_LIKE.test(text)) field = "mobile_no";
+			this.eventBus.emit("open_update_customer", { prefill: { [field]: text } });
+		},
 		edit_customer() {
 			this.eventBus.emit("open_update_customer", this.customer_info);
 		},
@@ -192,21 +217,33 @@ export default {
 			return false;
 		},
 		customFilter(itemText, queryText, itemRow) {
-			const item = itemRow.raw;
-			const textOne = item.customer_name ? item.customer_name.toLowerCase() : "";
-			const textTwo = item.tax_id ? item.tax_id.toLowerCase() : "";
-			const textThree = item.email_id ? item.email_id.toLowerCase() : "";
-			const textFour = item.mobile_no ? item.mobile_no.toLowerCase() : "";
-			const textFifth = item.name.toLowerCase();
-			const searchText = queryText.toLowerCase();
-
-			return (
-				textOne.indexOf(searchText) > -1 ||
-				textTwo.indexOf(searchText) > -1 ||
-				textThree.indexOf(searchText) > -1 ||
-				textFour.indexOf(searchText) > -1 ||
-				textFifth.indexOf(searchText) > -1
-			);
+			return this.matchesCustomer(itemRow.raw, queryText);
+		},
+		// Every word must appear in name, ID, tax ID, email or mobile, same as the server search.
+		matchesCustomer(item, queryText) {
+			const haystack = [item.customer_name, item.name, item.tax_id, item.email_id, item.mobile_no]
+				.filter(Boolean)
+				.join(" ")
+				.toLowerCase();
+			const words = queryText.toLowerCase().split(/\s+/).filter(Boolean);
+			if (words.every((w) => haystack.includes(w))) return true;
+			return PHONE_LIKE.test(queryText) && mobileMatches(queryText, item.mobile_no);
+		},
+		// Customers outside the loaded list (other groups, or created since the list loaded).
+		async search_server(text, seq) {
+			try {
+				const rows = await call("pospire.pospire.api.customer.search_customers", {
+					pos_profile: this.pos_profile?.pos_profile?.name,
+					query: text,
+				});
+				const known = new Set(this.customers.map((c) => c.name));
+				this.customers.push(...(Array.isArray(rows) ? rows : []).filter((r) => !known.has(r.name)));
+			} catch {
+				// Offline or server error: the local results stand.
+			} finally {
+				// An older request finishing must not hide the spinner of a newer one.
+				if (seq === this._searchSeq) this.searching = false;
+			}
 		},
 	},
 
@@ -269,7 +306,11 @@ export default {
 				const entry = this.customers.find(
 					(c) => c && c.name === event.provisional_name,
 				);
-				if (entry) {
+				if (entry && this.customers.some((c) => c && c.name === event.server_doc_name)) {
+					// Sync attached it to a customer already listed (Customer Identifier
+					// match): drop the provisional row instead of listing that ID twice.
+					this.customers = this.customers.filter((c) => c !== entry);
+				} else if (entry) {
 					entry.name = event.server_doc_name;
 					// Clear pos_offline_id once the customer has a real
 					// server doc name. Otherwise the watcher below would
@@ -309,6 +350,7 @@ export default {
 	},
 
 	beforeUnmount() {
+		clearTimeout(this._searchTimer);
 		if (typeof this._unsubOnSynced === "function") {
 			this._unsubOnSynced();
 			this._unsubOnSynced = null;
@@ -316,6 +358,17 @@ export default {
 	},
 
 	watch: {
+		search_text(query) {
+			clearTimeout(this._searchTimer);
+			const seq = (this._searchSeq = (this._searchSeq || 0) + 1);
+			this.searching = false;
+			const text = (query || "").trim();
+			if (text.length < 3 || !connectivity.isOnline()) return;
+			if (this.customers.some((c) => c && this.matchesCustomer(c, text))) return;
+			// Set now, not after the debounce, so "Create customer with ..." waits for the search.
+			this.searching = true;
+			this._searchTimer = setTimeout(() => this.search_server(text, seq), 300);
+		},
 		customer(newName) {
 			// Derive offline_id from the customers list (the single source of
 			// truth for offline-created customers — UpdateCustomer.vue pushes

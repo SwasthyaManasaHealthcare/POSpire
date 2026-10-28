@@ -26,6 +26,7 @@ extend_bootinfo = "pospire.boot.extend_bootinfo"
 app_include_js = [
 	"/assets/pospire/js/pos_approval_desk.js",
 	"/assets/pospire/js/pos_core_route_guard.js",
+	"/assets/pospire/js/pos_universal_filter.js",
 ]
 
 # include js, css files in header of web template
@@ -128,6 +129,12 @@ doc_events = {
 		],
 		"on_update": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
 		"on_trash": "pospire.pospire.utils.pos_server_cache.invalidate_pos_server_cache_from_doc",
+	},
+	"Contact": {
+		"on_update": "pospire.pospire.api.customer.sync_customer_from_contact",
+	},
+	"Selling Settings": {
+		"validate": "pospire.pospire.api.customer.on_selling_settings_update",
 	},
 	"POS Profile": {
 		"validate": "pospire.pospire.doctype.pos_profile.pos_profile.validate_pos_profile",
@@ -306,6 +313,8 @@ fixtures = [
 					"Customer-posa_referral_company",
 					"Customer-posa_referral_section",
 					"Customer-posa_birthday",
+					"Customer-posa_identifier_key",
+					"Selling Settings-posa_customer_identifier",
 					"Sales Order-posa_offers",
 					"Sales Order-posa_coupons",
 					"Sales Order Item-posa_row_id",
@@ -348,6 +357,7 @@ fixtures = [
 					"Sales Invoice-custom_delivery_charge_rate",
 					"POS Profile-posa_hardware_manager_setting",
 					"POS Profile-posa_hardware_manager",
+					"POS Profile-posa_browser_receipt_from_xml",
 					"POS Profile-posa_approval_workflow_tab",
 					"POS Profile-posa_enable_approval_workflow",
 					"POS Profile-posa_enable_remote_approval",
@@ -414,7 +424,7 @@ add_to_apps_screen = [
 	{
 		"name": "POSpire",
 		"title": "POSpire",
-		"route": "/pospire",
+		"route": "/desk/pospire",
 		"color": POSPIRE_COLOR,
 		"logo": "/assets/pospire/images/app-128x128-rounded.png",
 	}

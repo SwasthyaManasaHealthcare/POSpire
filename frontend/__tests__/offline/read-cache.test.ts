@@ -9,7 +9,7 @@
  * `setupOfflineStorage()` to get a clean slate between runs.
  *
  * Key invariants under test:
- *   - Allowlisted keys (offline.customer_form_options) are persisted to
+ *   - Allowlisted keys (offline.customer_form_options:<profile>) are persisted to
  *     Dexie and survive a fresh instance (i.e. a page reload).
  *   - Non-allowlisted keys (e.g. get_customer_names) are memory-only and
  *     never reach the unencrypted metadata table.
@@ -28,7 +28,7 @@ import {
 import { db } from "@/offline/db";
 
 // Stable allowlisted key used throughout the DexieMetadataReadCache tests.
-const DURABLE_KEY = "offline.customer_form_options";
+const DURABLE_KEY = "offline.customer_form_options:Test Profile";
 // A non-allowlisted key that represents a PII-containing endpoint.
 const NON_DURABLE_KEY = "pospire.pospire.api.posapp.get_customer_names::{}";
 

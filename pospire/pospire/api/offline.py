@@ -27,6 +27,13 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, get_datetime, now
 
+from pospire.pospire.api.customer import (
+	IDENTIFIER_FIELDS,
+	find_customer_by_identifier,
+	get_allowed_customer_groups,
+	get_default_customer_group,
+	get_identifier,
+)
 from pospire.pospire.api.posapp import submit_sales_invoice
 from pospire.pospire.api.stock_reconcile import ensure_typed_batches_exist_for_invoice
 
@@ -229,7 +236,11 @@ def _server_build_hash() -> str:
 
 
 def _existing_by_offline_id(doctype: str, offline_id: str) -> str | None:
-	return frappe.db.get_value(doctype, {"pos_offline_id": offline_id}, "name")
+	name = frappe.db.get_value(doctype, {"pos_offline_id": offline_id}, "name")
+	if not name and doctype == "Customer":
+		# Sync matched this offline-created customer to an existing one (create_customer).
+		name = frappe.db.get_value("POS Customer Alias", offline_id, "customer")
+	return name
 
 
 def _idempotent_submit(
@@ -654,10 +665,10 @@ def _acting_as_user(owner_user: str | None) -> Iterator[None]:
 		# validated above (existence + enabled); session is restored in
 		# the finally block. Audited pattern, not a privilege-escalation
 		# path.
-		frappe.set_user(owner_user)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
+		frappe.set_user(owner_user)  # nosemgrep: frappe-setuser
 		yield
 	finally:
-		frappe.set_user(original)  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
+		frappe.set_user(original)  # nosemgrep: frappe-setuser
 
 
 @contextlib.contextmanager
@@ -870,7 +881,7 @@ def _resolve_customer_by_offline_id(customer_offline_id: str | None) -> str | No
 	if not customer_offline_id:
 		return None
 	_validate_uuid(customer_offline_id, "customer_offline_id")
-	name = frappe.db.get_value("Customer", {"pos_offline_id": customer_offline_id}, "name")
+	name = _existing_by_offline_id("Customer", customer_offline_id)
 	if not name:
 		_throw(
 			ERROR_PARENT_NOT_READY,
@@ -968,7 +979,7 @@ def is_offline_enabled() -> dict[str, Any]:
 
 
 @frappe.whitelist()
-def get_customer_form_options() -> dict[str, list[str]]:
+def get_customer_form_options(pos_profile: str | None = None) -> dict[str, Any]:
 	"""Reference data for the offline-capable Create / Update Customer dialog.
 
 	The dialog needs three lists to render its dropdowns: Customer Group,
@@ -979,7 +990,7 @@ def get_customer_form_options() -> dict[str, list[str]]:
 	couldn't create a walk-in customer.
 
 	This endpoint returns all three lists in one shot. The frontend caches
-	the response under a stable cache key (`offline.customer_form_options`)
+	the response per profile (`offline.customer_form_options:<pos profile>`)
 	so a single online fetch warms the cache for the rest of the session;
 	subsequent dialog opens — including offline ones — read from cache and
 	the dropdowns render normally.
@@ -1022,9 +1033,13 @@ def get_customer_form_options() -> dict[str, list[str]]:
 		)
 	]
 	return {
-		"customer_groups": customer_groups,
+		# A profile with customer groups only offers those, so new customers stay findable in its picker.
+		"customer_groups": get_allowed_customer_groups(pos_profile) or customer_groups,
 		"territories": territories,
 		"genders": genders,
+		"default_customer_group": get_default_customer_group(pos_profile),
+		"default_territory": frappe.db.get_single_value("Selling Settings", "territory"),
+		"customer_identifier": get_identifier(),
 	}
 
 
@@ -2002,14 +2017,42 @@ def create_customer(data: dict | str, offline_id: str, device_id: str) -> dict[s
 			{"field": "owner_user"},
 		)
 
-	return _idempotent_submit(
-		"Customer",
-		payload,
-		offline_id,
-		device_id=device_id,
-		submit=False,
-		owner_user=owner_user,
-	)
+	# Customer Identifier set: attach to the existing customer instead of creating a duplicate.
+	identifier_field = IDENTIFIER_FIELDS.get(get_identifier())
+	identifier_value = payload.get(identifier_field) if identifier_field else None
+	if not _existing_by_offline_id("Customer", offline_id):
+		match = find_customer_by_identifier(identifier_value)
+		if match:
+			return _alias_customer(offline_id, match, device_id)
+	try:
+		return _idempotent_submit(
+			"Customer",
+			payload,
+			offline_id,
+			device_id=device_id,
+			submit=False,
+			owner_user=owner_user,
+		)
+	except frappe.UniqueValidationError:
+		# Another till synced the same customer between our lookup and insert.
+		frappe.db.rollback()
+		match = find_customer_by_identifier(identifier_value)
+		if not match:
+			raise
+		return _alias_customer(offline_id, match, device_id)
+
+
+def _alias_customer(offline_id: str, customer: str, device_id: str) -> dict[str, Any]:
+	if not frappe.db.exists("POS Customer Alias", offline_id):
+		frappe.get_doc(
+			{
+				"doctype": "POS Customer Alias",
+				"offline_id": offline_id,
+				"customer": customer,
+				"device_id": device_id,
+			}
+		).insert(ignore_permissions=True)
+	return {"name": customer, "was_already_submitted": True, "docstatus": 0, "matched_existing": True}
 
 
 @frappe.whitelist()
